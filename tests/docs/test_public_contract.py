@@ -20,6 +20,7 @@ EXPECTED_TOOLS = {
     "list_inbox",
     "update_inbox_item",
     "explain_inbox_item",
+    "summarize_listening_history",
 }
 
 
@@ -226,6 +227,8 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend data export music-friend-export.json",
         "music-friend data backup music-friend-backup.json",
         "music-friend data import music-friend-export.json",
+        "music-friend data import-spotify my_spotify_data.zip --dry-run --json",
+        "music-friend data import-spotify my_spotify_data.zip --json",
         "music-friend data restore music-friend-backup.json",
         "music-friend data delete",
         "music-friend schedule status --json",

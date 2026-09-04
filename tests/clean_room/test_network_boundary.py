@@ -121,7 +121,7 @@ def test_named_child_validators_reject_shaped_bypasses(tmp_path: Path) -> None:
         f"catalog = Catalog.open(Path({str(allowed / 'catalog.sqlite3')!r})); "
         "assert catalog._connection.execute("
         "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]; catalog.close()"
+        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]; catalog.close()"
     )
     shaped_bypasses = (
         (python, "-m", "build", "--arbitrary", str(allowed)),

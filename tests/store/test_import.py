@@ -506,7 +506,7 @@ def test_export_import_round_trip_preserves_interested_record_without_live_sourc
     "mutate",
     [
         lambda value: value.update(format="wrong"),
-        lambda value: value.update(version=4),
+        lambda value: value.update(version=5),
         lambda value: value.update(version=True),
         lambda value: value.update(exported_at="2026-09-01T12:00:00"),
         lambda value: value["records"].append(dict(value["records"][0])),

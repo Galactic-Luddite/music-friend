@@ -31,6 +31,8 @@ Choose a destination you control, then run one of these local commands:
 music-friend data export music-friend-export.json
 music-friend data backup music-friend-backup.json
 music-friend data import music-friend-export.json
+music-friend data import-spotify my_spotify_data.zip --dry-run --json
+music-friend data import-spotify my_spotify_data.zip --json
 music-friend data restore music-friend-backup.json
 music-friend data delete
 ```
@@ -41,6 +43,12 @@ catalog data only: provider credentials remain. After deletion, run `music-frien
 to remove the Spotify credential, then rerun setup with `-` at the Ticketmaster key prompt to remove
 the Ticketmaster credential. In other words, disconnect Spotify separately before discarding the
 local installation.
+
+The Spotify importer accepts the ZIP from Spotify's extended streaming-history export. It imports
+music-track plays only, retains brief and skipped plays as labeled evidence, ignores video,
+podcast, and audiobook records, and never stores IP address, device, or connection-country fields.
+Run `--dry-run` first to validate the complete archive and see aggregate counts without writing
+plays. Reimporting the same archive is safe and reports existing records as duplicates.
 
 ## Optional schedule
 

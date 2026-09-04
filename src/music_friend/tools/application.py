@@ -47,6 +47,12 @@ from music_friend.store.portable import (
     import_catalog,
     purge_source,
 )
+from music_friend.store.spotify_history import (
+    HistorySummary,
+    SpotifyHistoryImportResult,
+    import_spotify_history,
+    summarize_history,
+)
 from music_friend.tools.catalog_sync import synchronize_catalog
 from music_friend.tools.event_discovery import discover_ticketmaster_events
 from music_friend.tools.release_discovery import discover_releases
@@ -283,6 +289,16 @@ class MusicFriendApplication:
             max_bytes=max_bytes,
             max_records=max_records,
         )
+
+    def import_spotify_history(
+        self, source: Path, *, dry_run: bool = False
+    ) -> SpotifyHistoryImportResult:
+        return import_spotify_history(self._catalog, source, dry_run=dry_run)
+
+    def summarize_history(
+        self, *, since: str | None = None, until: str | None = None, limit: int = 10
+    ) -> HistorySummary:
+        return summarize_history(self._catalog, since=since, until=until, limit=limit)
 
     def purge_source(self, source: str) -> PurgeResult:
         return purge_source(self._catalog, source)

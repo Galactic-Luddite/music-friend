@@ -225,8 +225,26 @@ def test_clean_install_subprocesses_run_in_the_temporary_workspace(
                 self.initialized = True
             elif request.get("id") == 2 and self.initialized:
                 self.tool_listed = True
+                tool_names = [
+                    "music_status",
+                    "refresh_music",
+                    "search_catalog",
+                    "list_watchlist",
+                    "update_watchlist",
+                    "list_inbox",
+                    "update_inbox_item",
+                    "explain_inbox_item",
+                    "summarize_listening_history",
+                ]
                 self.stdout.messages.put(
-                    json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{}] * 8}}) + "\n"
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": {"tools": [{"name": name} for name in tool_names]},
+                        }
+                    )
+                    + "\n"
                 )
             elif request.get("id") == 3 and self.tool_listed:
                 self.stdout.messages.put(
@@ -311,6 +329,7 @@ def test_clean_install_script_uses_an_offline_fresh_venv_and_local_smoke_flow() 
         '"--no-index"',
         '"--find-links"',
         '"music_status"',
+        '"summarize_listening_history"',
         "music-friend-mcp",
         '"initialize"',
         '"tools/list"',

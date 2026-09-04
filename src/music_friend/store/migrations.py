@@ -45,6 +45,10 @@ def bundled_migrations() -> tuple[Migration, ...]:
             7,
             schema.joinpath("007_source_limits.sql").read_text(encoding="utf-8"),
         ),
+        Migration(
+            8,
+            schema.joinpath("008_listening_history.sql").read_text(encoding="utf-8"),
+        ),
     )
 
 
