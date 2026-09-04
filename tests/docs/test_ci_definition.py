@@ -66,6 +66,8 @@ def test_local_validation_covers_supported_platforms_and_release_checks() -> Non
     clean_room = workflow.split("  clean-room:", 1)[1]
     assert '--dest "$RUNNER_TEMP/wheelhouse"' in clean_room
     assert '--wheelhouse "$RUNNER_TEMP/wheelhouse"' in clean_room
+    assert "if: failure()" in clean_room
+    assert 'cat "$RUNNER_TEMP/music-friend-clean-room.json"' in clean_room
 
 
 def test_dependabot_checks_actions_and_python_dependencies_weekly() -> None:

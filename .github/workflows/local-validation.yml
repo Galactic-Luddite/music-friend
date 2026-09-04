@@ -127,3 +127,11 @@ jobs:
             --wheelhouse "$RUNNER_TEMP/wheelhouse" \
             --result "$RUNNER_TEMP/music-friend-clean-room.json" \
             --commit "$commit"
+      - name: Report bounded clean-room failure
+        if: failure()
+        run: |
+          if [[ -f "$RUNNER_TEMP/music-friend-clean-room.json" ]]; then
+            cat "$RUNNER_TEMP/music-friend-clean-room.json"
+          else
+            printf '%s\n' 'clean-room result was not created'
+          fi
