@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
 import re
 import stat
 import zipfile
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 
 from music_friend.store.catalog import Catalog
 

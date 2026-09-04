@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import zipfile
+from pathlib import Path
 
 import pytest
 
 from music_friend.store import Catalog
-from music_friend.store.spotify_history import import_spotify_history, summarize_history
 from music_friend.store.portable import export_catalog, import_catalog, purge_source
+from music_friend.store.spotify_history import import_spotify_history, summarize_history
 
 
 def _archive(path: Path, records: list[dict[str, object]], *, name: str = "Streaming_History_Audio_2026.json") -> Path:
