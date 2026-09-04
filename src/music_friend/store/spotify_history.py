@@ -14,7 +14,6 @@ from pathlib import Path, PurePosixPath
 
 from music_friend.store.catalog import Catalog
 
-
 _AUDIO_MEMBER = re.compile(
     r"Spotify Extended Streaming History/Streaming_History_Audio_\d{4}(?:_\d+)?\.json\Z"
 )
