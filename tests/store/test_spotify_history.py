@@ -52,6 +52,31 @@ def _track(**changes: object) -> dict[str, object]:
     return record
 
 
+def test_history_window_survives_backup_restore_and_fractional_seconds(tmp_path: Path) -> None:
+    source = _archive(
+        tmp_path / "history.zip",
+        [
+            _track(),
+            _track(ts="2026-01-02T03:04:05.500000Z"),
+        ],
+    )
+    with Catalog.open(tmp_path / "original.sqlite3") as catalog:
+        import_spotify_history(catalog, source)
+        expected = summarize_history(
+            catalog, since="2026-01-02T03:04:05Z", until="2026-01-02T03:04:05.500000Z"
+        )
+        assert expected.play_count == 1
+        export_catalog(catalog, tmp_path / "backup")
+    with Catalog.open(tmp_path / "restored.sqlite3") as catalog:
+        import_catalog(catalog, tmp_path / "backup")
+        assert (
+            summarize_history(
+                catalog, since="2026-01-02T03:04:05Z", until="2026-01-02T03:04:05.500000Z"
+            )
+            == expected
+        )
+
+
 def test_import_keeps_music_plays_and_excludes_non_music_and_sensitive_fields(
     tmp_path: Path,
 ) -> None:

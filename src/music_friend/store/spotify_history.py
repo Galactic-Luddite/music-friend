@@ -209,8 +209,12 @@ def import_spotify_history(
             duplicates=len(rows) - imported,
             non_music=non_music,
             member_count=len(members),
-            first_played_at=min(dates) if dates else None,
-            last_played_at=max(dates) if dates else None,
+            first_played_at=min(dates, key=lambda value: value.replace("Z", "+00:00"))
+            if dates
+            else None,
+            last_played_at=max(dates, key=lambda value: value.replace("Z", "+00:00"))
+            if dates
+            else None,
         )
     except (
         OSError,
@@ -235,21 +239,21 @@ def summarize_history(
     if (
         normalized_since is not None
         and normalized_until is not None
-        and normalized_since >= normalized_until
+        and normalized_since.replace("Z", "+00:00") >= normalized_until.replace("Z", "+00:00")
     ):
         raise ValueError("since must be before until")
     clauses: list[str] = []
     arguments: list[object] = []
     if normalized_since is not None:
-        clauses.append("played_at >= ?")
-        arguments.append(normalized_since)
+        clauses.append("replace(played_at, 'Z', '+00:00') >= ?")
+        arguments.append(normalized_since.replace("Z", "+00:00"))
     if normalized_until is not None:
-        clauses.append("played_at < ?")
-        arguments.append(normalized_until)
+        clauses.append("replace(played_at, 'Z', '+00:00') < ?")
+        arguments.append(normalized_until.replace("Z", "+00:00"))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     connection = catalog._require_connection()
     aggregate = connection.execute(
-        f"""SELECT MIN(played_at), MAX(played_at), COUNT(*), COALESCE(SUM(milliseconds_played), 0),
+        f"""SELECT MIN(replace(played_at, 'Z', '+00:00')), MAX(replace(played_at, 'Z', '+00:00')), COUNT(*), COALESCE(SUM(milliseconds_played), 0),
                    COALESCE(SUM(CASE WHEN skipped = 1 THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE WHEN milliseconds_played < ? THEN 1 ELSE 0 END), 0)
             FROM listening_history{where}""",
@@ -268,8 +272,8 @@ def summarize_history(
     return HistorySummary(
         since=normalized_since,
         until=normalized_until,
-        first_played_at=None if aggregate[0] is None else str(aggregate[0]),
-        last_played_at=None if aggregate[1] is None else str(aggregate[1]),
+        first_played_at=None if aggregate[0] is None else str(aggregate[0]).replace("+00:00", "Z"),
+        last_played_at=None if aggregate[1] is None else str(aggregate[1]).replace("+00:00", "Z"),
         play_count=int(aggregate[2]),
         milliseconds_played=int(aggregate[3]),
         skipped_count=int(aggregate[4]),

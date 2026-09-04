@@ -1355,7 +1355,9 @@ def _replay(
                 (
                     str(record["local_id"]),
                     _text(record["source"], "source"),
-                    _datetime(record["played_at"], "played_at").isoformat(),
+                    _datetime(record["played_at"], "played_at")
+                    .astimezone(timezone.utc)
+                    .isoformat(),
                     milliseconds,
                     _text(record["track_uri"], "track_uri"),
                     _text(record["track_name"], "track_name"),
