@@ -59,7 +59,7 @@ def test_pytest_summary_is_deduplicated_sorted_and_limited(tmp_path: Path) -> No
 
 
 def test_nested_stages_accept_only_valid_failure_receipts(tmp_path: Path) -> None:
-    valid = tmp_path / "case" / "success.json"
+    valid = tmp_path / "test_harness_success_is_offlin0" / "success.json"
     valid.parent.mkdir()
     valid.write_text(
         json.dumps(
@@ -73,7 +73,7 @@ def test_nested_stages_accept_only_valid_failure_receipts(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
-    invalid = tmp_path / "other" / "success.json"
+    invalid = tmp_path / "test_harness_success_is_offlin1" / "success.json"
     invalid.parent.mkdir()
     invalid.write_text(
         json.dumps(
@@ -88,6 +88,12 @@ def test_nested_stages_accept_only_valid_failure_receipts(tmp_path: Path) -> Non
     )
 
     assert _reporter().nested_failure_stages(tmp_path) == ["scan-artifacts"]
+
+    fixture = tmp_path / "fixture" / "success.json"
+    fixture.parent.mkdir()
+    fixture.write_bytes(valid.read_bytes())
+    valid.unlink()
+    assert _reporter().nested_failure_stages(tmp_path) == []
 
 
 def test_missing_or_malformed_inputs_produce_empty_diagnostics(tmp_path: Path) -> None:

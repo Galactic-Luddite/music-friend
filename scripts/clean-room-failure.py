@@ -35,7 +35,9 @@ def pytest_failures(path: Path) -> list[str]:
 def nested_failure_stages(root: Path) -> list[str]:
     """Return validated stage names from bounded nested certification receipts."""
     try:
-        receipts = sorted(root.glob("**/success.json"))[: _MAX_RECEIPTS + 1]
+        receipts = sorted(root.glob("test_harness_success_is_offlin*/success.json"))[
+            : _MAX_RECEIPTS + 1
+        ]
     except OSError:
         return []
     if len(receipts) > _MAX_RECEIPTS:
