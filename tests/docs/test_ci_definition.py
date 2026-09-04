@@ -18,7 +18,7 @@ def test_local_validation_covers_supported_platforms_and_release_checks() -> Non
         "windows-latest",
         '"3.10"',
         '"3.14"',
-        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
         "gitleaks_8.18.4_linux_x64.tar.gz",
         "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d",
