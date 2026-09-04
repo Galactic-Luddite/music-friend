@@ -15,6 +15,18 @@ import threading
 import time
 from pathlib import Path
 
+_EXPECTED_MCP_TOOLS = (
+    "music_status",
+    "refresh_music",
+    "search_catalog",
+    "list_watchlist",
+    "update_watchlist",
+    "list_inbox",
+    "update_inbox_item",
+    "explain_inbox_item",
+    "summarize_listening_history",
+)
+
 
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -88,7 +100,12 @@ def _assert_mcp_smoke(messages: tuple[dict[str, object], ...]) -> None:
     by_id = {message["id"]: message for message in messages}
     tools = by_id[2].get("result", {}).get("tools")
     status = by_id[3].get("result", {}).get("structuredContent", {}).get("status")
-    if not isinstance(tools, list) or len(tools) != 8 or status != "ready":
+    tool_names = (
+        [tool.get("name") for tool in tools if isinstance(tool, dict)]
+        if isinstance(tools, list)
+        else []
+    )
+    if tool_names != list(_EXPECTED_MCP_TOOLS) or status != "ready":
         raise ValueError("MCP smoke check returned an invalid result")
 
 
