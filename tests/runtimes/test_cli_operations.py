@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,17 @@ class _DataApplication:
 
     def delete_data(self) -> None:
         self.calls.append(("delete", None))
+
+    def import_spotify_history(self, path: Path, *, dry_run: bool = False) -> object:
+        self.calls.append(("import_spotify_history", (path, dry_run)))
+        return SimpleNamespace(
+            imported=12,
+            duplicates=3,
+            non_music=4,
+            member_count=2,
+            first_played_at="2011-01-01T00:00:00Z",
+            last_played_at="2026-01-01T00:00:00Z",
+        )
 
 
 def _run(argv: list[str], application: object, **kwargs: object) -> tuple[int, str, str]:
@@ -133,6 +145,26 @@ def test_data_command_rejects_unknown_shapes_without_touching_local_data() -> No
     assert stdout == ""
     assert stderr.startswith("Usage: music-friend")
     assert application.calls == []
+
+
+@pytest.mark.parametrize("dry_run", (False, True))
+def test_spotify_history_import_reports_bounded_counts(dry_run: bool) -> None:
+    application = _DataApplication()
+    argv = ["data", "import-spotify", "spotify.zip"]
+    if dry_run:
+        argv.append("--dry-run")
+    argv.append("--json")
+
+    result, stdout, stderr = _run(argv, application)
+
+    assert result == 0
+    assert stderr == ""
+    assert application.calls == [
+        ("import_spotify_history", (Path("spotify.zip"), dry_run))
+    ]
+    payload = json.loads(stdout)
+    assert payload["imported"] == 12
+    assert payload["non_music"] == 4
 
 
 def test_cli_redacts_application_failures_and_closes_default_application(

@@ -29,6 +29,9 @@ signature, status footer, or advice to retry unless the local result specificall
   states are `unread`, `saved`, or `dismissed`; change the state only through
   `update_inbox_item` after the person says what they want. An explicit `save it` authorizes
   setting the state to `saved` once the item identity is known and it has been explained.
+- For historical listening questions, call `summarize_listening_history` with an explicit UTC
+  range when the person names one. State the returned evidence boundary and do not reinterpret
+  play counts as approved preferences.
 
 Summarize results as local information. Event links are for discovery; never purchase tickets or
 complete a transaction.
@@ -39,5 +42,6 @@ Never ask for, accept, repeat, or place credentials in this conversation. Do not
 connection, credential storage, schedules, import, restore, backup, or deletion. Direct the person
 to the local CLI and the setup and operations guides for those tasks.
 
-Do not claim that a model runtime is an MCP client merely because it can use OpenAI-compatible tool
+Spotify extended-history archives are imported only through the local CLI's `data import-spotify`
+command. Do not claim that a model runtime is an MCP client merely because it can use OpenAI-compatible tool
 calls. A host performs the tool-call bridge.

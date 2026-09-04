@@ -64,7 +64,8 @@ AuthorizerFactory = Callable[
 _USAGE = (
     "Usage: music-friend setup | connect spotify | disconnect spotify | status | "
     "refresh catalog|releases|events|all | watchlist list | inbox list|show | "
-    "data export|import|backup|restore|delete | diagnostics | schedule install|status|remove | version\n"
+    "data export|import|import-spotify|backup|restore|delete | diagnostics | "
+    "schedule install|status|remove | version\n"
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
 )
@@ -725,6 +726,25 @@ def _data_command(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
+    if len(argv) in {2, 3} and argv[0] == "import-spotify" and (
+        len(argv) == 2 or argv[2] == "--dry-run"
+    ):
+        dry_run = len(argv) == 3
+        result = application.import_spotify_history(Path(argv[1]), dry_run=dry_run)
+        return _emit(
+            {
+                "duplicates": result.duplicates,
+                "first_played_at": result.first_played_at,
+                "imported": result.imported,
+                "last_played_at": result.last_played_at,
+                "members": result.member_count,
+                "non_music": result.non_music,
+                "status": "validated" if dry_run else "imported",
+            },
+            structured,
+            stdout,
+            text="Spotify history validated." if dry_run else "Spotify history imported.",
+        )
     if len(argv) == 2 and argv[0] in {"export", "backup"}:
         return _emit(
             {"records": application.export_data(Path(argv[1])).record_count},

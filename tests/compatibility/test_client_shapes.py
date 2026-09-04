@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "list_inbox",
     "update_inbox_item",
     "explain_inbox_item",
+    "summarize_listening_history",
 }
 
 

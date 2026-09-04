@@ -39,7 +39,7 @@ a runtime discovery mechanism.
 
 ## Tool surface
 
-Music Friend exposes exactly these eight tools:
+Music Friend exposes exactly these nine tools:
 
 - `music_status`
 - `refresh_music`
@@ -49,6 +49,7 @@ Music Friend exposes exactly these eight tools:
 - `list_inbox`
 - `update_inbox_item`
 - `explain_inbox_item`
+- `summarize_listening_history`
 
 The server uses stdio. The tools work with local identifiers and bounded arguments rather than raw
 provider identifiers.
@@ -86,3 +87,10 @@ the advertised tools.
 
 vLLM and Ollama can be used through a client that supports an OpenAI-compatible function-call loop.
 Compatibility depends on that client and its configuration.
+
+## Listening-history evidence
+
+`summarize_listening_history` answers bounded historical questions from locally imported Spotify
+music plays. Supply nullable UTC `since` and `until` timestamps and a ranking limit from 1 through
+50. The result identifies its evidence boundary, covered dates, play time, brief/skipped counts,
+and top artists and tracks. Imported plays remain separate from preferences and watchlist affinity.

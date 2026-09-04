@@ -76,6 +76,7 @@ include = [
 "src/music_friend/store/schema/005_release_check_continuations.sql" = "music_friend/store/schema/005_release_check_continuations.sql"
 "src/music_friend/store/schema/006_event_discovery.sql" = "music_friend/store/schema/006_event_discovery.sql"
 "src/music_friend/store/schema/007_source_limits.sql" = "music_friend/store/schema/007_source_limits.sql"
+"src/music_friend/store/schema/008_listening_history.sql" = "music_friend/store/schema/008_listening_history.sql"
 
 [tool.mypy]
 files = ["src/music_friend"]

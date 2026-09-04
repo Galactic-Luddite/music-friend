@@ -215,7 +215,7 @@ def test_cli_help_lists_the_complete_operational_command_surface(tmp_path: Path)
         "refresh catalog|releases|events|all",
         "watchlist list",
         "inbox list|show",
-        "data export|import|backup|restore|delete",
+        "data export|import|import-spotify|backup|restore|delete",
         "diagnostics",
         "schedule install|status|remove",
         "version",
