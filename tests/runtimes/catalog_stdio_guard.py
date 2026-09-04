@@ -33,7 +33,7 @@ class FixtureGuard:
         self._replace(socket, "getaddrinfo", self._deny)
         self._replace(socket, "gethostbyname", self._deny)
         self._replace(socket, "gethostbyname_ex", self._deny)
-        self._replace(subprocess, "Popen", self._deny)
+        self._replace(subprocess, "Popen", self._guarded_popen_type())
         self._replace(subprocess, "run", self._deny)
         self._replace(subprocess, "call", self._deny)
         self._replace(subprocess, "check_call", self._deny)
@@ -54,6 +54,9 @@ class FixtureGuard:
             self._replace_if_present(os, name, self._deny)
         self._replace(builtins, "open", self._open)
         self._replace(io, "open", self._open)
+        accessor = getattr(Path("."), "_accessor", None)
+        if accessor is not None:
+            self._replace(type(accessor), "open", self._open)
         self._replace(os, "open", self._os_open)
         self._replace(os, "close", self._close)
         self._replace(os, "mkdir", self._mkdir)
@@ -139,6 +142,15 @@ class FixtureGuard:
                 return original.__new__(cls, family, type, proto, fileno)
 
         return GuardedSocket
+
+    def _guarded_popen_type(self) -> type[subprocess.Popen[Any]]:
+        original = subprocess.Popen
+
+        class GuardedPopen(original):
+            def __new__(cls, *args: object, **kwargs: object) -> subprocess.Popen[Any]:
+                raise FixtureBoundaryError("fixture side effect denied")
+
+        return GuardedPopen
 
     def _open(self, file: object, mode: str = "r", *args: object, **kwargs: object) -> object:
         if any(value in mode for value in "wax+") and not isinstance(file, int):

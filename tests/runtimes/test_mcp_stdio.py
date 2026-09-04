@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from music_friend.providers.credentials import CredentialKey, CredentialStoreError
 from music_friend.runtimes import mcp_stdio
 
 
@@ -347,6 +348,42 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
     assert [call["kind"] for call in refresh_calls] == ["events", "catalog", "releases", "all"]
     assert refresh_calls[0]["source"] is None
     assert all(call["source"] is source for call in refresh_calls[1:])
+
+
+def test_catalog_stdio_session_starts_without_an_available_native_credential_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A headless Linux session remains usable for local status before credentials exist."""
+    application = _CloseRecorder()
+    event_transport = _CloseRecorder()
+    server = _Server()
+
+    class EventClientFactory:
+        def __new__(cls, _transport: object, store: object, *, now: object) -> object:
+            assert callable(now)
+            with pytest.raises(CredentialStoreError):
+                store.load(CredentialKey("ticketmaster", "discovery"))  # type: ignore[attr-defined]
+            return object()
+
+    def unavailable_store() -> object:
+        raise CredentialStoreError()
+
+    monkeypatch.setattr(mcp_stdio.Catalog, "open", lambda path: path)
+    monkeypatch.setattr(mcp_stdio, "MusicFriendApplication", lambda _catalog: application)
+    monkeypatch.setattr(mcp_stdio, "TicketmasterTransport", lambda _connector: event_transport)
+    monkeypatch.setattr(mcp_stdio, "TicketmasterDiscoveryClient", EventClientFactory)
+    monkeypatch.setattr(mcp_stdio, "create_music_server", lambda _application, refresh: server)
+
+    mcp_stdio.run_catalog_stdio_session(
+        config=mcp_stdio.LocalConfig(),
+        catalog_path=tmp_path / "catalog.sqlite3",
+        connector_factory=object,
+        credential_store_factory=unavailable_store,  # type: ignore[arg-type]
+    )
+
+    assert server.transports == ["stdio"]
+    assert event_transport.closes == 1
+    assert application.closes == 1
 
 
 @pytest.mark.parametrize(
