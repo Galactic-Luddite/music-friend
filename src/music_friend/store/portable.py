@@ -747,7 +747,9 @@ def _source_text(value: object, *, maximum: int = 4096) -> str:
 def _datetime(value: object, name: str) -> datetime:
     text = _text(value, name)
     try:
-        parsed = datetime.fromisoformat(text)
+        # Python 3.10 does not accept the ISO 8601 UTC designator even though
+        # newer supported versions do. Normalize it to the equivalent offset.
+        parsed = datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith("Z") else text)
     except ValueError as error:
         raise ValueError(f"{name} is invalid") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
