@@ -1312,15 +1312,33 @@ def _replay(
                 record,
                 frozenset(
                     {
-                        "kind", "local_id", "source", "played_at", "milliseconds_played",
-                        "track_uri", "track_name", "artist_name", "album_name", "reason_start",
-                        "reason_end", "shuffle", "skipped", "offline", "incognito",
-                        "archive_digest", "imported_at",
+                        "kind",
+                        "local_id",
+                        "source",
+                        "played_at",
+                        "milliseconds_played",
+                        "track_uri",
+                        "track_name",
+                        "artist_name",
+                        "album_name",
+                        "reason_start",
+                        "reason_end",
+                        "shuffle",
+                        "skipped",
+                        "offline",
+                        "incognito",
+                        "archive_digest",
+                        "imported_at",
                     }
                 ),
             )
-            boolean_values = [record[name] for name in ("shuffle", "skipped", "offline", "incognito")]
-            if any(value not in (None, 0, 1) or type(value) not in (int, type(None)) for value in boolean_values):
+            boolean_values = [
+                record[name] for name in ("shuffle", "skipped", "offline", "incognito")
+            ]
+            if any(
+                value not in (None, 0, 1) or type(value) not in (int, type(None))
+                for value in boolean_values
+            ):
                 raise ValueError("listening history boolean is invalid")
             milliseconds = _integer(record["milliseconds_played"], "milliseconds_played")
             if milliseconds < 0:
@@ -1333,8 +1351,10 @@ def _replay(
                     incognito, archive_digest, imported_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    str(record["local_id"]), _text(record["source"], "source"),
-                    _datetime(record["played_at"], "played_at").isoformat(), milliseconds,
+                    str(record["local_id"]),
+                    _text(record["source"], "source"),
+                    _datetime(record["played_at"], "played_at").isoformat(),
+                    milliseconds,
                     _text(record["track_uri"], "track_uri"),
                     _text(record["track_name"], "track_name"),
                     _text(record["artist_name"], "artist_name"),

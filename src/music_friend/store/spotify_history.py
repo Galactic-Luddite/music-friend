@@ -156,7 +156,11 @@ def import_spotify_history(
     try:
         path = Path(source)
         metadata = path.stat()
-        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_ARCHIVE_BYTES:
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > _MAX_ARCHIVE_BYTES
+        ):
             raise ValueError
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         imported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -189,7 +193,7 @@ def import_spotify_history(
         else:
             with catalog.transaction():
                 connection.executemany(
-                """
+                    """
                 INSERT OR IGNORE INTO listening_history (
                     event_id, source, played_at, milliseconds_played, track_uri, track_name,
                     artist_name, album_name, reason_start, reason_end, shuffle, skipped, offline,
@@ -208,7 +212,15 @@ def import_spotify_history(
             first_played_at=min(dates) if dates else None,
             last_played_at=max(dates) if dates else None,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile, KeyError, TypeError, ValueError):
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
         raise ValueError("invalid Spotify history archive") from None
 
 
@@ -220,7 +232,11 @@ def summarize_history(
         raise ValueError("limit must be from 1 through 50")
     normalized_since = None if since is None else _timestamp(since, "since")
     normalized_until = None if until is None else _timestamp(until, "until")
-    if normalized_since is not None and normalized_until is not None and normalized_since >= normalized_until:
+    if (
+        normalized_since is not None
+        and normalized_until is not None
+        and normalized_since >= normalized_until
+    ):
         raise ValueError("since must be before until")
     clauses: list[str] = []
     arguments: list[object] = []

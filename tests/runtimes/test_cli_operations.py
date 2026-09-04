@@ -159,9 +159,7 @@ def test_spotify_history_import_reports_bounded_counts(dry_run: bool) -> None:
 
     assert result == 0
     assert stderr == ""
-    assert application.calls == [
-        ("import_spotify_history", (Path("spotify.zip"), dry_run))
-    ]
+    assert application.calls == [("import_spotify_history", (Path("spotify.zip"), dry_run))]
     payload = json.loads(stdout)
     assert payload["imported"] == 12
     assert payload["non_music"] == 4

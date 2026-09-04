@@ -145,9 +145,16 @@ def test_listening_history_summary_names_its_evidence_boundary(tmp_path: Path) -
             artist_name, album_name, archive_digest, imported_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            "event-1", "spotify-history", "2026-01-02T03:04:05Z", 123000,
-            "spotify:track:one", "Track One", "Artist One", "Album One",
-            "digest", "2026-09-04T00:00:00Z",
+            "event-1",
+            "spotify-history",
+            "2026-01-02T03:04:05Z",
+            123000,
+            "spotify:track:one",
+            "Track One",
+            "Artist One",
+            "Album One",
+            "digest",
+            "2026-09-04T00:00:00Z",
         ),
     )
     server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)

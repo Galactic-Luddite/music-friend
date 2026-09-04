@@ -11,7 +11,9 @@ from music_friend.store.portable import export_catalog, import_catalog, purge_so
 from music_friend.store.spotify_history import import_spotify_history, summarize_history
 
 
-def _archive(path: Path, records: list[dict[str, object]], *, name: str = "Streaming_History_Audio_2026.json") -> Path:
+def _archive(
+    path: Path, records: list[dict[str, object]], *, name: str = "Streaming_History_Audio_2026.json"
+) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
             f"Spotify Extended Streaming History/{name}",
@@ -50,7 +52,9 @@ def _track(**changes: object) -> dict[str, object]:
     return record
 
 
-def test_import_keeps_music_plays_and_excludes_non_music_and_sensitive_fields(tmp_path: Path) -> None:
+def test_import_keeps_music_plays_and_excludes_non_music_and_sensitive_fields(
+    tmp_path: Path,
+) -> None:
     source = _archive(
         tmp_path / "spotify.zip",
         [
@@ -68,12 +72,16 @@ def test_import_keeps_music_plays_and_excludes_non_music_and_sensitive_fields(tm
     )
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         result = import_spotify_history(catalog, source)
-        row = catalog._require_connection().execute(
-            "SELECT track_name, artist_name, album_name, skipped FROM listening_history"
-        ).fetchone()
+        row = (
+            catalog._require_connection()
+            .execute("SELECT track_name, artist_name, album_name, skipped FROM listening_history")
+            .fetchone()
+        )
         columns = {
             str(item[1])
-            for item in catalog._require_connection().execute("PRAGMA table_info(listening_history)")
+            for item in catalog._require_connection().execute(
+                "PRAGMA table_info(listening_history)"
+            )
         }
 
     assert result.imported == 1
@@ -92,7 +100,9 @@ def test_reimport_is_idempotent_but_preserves_repeated_identical_plays(tmp_path:
     assert (second.imported, second.duplicates) == (0, 2)
 
 
-def test_identity_preserves_plays_that_differ_only_in_discarded_sensitive_fields(tmp_path: Path) -> None:
+def test_identity_preserves_plays_that_differ_only_in_discarded_sensitive_fields(
+    tmp_path: Path,
+) -> None:
     source = _archive(
         tmp_path / "spotify.zip",
         [_track(platform="device one"), _track(platform="device two")],
@@ -119,9 +129,11 @@ def test_invalid_record_rolls_back_whole_archive(tmp_path: Path) -> None:
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         with pytest.raises(ValueError, match="invalid Spotify history archive"):
             import_spotify_history(catalog, source)
-        count = catalog._require_connection().execute(
-            "SELECT COUNT(*) FROM listening_history"
-        ).fetchone()[0]
+        count = (
+            catalog._require_connection()
+            .execute("SELECT COUNT(*) FROM listening_history")
+            .fetchone()[0]
+        )
 
     assert count == 0
 
@@ -131,13 +143,21 @@ def test_summary_reports_range_rankings_and_brief_skip_breakdown(tmp_path: Path)
         tmp_path / "spotify.zip",
         [
             _track(ms_played=180000),
-            _track(ts="2026-01-03T03:04:05Z", spotify_track_uri="spotify:track:two", master_metadata_track_name="Track Two", ms_played=4000, skipped=True),
+            _track(
+                ts="2026-01-03T03:04:05Z",
+                spotify_track_uri="spotify:track:two",
+                master_metadata_track_name="Track Two",
+                ms_played=4000,
+                skipped=True,
+            ),
             _track(ts="2025-01-03T03:04:05Z", ms_played=60000),
         ],
     )
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         import_spotify_history(catalog, source)
-        summary = summarize_history(catalog, since="2026-01-01T00:00:00Z", until="2027-01-01T00:00:00Z", limit=5)
+        summary = summarize_history(
+            catalog, since="2026-01-01T00:00:00Z", until="2027-01-01T00:00:00Z", limit=5
+        )
 
     assert summary.play_count == 2
     assert summary.milliseconds_played == 184000

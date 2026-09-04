@@ -726,8 +726,10 @@ def _data_command(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
-    if len(argv) in {2, 3} and argv[0] == "import-spotify" and (
-        len(argv) == 2 or argv[2] == "--dry-run"
+    if (
+        len(argv) in {2, 3}
+        and argv[0] == "import-spotify"
+        and (len(argv) == 2 or argv[2] == "--dry-run")
     ):
         dry_run = len(argv) == 3
         result = application.import_spotify_history(Path(argv[1]), dry_run=dry_run)
