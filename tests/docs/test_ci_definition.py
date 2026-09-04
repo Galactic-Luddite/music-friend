@@ -50,6 +50,7 @@ def test_local_validation_covers_supported_platforms_and_release_checks() -> Non
     source_scan = workflow.split("  source-scan:", 1)[1].split("  build-and-install:", 1)[0]
     checkout = source_scan.split("actions/checkout@", 1)[1].split("      - name:", 1)[0]
     assert "fetch-depth: 0" in checkout
+    assert "persist-credentials: false" in checkout
 
     build_gate = workflow.split("  build-and-install:", 1)[1].split("  clean-room:", 1)[0]
     for required in (
