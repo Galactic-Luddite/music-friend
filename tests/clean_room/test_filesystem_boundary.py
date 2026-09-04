@@ -54,6 +54,9 @@ def test_mutation_and_sqlite_surfaces_are_guarded_during_certification() -> None
     assert os.unlink.__name__ == "_guarded_unlink"
     assert os.symlink.__name__ == "_guarded_symlink"
     assert sqlite3.connect.__name__ == "_guarded_sqlite_connect"
+    for function in (os.open, os.mkdir, os.rename, os.link, os.unlink):
+        assert function in os.supports_dir_fd
+    assert os.link in os.supports_follow_symlinks
 
 
 @pytest.mark.parametrize(
@@ -99,3 +102,12 @@ def test_descriptor_path_resolves_open_directory(tmp_path: Path) -> None:
         assert descriptor_path(descriptor) == tmp_path.resolve()
     finally:
         os.close(descriptor)
+
+
+def test_descriptor_path_fails_closed_when_platform_lookup_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(boundaries, "fcntl", None)
+
+    with pytest.raises(BoundaryViolation, match="descriptor path unavailable"):
+        descriptor_path(-1)

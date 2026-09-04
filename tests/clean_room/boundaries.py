@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import builtins
-import fcntl
 import io
 import json
 import os
@@ -19,6 +18,11 @@ from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised by the Windows CI collector
+    fcntl = None  # type: ignore[assignment]
 
 
 class BoundaryViolation(RuntimeError):
@@ -191,6 +195,8 @@ def descriptor_path(descriptor: int) -> Path:
             return Path(os.readlink(link)).resolve(strict=False)
         except OSError:
             pass
+    if fcntl is None:
+        raise BoundaryViolation("filesystem descriptor path unavailable")
     try:
         raw = fcntl.fcntl(descriptor, 50, b"\0" * 1024)
     except OSError as error:
@@ -260,6 +266,7 @@ def _validate_named_child(
     identifier: str, argv: tuple[str, ...], cwd: Path, policy: BoundaryPolicy
 ) -> bool:
     python = str(Path(sys.executable).resolve())
+    bash = str(Path("/bin/bash").resolve())
     hatchling = str(Path(sys.executable).with_name("hatchling").resolve())
     test_root = policy.write_roots.get("pytest", policy.write_roots.get("test-temporary"))
     build_root = policy.write_roots.get("build", policy.write_roots.get("test-temporary"))
@@ -351,14 +358,15 @@ def _validate_named_child(
         )
     if identifier == "python-wheel-install":
         return (
-            len(argv) == 8
+            len(argv) == 9
             and Path(argv[0]).name in {"python", "python.exe"}
             and test_root is not None
             and _within(argv[0], (test_root,))
-            and argv[1:7] == ("-I", "-m", "pip", "install", "--no-index", "--no-deps")
+            and argv[1:8]
+            == ("-I", "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall")
             and build_root is not None
-            and _within(argv[7], (build_root,))
-            and Path(argv[7]).suffix == ".whl"
+            and _within(argv[8], (build_root,))
+            and Path(argv[8]).suffix == ".whl"
             and _within(str(cwd), (test_root,))
         )
     if identifier == "installed-wheel-skill":
@@ -412,7 +420,7 @@ def _validate_named_child(
             len(argv) == 2
             and argv
             == (
-                "/bin/bash",
+                bash,
                 str(policy.source_root / "scripts" / "clean-room-phase1.sh"),
             )
             and cwd == policy.source_root
@@ -420,8 +428,7 @@ def _validate_named_child(
     if identifier == "harness-certification":
         return (
             len(argv) == 10
-            and argv[:2]
-            == ("/bin/bash", str(policy.source_root / "scripts" / "clean-room-phase1.sh"))
+            and argv[:2] == (bash, str(policy.source_root / "scripts" / "clean-room-phase1.sh"))
             and argv[2::2] == ("--python", "--wheelhouse", "--result", "--commit")
             and argv[3] == _normalize_argument(os.environ.get("MF_PHASE1_TEST_PYTHON", ""))
             and argv[5] == _normalize_argument(os.environ.get("MF_PHASE1_TEST_WHEELHOUSE", ""))
@@ -473,6 +480,9 @@ def _child_evidence(
     for index, value in enumerate(argv):
         if identifier == "python-artifact-smoke" and index == 3:
             normalized_argv.append("{validated-artifact-smoke}")
+            continue
+        if identifier == "scanner-test" and index == 2:
+            normalized_argv.append("{write:pytest}/scan-target")
             continue
         if value.startswith("--output="):
             normalized_argv.append("--output=" + _evidence_value(value.split("=", 1)[1], policy))
@@ -721,6 +731,16 @@ def pytest_configure(config: pytest.Config) -> None:
         os.link = _guarded_link
         os.symlink = _guarded_symlink
         sqlite3.connect = _guarded_sqlite_connect
+        os.supports_dir_fd = os.supports_dir_fd | {
+            _guarded_os_open,
+            _guarded_mkdir,
+            _guarded_rename,
+            _guarded_replace,
+            _guarded_unlink,
+            _guarded_remove,
+            _guarded_link,
+        }
+        os.supports_follow_symlinks = os.supports_follow_symlinks | {_guarded_link}
     _INSTALLED = True
 
 

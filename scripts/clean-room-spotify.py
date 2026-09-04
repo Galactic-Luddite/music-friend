@@ -536,6 +536,36 @@ def _valid_observed_child(command: Mapping[str, Any]) -> bool:
             and argv[3].startswith("{write:build}/")
             and cwd == "{source}"
         )
+    if identifier == "python-wheel-venv":
+        return (
+            len(argv) == 7
+            and argv[:6] == ["{python}", "-I", "-m", "venv", "--copies", "--system-site-packages"]
+            and argv[6].startswith("{write:pytest}/")
+            and argv[6].endswith("/environment")
+            and cwd.startswith("{write:pytest}/")
+        )
+    if identifier == "python-wheel-install":
+        return (
+            len(argv) == 9
+            and argv[0].startswith("{write:pytest}/")
+            and argv[0].endswith(("/environment/bin/python", "/environment/Scripts/python.exe"))
+            and argv[1:8]
+            == ["-I", "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall"]
+            and argv[8].startswith("{write:build}/")
+            and argv[8].endswith(".whl")
+            and cwd.startswith("{write:pytest}/")
+        )
+    if identifier == "installed-wheel-skill":
+        return (
+            len(argv) == 5
+            and argv[0].startswith("{write:pytest}/")
+            and argv[0].endswith(
+                ("/environment/bin/music-friend", "/environment/Scripts/music-friend.exe")
+            )
+            and argv[1:4] == ["skill", "install", "--target"]
+            and argv[4].startswith("{write:pytest}/")
+            and cwd.startswith("{write:pytest}/")
+        )
     if identifier in {"scanner-source", "scanner-test"}:
         if len(argv) != 3:
             return False
@@ -687,9 +717,12 @@ def validate_boundary_evidence(evidence: Mapping[str, Any]) -> None:
             "harness-certification",
             "harness-empty",
             "hatchling-build",
+            "installed-wheel-skill",
             "python-artifact-smoke",
             "python-build-export",
             "python-build-source",
+            "python-wheel-install",
+            "python-wheel-venv",
             "scanner-source",
             "scanner-test",
             "spotify-harness",

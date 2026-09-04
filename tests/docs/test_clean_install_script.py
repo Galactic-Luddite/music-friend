@@ -294,6 +294,9 @@ def test_clean_install_subprocesses_run_in_the_temporary_workspace(
         assert environment["WIN_PD_OVERRIDE_APPDATA"] == environment["APPDATA"]
         assert environment["WIN_PD_OVERRIDE_LOCAL_APPDATA"] == environment["LOCALAPPDATA"]
         assert "PYTHONPATH" not in environment
+        for name in ("COMSPEC", "PATHEXT", "SYSTEMROOT"):
+            if name in os.environ:
+                assert environment[name] == os.environ[name]
     assert len(mcp_processes) == 1
     writes = mcp_processes[0].stdin.writes
     assert [request.get("id") for request in writes] == [1, None, 2, 3]

@@ -52,6 +52,7 @@ def test_scheduler_install_and_remove_use_a_temporary_user_root_and_fake_runner(
         command=("music-friend", "refresh", "all"),
         interval_minutes=120,
         runner=runner,
+        native_store_factory=lambda: _EligibleStore(),
     )
 
     assert installed.exists()
@@ -83,6 +84,7 @@ def test_scheduler_install_uses_only_its_explicit_temporary_user_root(
         command=("music-friend", "refresh", "all"),
         interval_minutes=60,
         runner=calls.append,
+        native_store_factory=lambda: _EligibleStore(),
     )
 
     assert installed.is_file()
@@ -147,3 +149,35 @@ def test_windows_argument_escapes_a_quoted_path_ending_in_a_backslash() -> None:
 
 class _EligibleStore:
     scheduled_eligible = True
+
+
+@pytest.mark.parametrize(
+    ("platform", "command", "interval", "message"),
+    (
+        ("linux", ("music-friend",), 60, "SchedulePlatform"),
+        (SchedulePlatform.LINUX, (), 60, "non-empty tuple"),
+        (SchedulePlatform.LINUX, ("music-friend",), 59, "60 through 10080"),
+    ),
+)
+def test_render_schedule_rejects_invalid_public_inputs(
+    platform: object,
+    command: tuple[str, ...],
+    interval: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        render_schedule(platform, command=command, interval_minutes=interval)  # type: ignore[arg-type]
+
+
+def test_schedule_mutations_require_path_user_roots() -> None:
+    with pytest.raises(ValueError, match="user_root must be a Path"):
+        install_schedule(  # type: ignore[arg-type]
+            SchedulePlatform.LINUX,
+            user_root="not-a-path",
+            command=("music-friend",),
+            interval_minutes=60,
+            native_store_factory=lambda: _EligibleStore(),
+        )
+
+    with pytest.raises(ValueError, match="platform and user_root are required"):
+        remove_schedule(SchedulePlatform.LINUX, user_root="not-a-path")  # type: ignore[arg-type]

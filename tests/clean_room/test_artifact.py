@@ -22,7 +22,7 @@ SCANNER = REPOSITORY_ROOT / "scripts" / "scan_public_tree.py"
 
 def test_harness_requires_explicit_certification_inputs() -> None:
     result = subprocess.run(
-        ["/bin/bash", str(HARNESS)],
+        [str(Path("/bin/bash").resolve()), str(HARNESS)],
         check=False,
         capture_output=True,
         text=True,
@@ -58,7 +58,7 @@ def test_harness_success_is_offline_isolated_bounded_and_digest_bound(tmp_path: 
 
     completed = subprocess.run(
         [
-            "/bin/bash",
+            str(Path("/bin/bash").resolve()),
             str(HARNESS),
             "--python",
             python,
@@ -149,6 +149,7 @@ def test_harness_places_archive_scan_before_extraction_and_offline_install() -> 
     assert '--no-index --find-links "$wheelhouse"' in source
     assert "PIP_CONFIG_FILE=/dev/null" in source
     assert "env -i" in source
+    assert "DEVELOPER_DIR" in source
 
 
 def test_harness_enforces_installed_package_coverage_and_bounded_evidence() -> None:
@@ -221,7 +222,7 @@ def test_harness_refuses_unsafe_result_targets(
         os.mkfifo(target)
 
     command = (
-        "/bin/bash",
+        str(Path("/bin/bash").resolve()),
         str(repository / HARNESS.name),
         "--python",
         str(Path(sys.executable).resolve()),
@@ -285,7 +286,7 @@ def test_harness_preserves_failure_exit_status_and_writes_local_diagnostics(
     wheelhouse.mkdir()
     result_path = tmp_path / "failure.json"
     command = (
-        "/bin/bash",
+        str(Path("/bin/bash").resolve()),
         str(repository / HARNESS.name),
         "--python",
         str(Path(sys.executable).resolve()),

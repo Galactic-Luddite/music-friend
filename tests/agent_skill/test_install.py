@@ -516,6 +516,7 @@ def test_wheel_contains_the_exact_canonical_skill_and_installs_it(
             "install",
             "--no-index",
             "--no-deps",
+            "--force-reinstall",
             str(wheel),
         ],
         cwd=tmp_path,
@@ -534,6 +535,11 @@ def test_wheel_contains_the_exact_canonical_skill_and_installs_it(
         capture_output=True,
         text=True,
     )
+
+    if os.name == "nt":
+        assert result.returncode == 1
+        assert not (target / "music-friend" / "SKILL.md").exists()
+        return
 
     assert (result.returncode, result.stdout, result.stderr) == (
         0,

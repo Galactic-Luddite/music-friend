@@ -122,6 +122,10 @@ isolated_env=(
     "LC_ALL=C"
     "MF_PHASE1_NESTED=${MF_PHASE1_NESTED:-}"
 )
+if [[ $(uname -s) = Darwin ]]; then
+    developer_dir=$(xcode-select -p)
+    isolated_env+=("DEVELOPER_DIR=$developer_dir")
+fi
 
 stage='validate-wheelhouse'
 wheelhouse_digest=$("$python_path" -I -c \
@@ -169,7 +173,7 @@ stage='import-package'
 write_roots=$("$venv_python" -I -c \
     'import json,sys; names=("venv","build","pytest","temporary","boundary-evidence"); print(json.dumps(dict(zip(names,sys.argv[1:]))))' \
     "$venv_root" "$build_root" "$pytest_root" "$temporary_root" "$boundary_result")
-allowed_children='["git-ls-source","git-ls-all","git-source-head","git-archive-head","git-test-init","git-test-add","git-test-commit","git-test-head","python-build-export","python-build-source","python-artifact-smoke","catalog-mcp-stdio","hatchling-build","scanner-source","scanner-test","harness-certification","harness-empty","spotify-harness"]'
+allowed_children='["git-ls-source","git-ls-all","git-source-head","git-archive-head","git-test-init","git-test-add","git-test-commit","git-test-head","python-build-export","python-build-source","python-artifact-smoke","python-wheel-venv","python-wheel-install","installed-wheel-skill","catalog-mcp-stdio","hatchling-build","scanner-source","scanner-test","harness-certification","harness-empty","spotify-harness"]'
 
 test_env=(
     "${isolated_env[@]}"

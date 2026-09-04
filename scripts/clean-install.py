@@ -202,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
             "XDG_CONFIG_HOME": str(config),
             "XDG_DATA_HOME": str(data),
         }
+        for name in ("COMSPEC", "PATHEXT", "SYSTEMROOT"):
+            if name in os.environ:
+                environment[name] = os.environ[name]
         _run([sys.executable, "-I", "-m", "venv", str(venv)], environment=environment)
         executable = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         command = venv / ("Scripts/music-friend.exe" if os.name == "nt" else "bin/music-friend")

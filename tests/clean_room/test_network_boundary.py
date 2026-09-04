@@ -241,6 +241,33 @@ def test_validated_child_evidence_records_observed_invocation(tmp_path: Path) ->
     ]
 
 
+def test_scanner_child_evidence_aggregates_bounded_target_variants(tmp_path: Path) -> None:
+    policy = BoundaryPolicy(
+        allowed_write_roots={"pytest": tmp_path},
+        allowed_children=(),
+        allowed_child_ids=("scanner-test",),
+        source_root=REPOSITORY_ROOT,
+    )
+    python = str(Path(sys.executable).resolve())
+    scanner = str(REPOSITORY_ROOT / "scripts" / "scan_public_tree.py")
+
+    for target in (tmp_path / "first", tmp_path / "second"):
+        policy.check_child((python, scanner, str(target)), shell=False, cwd=REPOSITORY_ROOT)
+
+    assert policy.child_commands == [
+        {
+            "count": 2,
+            "id": "scanner-test",
+            "argv": [
+                "{python}",
+                "{source}/scripts/scan_public_tree.py",
+                "{write:pytest}/scan-target",
+            ],
+            "cwd": "{source}",
+        }
+    ]
+
+
 def test_child_evidence_normalizes_external_certification_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
