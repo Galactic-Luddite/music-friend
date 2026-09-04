@@ -51,6 +51,7 @@ from music_friend.domain import (
 )
 from music_friend.domain.text import _canonical_source_text
 from music_friend.store.catalog import Catalog
+from music_friend.store.spotify_history import _text as _history_text
 
 _FORMAT = "music-friend-catalog"
 _VERSION = 4
@@ -1363,8 +1364,12 @@ def _replay(
                     _text(record["track_name"], "track_name"),
                     _text(record["artist_name"], "artist_name"),
                     _optional_text(record["album_name"], "album_name"),
-                    _optional_text(record["reason_start"], "reason_start"),
-                    _optional_text(record["reason_end"], "reason_end"),
+                    _history_text(
+                        record["reason_start"], "reason_start", nullable=True, allow_empty=True
+                    ),
+                    _history_text(
+                        record["reason_end"], "reason_end", nullable=True, allow_empty=True
+                    ),
                     *boolean_values,
                     _text(record["archive_digest"], "archive_digest", maximum=128),
                     _datetime(record["imported_at"], "imported_at").isoformat(),

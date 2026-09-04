@@ -77,6 +77,18 @@ def test_history_window_survives_backup_restore_and_fractional_seconds(tmp_path:
         )
 
 
+def test_history_backup_preserves_empty_playback_reasons(tmp_path: Path) -> None:
+    source = _archive(tmp_path / "history.zip", [_track(reason_start="", reason_end="")])
+    with Catalog.open(tmp_path / "original.sqlite3") as catalog:
+        import_spotify_history(catalog, source)
+        export_catalog(catalog, tmp_path / "backup")
+    with Catalog.open(tmp_path / "restored.sqlite3") as catalog:
+        import_catalog(catalog, tmp_path / "backup")
+        assert catalog._require_connection().execute(
+            "SELECT reason_start, reason_end FROM listening_history"
+        ).fetchone() == ("", "")
+
+
 def test_import_keeps_music_plays_and_excludes_non_music_and_sensitive_fields(
     tmp_path: Path,
 ) -> None:
