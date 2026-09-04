@@ -54,6 +54,6 @@ music-friend schedule install
 music-friend schedule remove
 ```
 
-The command uses the current platform’s per-user scheduler: LaunchAgent on macOS, Task Scheduler
-on Windows, or a systemd user timer on Linux. Review the rendered platform entry after installation
-and remove it when it is no longer wanted.
+The command uses the current supported platform’s per-user scheduler: LaunchAgent on macOS or a
+systemd user timer on Linux. Review the rendered platform entry after installation and remove it
+when it is no longer wanted.

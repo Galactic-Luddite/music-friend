@@ -17,7 +17,7 @@ from music_friend.configuration import LocalConfig, LocalConfigStore
 from music_friend.mcp import create_music_server
 from music_friend.mcp.read_server import create_read_server
 from music_friend.providers import MusicSource
-from music_friend.providers.credentials import CredentialStore
+from music_friend.providers.credentials import CredentialKey, CredentialStore, CredentialStoreError
 from music_friend.providers.keyring_store import KeyringCredentialStore
 from music_friend.providers.spotify.config import SpotifySettings, load_spotify_settings
 from music_friend.providers.spotify.source import SpotifySource
@@ -42,6 +42,24 @@ SourceFactory = Callable[
     [SpotifySettings, SpotifyTokenManager, Callable[[], datetime]], SpotifySource
 ]
 ServerFactory = Callable[[MusicSource], MCPServer]
+
+
+class _UnavailableCredentialStore:
+    def save(self, _key: CredentialKey, _value: str) -> None:
+        raise CredentialStoreError()
+
+    def load(self, _key: CredentialKey) -> str | None:
+        raise CredentialStoreError()
+
+    def delete(self, _key: CredentialKey) -> None:
+        raise CredentialStoreError()
+
+
+def _event_credential_store(factory: CredentialStoreFactory) -> CredentialStore:
+    try:
+        return factory()
+    except CredentialStoreError:
+        return _UnavailableCredentialStore()
 
 
 def _default_connector() -> httpx.BaseTransport:
@@ -146,7 +164,7 @@ def run_catalog_stdio_session(
     try:
         event_client = TicketmasterDiscoveryClient(
             event_transport,
-            credential_store_factory(),
+            _event_credential_store(credential_store_factory),
             now=_utc_now,
         )
 

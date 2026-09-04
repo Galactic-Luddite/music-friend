@@ -3,6 +3,8 @@
 Music Friend requires Python 3.10 or newer. It runs on your computer and creates no account,
 schedule, or network listener during installation.
 
+Music Friend v0.1 supports macOS and Linux. Windows is not a supported runtime in v0.1.
+
 ## Intel macOS
 
 No PyPI wheel is available for the Intel macOS build of the required `cryptography` 50
