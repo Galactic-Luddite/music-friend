@@ -1,0 +1,4 @@
+{
+  "saved": {"items": [{"added_at": "2026-01-01T00:00:00Z", "track": {"id": "track123", "name": "unsafe <track>", "artists": [{"id": "artist123", "name": "ignored"}]}}], "offset": 0, "limit": 50, "total": 51, "next": "https://example.invalid/ignored"},
+  "top": {"items": [{"id": "track456", "name": "unsafe <track>", "artists": [{"id": "artist123", "name": "ignored"}]}], "next": null}
+}

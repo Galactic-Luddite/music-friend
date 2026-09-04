@@ -1,0 +1,101 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "music-friend"
+version = "0.1.0"
+description = "A local-first, provider-neutral music companion."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "argon2-cffi>=23,<26",
+    "cryptography>=50,<51",
+    "httpx>=0.27,<1",
+    "keyring>=25,<26",
+    "mcp>=2,<3",
+    "platformdirs>=4,<5",
+]
+
+[project.urls]
+Repository = "https://github.com/Galactic-Luddite/music-friend"
+Documentation = "https://github.com/Galactic-Luddite/music-friend#readme"
+Issues = "https://github.com/Galactic-Luddite/music-friend/issues"
+
+[project.scripts]
+music-friend = "music_friend.runtimes.cli:main"
+music-friend-mcp = "music_friend.runtimes.mcp_stdio:main"
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "hatchling",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/music_friend"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.github",
+    "/.gitignore",
+    "/A\u0047ENTS.md",
+    "/CONTRIBUTING.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/README.md",
+    "/SECURITY.md",
+    "/docs",
+    "/pyproject.toml",
+    "/scripts",
+    "/skills/music-friend",
+    "/src",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills/music-friend/SKILL.md" = "music_friend/agent_skill/SKILL.md"
+"src/music_friend/store/schema/001_initial.sql" = "music_friend/store/schema/001_initial.sql"
+"src/music_friend/store/schema/002_relational_integrity.sql" = "music_friend/store/schema/002_relational_integrity.sql"
+"src/music_friend/store/schema/003_application_state.sql" = "music_friend/store/schema/003_application_state.sql"
+"src/music_friend/store/schema/004_release_discovery.sql" = "music_friend/store/schema/004_release_discovery.sql"
+"src/music_friend/store/schema/005_release_check_continuations.sql" = "music_friend/store/schema/005_release_check_continuations.sql"
+"src/music_friend/store/schema/006_event_discovery.sql" = "music_friend/store/schema/006_event_discovery.sql"
+"src/music_friend/store/schema/007_source_limits.sql" = "music_friend/store/schema/007_source_limits.sql"
+
+[tool.mypy]
+files = ["src/music_friend"]
+strict = true
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["music_friend"]
+
+[tool.coverage.report]
+fail_under = 95
+precision = 2
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

@@ -1,0 +1,3 @@
+from music_friend import providers as provider_contracts
+
+MARKER = provider_contracts

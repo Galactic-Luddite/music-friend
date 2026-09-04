@@ -1,0 +1,3 @@
+import music_friend.store.portable as portable_store
+
+MARKER = portable_store

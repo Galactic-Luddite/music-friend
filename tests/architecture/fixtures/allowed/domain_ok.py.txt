@@ -1,0 +1,12 @@
+from __future__ import annotations
+
+import os as operating_system
+
+from . import models as domain_models
+from music_friend.domain import (
+    Artist as DomainArtist,
+    Release,
+)
+from music_friend.domain.text import sanitize_source_text
+
+MARKER = (operating_system, domain_models, DomainArtist, Release, sanitize_source_text)

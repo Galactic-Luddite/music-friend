@@ -1,0 +1,31 @@
+# Local data and credentials
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.jsonl
+.env
+.env.*
+!.env.example
+exports/
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.venv/
+build/
+dist/
+
+# JavaScript
+node_modules/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

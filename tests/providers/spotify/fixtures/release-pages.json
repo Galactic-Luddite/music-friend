@@ -1,0 +1,3 @@
+{
+  "albums": {"items": [{"id": "album123", "name": "unsafe <album>", "album_type": "album", "release_date": "2026-01-01", "release_date_precision": "day", "artists": [{"id": "artist123", "name": "ignored"}]}], "next": null}
+}

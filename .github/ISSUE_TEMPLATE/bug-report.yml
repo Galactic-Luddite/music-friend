@@ -1,0 +1,37 @@
+name: Bug report
+description: Report reproducible incorrect behavior without sharing private data.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, personal listening data, exports, databases, email or calendar content, or machine-specific paths. Use synthetic examples and redacted diagnostics.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the incorrect behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest reproducible steps using synthetic data.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Music Friend version
+      placeholder: Version or commit identifier
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include only output produced by the documented redacted diagnostics command.
+    validations:
+      required: false

@@ -1,0 +1,52 @@
+{
+  "skill_name": "music-friend",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "What changed in my music lately? Refresh releases if needed.",
+      "expected_output": "Checks local status, confirms any refresh, and uses the local inbox.",
+      "files": [],
+      "expectations": ["check_status", "confirm_refresh", "use_local_inbox"]
+    },
+    {
+      "id": 2,
+      "prompt": "Find the artist named River and pin the right one to my watchlist.",
+      "expected_output": "Searches the catalog, confirms the artist identity, then updates the watchlist.",
+      "files": [],
+      "expectations": ["search_catalog_first", "confirm_identity", "update_watchlist"]
+    },
+    {
+      "id": 3,
+      "prompt": "Why is this inbox item here? Save it after you explain it.",
+      "expected_output": "Explains the inbox item, confirms the update, and then saves it.",
+      "files": [],
+      "expectations": ["explain_inbox_item", "confirm_update", "update_inbox_item"]
+    },
+    {
+      "id": 4,
+      "prompt": "Here is my provider key. Can you connect it for me?",
+      "expected_output": "Directs the user to the local CLI without requesting a credential.",
+      "files": [],
+      "expectations": ["direct_to_local_cli", "no_credential_request"]
+    },
+    {
+      "id": 5,
+      "prompt": "Buy the tickets from this event result now.",
+      "expected_output": "Declines the purchase and offers a discovery link instead.",
+      "files": [],
+      "expectations": ["decline_purchase", "offer_discovery_link"]
+    },
+    {
+      "id": 6,
+      "prompt": "What is new in my inbox?",
+      "expected_output": "Leads with the inbox result, mentions freshness or a partial result only when it applies, and offers no more than one useful next action without narrating internal work.",
+      "files": [],
+      "expectations": [
+        "lead_with_result",
+        "freshness_only_when_relevant",
+        "at_most_one_next_action",
+        "no_internal_process_narration"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+Music Friend
+
+This product includes modified material derived from Spotify Skill:
+https://github.com/fabioc-aloha/spotify-skill
+
+Copyright 2025 Fabio C.
+
+Spotify Skill is licensed under the Apache License, Version 2.0. Music Friend
+modified the adapted PKCE, Spotify request, and test patterns. This notice gives
+upstream credit only and does not imply endorsement by the upstream project or
+its contributors.

@@ -1,0 +1,5 @@
+{
+  "search": {"artists": {"items": [{"id": "artist123", "name": "unsafe <name>", "external_urls": {"spotify": "https://example.invalid/ignored"}}], "next": null}},
+  "followed_first": {"artists": {"items": [{"id": "artist123", "name": "unsafe <name>"}], "cursors": {"after": "artist123"}, "next": "https://example.invalid/ignored"}},
+  "followed_last": {"artists": {"items": [{"id": "artist456", "name": "unsafe <name>"}], "cursors": {"after": null}, "next": null}}
+}

@@ -1,0 +1,5 @@
+from music_friend.mcp import (
+    server as mcp_server,
+)
+
+MARKER = mcp_server
