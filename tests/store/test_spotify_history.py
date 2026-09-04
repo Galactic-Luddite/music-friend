@@ -138,6 +138,77 @@ def test_invalid_record_rolls_back_whole_archive(tmp_path: Path) -> None:
     assert count == 0
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"ts": "2026-01-02T03:04:05"},
+        {"ts": "not-a-dateZ"},
+        {"shuffle": "false"},
+        {"master_metadata_track_name": None},
+    ],
+)
+def test_import_rejects_malformed_music_records(tmp_path: Path, change: dict[str, object]) -> None:
+    source = _archive(tmp_path / "spotify.zip", [_track(**change)])
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        with pytest.raises(ValueError, match="invalid Spotify history archive"):
+            import_spotify_history(catalog, source)
+
+
+def test_import_rejects_unsafe_or_malformed_archives(tmp_path: Path) -> None:
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    malformed = tmp_path / "malformed.zip"
+    with zipfile.ZipFile(malformed, "w") as archive:
+        archive.writestr(
+            "Spotify Extended Streaming History/Streaming_History_Audio_2026.json",
+            "{}",
+        )
+    traversal = tmp_path / "traversal.zip"
+    with zipfile.ZipFile(traversal, "w") as archive:
+        archive.writestr("../Streaming_History_Audio_2026.json", "[]")
+
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        for source in (directory, malformed, traversal):
+            with pytest.raises(ValueError, match="invalid Spotify history archive"):
+                import_spotify_history(catalog, source)
+
+
+def test_import_rejects_non_object_history_record(tmp_path: Path) -> None:
+    source = _archive(tmp_path / "spotify.zip", ["not an object"])  # type: ignore[list-item]
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        with pytest.raises(ValueError, match="invalid Spotify history archive"):
+            import_spotify_history(catalog, source)
+
+
+def test_import_accepts_nullable_optional_history_fields(tmp_path: Path) -> None:
+    source = _archive(
+        tmp_path / "spotify.zip",
+        [_track(master_metadata_album_album_name=None, offline=None)],
+    )
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        result = import_spotify_history(catalog, source)
+
+    assert result.imported == 1
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"limit": 0}, "limit must be from 1 through 50"),
+        (
+            {"since": "2026-02-01T00:00:00Z", "until": "2026-01-01T00:00:00Z"},
+            "since must be before until",
+        ),
+    ],
+)
+def test_summary_rejects_invalid_bounds(
+    tmp_path: Path, arguments: dict[str, object], message: str
+) -> None:
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        with pytest.raises(ValueError, match=message):
+            summarize_history(catalog, **arguments)  # type: ignore[arg-type]
+
+
 def test_summary_reports_range_rankings_and_brief_skip_breakdown(tmp_path: Path) -> None:
     source = _archive(
         tmp_path / "spotify.zip",
