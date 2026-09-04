@@ -507,6 +507,8 @@ def test_wheel_contains_the_exact_canonical_skill_and_installs_it(
     command = executable_directory / ("music-friend.exe" if os.name == "nt" else "music-friend")
     child_environment = dict(os.environ)
     child_environment.update(PIP_CONFIG_FILE=os.devnull, PYTHONNOUSERSITE="1")
+    wheelhouse = os.environ.get("MF_PHASE1_TEST_WHEELHOUSE")
+    dependency_arguments = ["--find-links", wheelhouse] if wheelhouse else ["--no-deps"]
     subprocess.run(
         [
             str(environment_python),
@@ -515,7 +517,7 @@ def test_wheel_contains_the_exact_canonical_skill_and_installs_it(
             "pip",
             "install",
             "--no-index",
-            "--no-deps",
+            *dependency_arguments,
             "--force-reinstall",
             str(wheel),
         ],

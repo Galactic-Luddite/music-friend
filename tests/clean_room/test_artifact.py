@@ -173,6 +173,9 @@ def test_harness_enforces_installed_package_coverage_and_bounded_evidence() -> N
     failure_writer = source.split("write_failure() {", 1)[1].split("\n}", 1)[0]
     assert "coverage.json" in failure_writer
     assert '"coverage"' in failure_writer
+    assert "clean-room-failure.py" in failure_writer
+    assert '"diagnostics"' in failure_writer
+    assert "\"$stage\" = 'run-tests'" in failure_writer
 
 
 def test_harness_proves_package_import_resolves_under_venv_site_packages() -> None:

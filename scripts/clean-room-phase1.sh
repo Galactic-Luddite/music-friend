@@ -70,12 +70,17 @@ coverage_summary() {
 write_failure() {
     failure_temporary=$(mktemp "$result_parent/.music-friend-clean-room-failure.XXXXXXXX")
     failure_coverage='null'
+    failure_diagnostics='null'
     if [[ -f "${build_root:-}/coverage.json" ]]; then
         failure_coverage=$(coverage_summary "$build_root/coverage.json")
     fi
+    if [[ "$stage" = 'run-tests' && -f "${logs_root:-}/pytest.log" && -d "${pytest_root:-}" ]]; then
+        failure_diagnostics=$("$python_path" -I "$repository_root/scripts/clean-room-failure.py" \
+            --pytest-log "$logs_root/pytest.log" --pytest-root "$pytest_root")
+    fi
     "$python_path" -I -c \
-        'import json,sys; payload={"certification":"development-clean-room","status":"fail","commit":sys.argv[1],"failed_stage":sys.argv[2]}; coverage=json.loads(sys.argv[3]); payload.update({"coverage":coverage} if coverage is not None else {}); json.dump(payload,open(sys.argv[4],"w",encoding="utf-8"),sort_keys=True,separators=(",",":")); open(sys.argv[4],"a",encoding="utf-8").write("\n")' \
-        "$source_commit" "$stage" "$failure_coverage" "$failure_temporary"
+        'import json,sys; payload={"certification":"development-clean-room","status":"fail","commit":sys.argv[1],"failed_stage":sys.argv[2]}; coverage=json.loads(sys.argv[3]); diagnostics=json.loads(sys.argv[4]); payload.update({"coverage":coverage} if coverage is not None else {}); payload.update({"diagnostics":diagnostics} if diagnostics is not None else {}); json.dump(payload,open(sys.argv[5],"w",encoding="utf-8"),sort_keys=True,separators=(",",":")); open(sys.argv[5],"a",encoding="utf-8").write("\n")' \
+        "$source_commit" "$stage" "$failure_coverage" "$failure_diagnostics" "$failure_temporary"
     mv -f "$failure_temporary" "$result_path"
 }
 finish() {
