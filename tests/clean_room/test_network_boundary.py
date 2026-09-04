@@ -14,6 +14,38 @@ from .boundaries import BoundaryPolicy, BoundaryViolation, GuardedSocket
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def test_wheel_install_accepts_only_the_declared_offline_wheelhouse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheelhouse = tmp_path / "wheelhouse"
+    monkeypatch.setenv("MF_PHASE1_TEST_WHEELHOUSE", str(wheelhouse))
+    policy = BoundaryPolicy(
+        allowed_write_roots={"pytest": tmp_path, "build": tmp_path / "build"},
+        allowed_children=(),
+        allowed_child_ids=("python-wheel-install",),
+    )
+    command = [
+        str(tmp_path / "environment" / "bin" / "python"),
+        "-I",
+        "-m",
+        "pip",
+        "install",
+        "--no-index",
+        "--find-links",
+        str(wheelhouse),
+        "--force-reinstall",
+        str(tmp_path / "build" / "test.whl"),
+    ]
+    policy.check_child(command, shell=False, cwd=tmp_path)
+    command[7] = str(tmp_path / "other")
+    with pytest.raises(BoundaryViolation):
+        policy.check_child(command, shell=False, cwd=tmp_path)
+    command[7] = str(wheelhouse)
+    command.remove("--no-index")
+    with pytest.raises(BoundaryViolation):
+        policy.check_child(command, shell=False, cwd=tmp_path)
+
+
 def test_session_network_surfaces_are_guarded(boundary_policy: BoundaryPolicy) -> None:
     assert socket.socket.__name__ == "GuardedSocket"
     assert socket.create_connection.__name__ == "blocked_create_connection"
