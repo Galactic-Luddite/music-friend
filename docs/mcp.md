@@ -31,7 +31,7 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove` | the applied decision, or `not_found` | local write |
 | `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries | read-only, local |
 | `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry, or `not_found` | local write |
-| `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry`, `record`, and the stored explanation | read-only, local |
+| `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry`, `record`, and `reasons` (why it was included) | read-only, local |
 | `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (UTC or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
 
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
@@ -43,11 +43,12 @@ responses.
 A synthetic example of a normal conversation. Identifiers are placeholders.
 
 1. `search_catalog` with `query: "Example Quartet"`, `limit: 5` returns one artist with
-   `artist_id: "art_0001"`.
+   `local_id: "art_0001"`; pass that value as `artist_id` to the next call.
 2. `update_watchlist` with `artist_id: "art_0001"`, `action: "pin"` records the decision.
 3. `refresh_music` with `kind: "releases"` reads Spotify and writes new releases to the inbox.
    Use `kind: "events"` after an event area is configured to look for nearby shows.
-4. `list_inbox` with `state: "unread"`, `limit: 20` returns an item with `inbox_id: "inb_0042"`.
+4. `list_inbox` with `state: "unread"`, `limit: 20` returns an item with `local_id: "inb_0042"`;
+   pass that value as `inbox_id` to the next calls.
 5. `explain_inbox_item` with `inbox_id: "inb_0042"` shows that the release matched a pinned
    artist.
 6. `update_inbox_item` with `inbox_id: "inb_0042"`, `state: "saved"` keeps it for later.
@@ -116,7 +117,8 @@ a runtime discovery mechanism.
 music plays. Import the archive first with the CLI (see
 [CLI and data operations](operations.md#import-spotify-listening-history)); MCP cannot import.
 
-Supply nullable UTC `since` and `until` timestamps and a ranking limit from 1 through 50. The
+Supply nullable UTC `since` and `until` timestamps (ISO 8601 ending in `Z`, or null for an open
+end) and a ranking limit from 1 through 50. The
 result identifies its evidence boundary, covered dates, play time, brief/skipped counts, and top
 artists and tracks. Imported plays remain separate from preferences and watchlist affinity.
 

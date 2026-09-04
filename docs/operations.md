@@ -1,8 +1,10 @@
 # CLI and data operations
 
 Run `music-friend --help` for the complete command grammar. Commands that inspect or refresh local
-state support `--json` as their final argument. The CLI owns everything that touches credentials or
-whole-catalog data; MCP owns watchlist and inbox decisions.
+state support `--json` as their final argument. Credentials and whole-catalog lifecycle operations
+(imports, exports, backups, restores, and deletion) are CLI-only. Both the CLI and MCP can run
+bounded refreshes; MCP also owns watchlist and inbox decisions and exposes status, catalog search,
+and listening-history summaries.
 
 | Group | Commands | What they do |
 |-------|----------|--------------|

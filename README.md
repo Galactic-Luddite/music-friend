@@ -2,7 +2,9 @@
 
 Music Friend is a local-first music companion. It watches the artists you care about, tells you
 when they release something or play near you, and answers questions about your own listening
-history. Everything it knows lives in a SQLite file on your computer.
+history. Its catalog, watchlist, inbox, and imported listening history live in a SQLite file on
+your computer; provider credentials are stored separately in your operating-system credential
+store.
 
 With Music Friend you can:
 
@@ -91,8 +93,9 @@ artists and tracks for that period. See [CLI and data operations](docs/operation
 - **Credentials.** Spotify uses a public client identifier with PKCE; there is no client secret.
   Tokens and the optional Ticketmaster key go to your operating-system credential store (or an
   interactive passphrase vault) and are never accepted through MCP.
-- **No telemetry, no service.** Music Friend sends nothing about you anywhere and listens on no
-  network port except a temporary loopback callback during Spotify authorization.
+- **No telemetry, no service.** Music Friend sends no telemetry and has no hosted service. It
+  contacts only the providers you configure, during connection or a refresh you request, and
+  listens on no network port except a temporary loopback callback during Spotify authorization.
 - **History imports** exclude IP address, device, and connection-country fields.
 - **Exports and backups** are personal data. They exclude credentials but include your catalog and
   history; store them where you control access.
