@@ -100,8 +100,8 @@ local installation.
 
 ## Daily schedule
 
-Package installation never creates a schedule. When no schedule exists, `music-friend setup`
-offers to enable one and defaults to yes. The per-user schedule runs a bounded
+Package installation and `music-friend setup` never create a schedule. Explicitly installing one
+creates a per-user schedule that runs a bounded
 `refresh all --json` once every 1,440 minutes with the Python runtime from the Music Friend
 installation, then exits. It requires an approved native credential store; the interactive vault
 cannot be used for scheduled refreshes.

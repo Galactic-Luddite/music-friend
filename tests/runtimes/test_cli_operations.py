@@ -374,78 +374,26 @@ def test_schedule_status_json_reports_installation_activation_platform_and_inter
     assert stderr.getvalue() == ""
 
 
-def test_setup_defaults_to_daily_refresh_when_no_schedule_exists(
+def test_setup_never_inspects_or_installs_a_schedule(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls: list[tuple[object, dict[str, object]]] = []
-    answers = iter(("", "", "", "", "", ""))
-    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
+    answers = iter(("", "", "", "", ""))
     monkeypatch.setattr(
         cli,
         "schedule_status",
-        lambda *_args, **_kwargs: cli.ScheduleStatus(
-            installed=False,
-            active=False,
-            platform=cli.SchedulePlatform.LINUX,
-            interval_minutes=1440,
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("schedule inspected")),
     )
     monkeypatch.setattr(
         cli,
         "install_schedule",
-        lambda platform, **kwargs: calls.append((platform, kwargs)),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("schedule installed")),
     )
 
     result, stdout, stderr = _run(["setup"], object(), prompt=lambda _message: next(answers))
 
     assert result == 0
-    assert stdout == "Music Friend setup complete.\nDaily refresh: enabled.\n"
+    assert stdout == "Music Friend setup complete.\n"
     assert stderr == ""
-    assert len(calls) == 1
-    assert calls[0][1]["interval_minutes"] == 1440
-
-
-def test_setup_preserves_configuration_when_daily_schedule_install_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    store = _ConfigStore()
-    answers = iter(("new-client", "", "", "", "", ""))
-    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
-    monkeypatch.setattr(
-        cli,
-        "schedule_status",
-        lambda *_args, **_kwargs: cli.ScheduleStatus(
-            installed=False,
-            active=False,
-            platform=cli.SchedulePlatform.LINUX,
-            interval_minutes=1440,
-        ),
-    )
-    monkeypatch.setattr(
-        cli,
-        "install_schedule",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()),
-    )
-    stdout, stderr = io.StringIO(), io.StringIO()
-
-    result = cli.run_cli(
-        ["setup"],
-        stdout=stdout,
-        stderr=stderr,
-        application=object(),  # type: ignore[arg-type]
-        config_store=store,  # type: ignore[arg-type]
-        prompt=lambda _message: next(answers),
-        secret_prompt=lambda _message: "",
-    )
-
-    assert result == 1
-    assert store.value == LocalConfig(spotify_client_id="new-client")
-    assert stdout.getvalue() == "Music Friend setup complete.\n"
-    assert stderr.getvalue() == (
-        "Daily refresh was not enabled. Run 'music-friend schedule install' to retry.\n"
-    )
 
 
 @pytest.mark.parametrize(

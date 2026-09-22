@@ -467,47 +467,7 @@ def _setup(
         print("Music Friend could not complete the command.", file=stderr)
         return 1
     print("Music Friend setup complete.", file=stdout)
-    return _setup_schedule(prompt, stdout, stderr)
-
-
-def _setup_schedule(prompt: Prompt, stdout: TextIO, stderr: TextIO) -> int:
-    try:
-        platform = _schedule_platform()
-        root = Path.home()
-        status: ScheduleStatus = schedule_status(
-            platform,
-            user_root=root,
-            interval_minutes=_DAILY_REFRESH_MINUTES,
-        )
-        if status.installed:
-            return 0
-        if not _daily_schedule_choice(prompt("Enable automatic daily refresh? [Y/n] ")):
-            return 0
-        install_schedule(
-            platform,
-            user_root=root,
-            command=_scheduled_refresh_command(),
-            interval_minutes=_DAILY_REFRESH_MINUTES,
-        )
-    except Exception:
-        print(
-            "Daily refresh was not enabled. Run 'music-friend schedule install' to retry.",
-            file=stderr,
-        )
-        return 1
-    print("Daily refresh: enabled.", file=stdout)
     return 0
-
-
-def _daily_schedule_choice(value: str) -> bool:
-    if type(value) is not str:
-        raise ValueError("schedule choice is invalid")
-    normalized = value.strip().lower()
-    if normalized in {"", "y", "yes"}:
-        return True
-    if normalized in {"n", "no"}:
-        return False
-    raise ValueError("schedule choice is invalid")
 
 
 class _Preserve:

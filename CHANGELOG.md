@@ -2,7 +2,7 @@
 
 ## 0.1.1
 
-- Offers automatic daily refresh during setup while keeping package installation side-effect free.
+- Provides explicit daily per-user refresh scheduling while keeping installation and setup free of scheduler side effects.
 - Runs scheduled refreshes with the exact Python runtime used to install Music Friend.
 - Reports installed and active scheduler state without opening the local music catalog.
 - Makes repeated schedule installation update the existing per-user job.

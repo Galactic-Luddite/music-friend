@@ -493,7 +493,7 @@ def test_cli_setup_is_interactive_and_unknown_or_sensitive_arguments_are_not_ref
     application = _application(tmp_path)
     config = _ConfigStore(LocalConfig())
 
-    answers = iter(("public-client-id", "", "", "", "", "n"))
+    answers = iter(("public-client-id", "", "", "", ""))
     setup_result, setup_stdout, setup_stderr = _run(
         ["setup"], application, config, prompt=lambda _message: next(answers)
     )
@@ -523,7 +523,7 @@ def test_cli_setup_enrolls_event_area_and_ticketmaster_key_in_protected_store(
     application = _application(tmp_path)
     config = _ConfigStore(LocalConfig())
     credentials = store_type()
-    answers = iter(("public-client-id", "US", "94103", "", "", "n"))
+    answers = iter(("public-client-id", "US", "94103", "", ""))
     secret = "ticketmaster-secret-canary"
     stdout, stderr = io.StringIO(), io.StringIO()
 
@@ -557,7 +557,7 @@ def test_cli_setup_uses_the_kilometer_default_radius_when_selected(tmp_path: Pat
     """Catches a kilometer setup inheriting the miles default radius."""
     application = _application(tmp_path)
     config = _ConfigStore(LocalConfig())
-    answers = iter(("public-client-id", "US", "94103", "", "kilometers", "n"))
+    answers = iter(("public-client-id", "US", "94103", "", "kilometers"))
     stdout, stderr = io.StringIO(), io.StringIO()
 
     result = cli.run_cli(
@@ -583,7 +583,7 @@ def test_cli_setup_never_writes_ticketmaster_key_to_local_config(tmp_path: Path)
     application = _application(tmp_path)
     config = LocalConfigStore(config_dir=tmp_path / "config")
     credentials = _SetupCredentialStore()
-    answers = iter(("public-client-id", "US", "94103", "", "", "n"))
+    answers = iter(("public-client-id", "US", "94103", "", ""))
     secret = "ticketmaster-secret-canary"
     stdout, stderr = io.StringIO(), io.StringIO()
 
@@ -724,7 +724,7 @@ def test_cli_setup_blank_preserves_and_dash_clears_optional_event_enrollment(
     key = CredentialKey("ticketmaster", "discovery")
     credentials.values[key] = "existing-key"
 
-    blank_answers = iter(("", "", "", "", "", "n"))
+    blank_answers = iter(("", "", "", "", ""))
     blank_stdout, blank_stderr = io.StringIO(), io.StringIO()
     blank_result = cli.run_cli(
         ["setup"],
@@ -737,7 +737,7 @@ def test_cli_setup_blank_preserves_and_dash_clears_optional_event_enrollment(
         credential_store_factory=lambda: credentials,
     )
 
-    clear_answers = iter(("", "-", "", "", "", "n"))
+    clear_answers = iter(("", "-", "", "", ""))
     clear_stdout, clear_stderr = io.StringIO(), io.StringIO()
     clear_result = cli.run_cli(
         ["setup"],
