@@ -72,6 +72,18 @@ def test_setup_key_action_preserves_clears_and_validates() -> None:
             cli._setup_key_action(value)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(("value", "expected"), (("", True), ("YES", True), ("n", False)))
+def test_daily_schedule_choice_is_explicit_and_defaults_to_enabled(
+    value: str, expected: bool
+) -> None:
+    assert cli._daily_schedule_choice(value) is expected
+
+
+def test_daily_schedule_choice_rejects_ambiguous_input() -> None:
+    with pytest.raises(ValueError, match="schedule choice"):
+        cli._daily_schedule_choice("maybe")
+
+
 def test_config_loader_requires_exact_local_config_type() -> None:
     assert cli._load_config(SimpleNamespace(load=lambda: LocalConfig())) == LocalConfig()
     with pytest.raises(ValueError):

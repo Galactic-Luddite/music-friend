@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Offers automatic daily refresh during setup while keeping package installation side-effect free.
+- Runs scheduled refreshes with the exact Python runtime used to install Music Friend.
+- Reports installed and active scheduler state without opening the local music catalog.
+- Makes repeated schedule installation update the existing per-user job.
+
 ## 0.1.0
 
 - First standalone release of the local-first Music Friend CLI and MCP interface.

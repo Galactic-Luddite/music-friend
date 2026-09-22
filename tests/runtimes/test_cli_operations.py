@@ -253,14 +253,17 @@ def test_schedule_install_remove_status_and_failure_are_bounded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[tuple[str, object]] = []
-    schedule_path = tmp_path / "schedule.conf"
-    schedule_path.write_text("installed", encoding="utf-8")
     monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
     monkeypatch.setattr(
         cli,
-        "render_schedule",
-        lambda *_args, **_kwargs: SimpleNamespace(relative_path=Path("schedule.conf")),
+        "schedule_status",
+        lambda *_args, **_kwargs: cli.ScheduleStatus(
+            installed=True,
+            active=True,
+            platform=cli.SchedulePlatform.LINUX,
+            interval_minutes=1440,
+        ),
     )
     monkeypatch.setattr(
         cli,
@@ -289,6 +292,159 @@ def test_schedule_install_remove_status_and_failure_are_bounded(
         1,
         "",
         "Music Friend could not complete the command.\n",
+    )
+
+
+def test_schedule_commands_use_daily_absolute_python_without_opening_catalog_or_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+    base_python = tmp_path / "base" / "python"
+    base_python.parent.mkdir()
+    base_python.write_text("synthetic", encoding="utf-8")
+    installed_python = tmp_path / "runtime" / "bin" / "python"
+    installed_python.parent.mkdir(parents=True)
+    installed_python.symlink_to(base_python)
+
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.MACOS)
+    monkeypatch.setattr(cli.sys, "executable", str(installed_python))
+    monkeypatch.setattr(
+        cli,
+        "install_schedule",
+        lambda platform, **kwargs: captured.update(platform=platform, **kwargs),
+    )
+    monkeypatch.setattr(
+        cli.Catalog,
+        "open",
+        lambda _path: (_ for _ in ()).throw(AssertionError("catalog must not open")),
+    )
+    stdout, stderr = io.StringIO(), io.StringIO()
+
+    result = cli.run_cli(
+        ["schedule", "install"],
+        stdout=stdout,
+        stderr=stderr,
+        config_store=object(),
+    )
+
+    assert result == 0
+    assert stderr.getvalue() == ""
+    assert captured == {
+        "platform": cli.SchedulePlatform.MACOS,
+        "user_root": tmp_path,
+        "command": (
+            str(installed_python),
+            "-m",
+            "music_friend.runtimes.cli",
+            "refresh",
+            "all",
+            "--json",
+        ),
+        "interval_minutes": 1440,
+    }
+
+
+def test_schedule_status_json_reports_installation_activation_platform_and_interval(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
+    monkeypatch.setattr(
+        cli,
+        "schedule_status",
+        lambda *_args, **_kwargs: cli.ScheduleStatus(
+            installed=True,
+            active=False,
+            platform=cli.SchedulePlatform.LINUX,
+            interval_minutes=1440,
+        ),
+    )
+    stdout, stderr = io.StringIO(), io.StringIO()
+
+    result = cli.run_cli(["schedule", "status", "--json"], stdout=stdout, stderr=stderr)
+
+    assert result == 0
+    assert json.loads(stdout.getvalue()) == {
+        "active": False,
+        "installed": True,
+        "interval_minutes": 1440,
+        "platform": "linux",
+    }
+    assert stderr.getvalue() == ""
+
+
+def test_setup_defaults_to_daily_refresh_when_no_schedule_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[object, dict[str, object]]] = []
+    answers = iter(("", "", "", "", "", ""))
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
+    monkeypatch.setattr(
+        cli,
+        "schedule_status",
+        lambda *_args, **_kwargs: cli.ScheduleStatus(
+            installed=False,
+            active=False,
+            platform=cli.SchedulePlatform.LINUX,
+            interval_minutes=1440,
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "install_schedule",
+        lambda platform, **kwargs: calls.append((platform, kwargs)),
+    )
+
+    result, stdout, stderr = _run(["setup"], object(), prompt=lambda _message: next(answers))
+
+    assert result == 0
+    assert stdout == "Music Friend setup complete.\nDaily refresh: enabled.\n"
+    assert stderr == ""
+    assert len(calls) == 1
+    assert calls[0][1]["interval_minutes"] == 1440
+
+
+def test_setup_preserves_configuration_when_daily_schedule_install_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = _ConfigStore()
+    answers = iter(("new-client", "", "", "", "", ""))
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
+    monkeypatch.setattr(
+        cli,
+        "schedule_status",
+        lambda *_args, **_kwargs: cli.ScheduleStatus(
+            installed=False,
+            active=False,
+            platform=cli.SchedulePlatform.LINUX,
+            interval_minutes=1440,
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "install_schedule",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()),
+    )
+    stdout, stderr = io.StringIO(), io.StringIO()
+
+    result = cli.run_cli(
+        ["setup"],
+        stdout=stdout,
+        stderr=stderr,
+        application=object(),  # type: ignore[arg-type]
+        config_store=store,  # type: ignore[arg-type]
+        prompt=lambda _message: next(answers),
+        secret_prompt=lambda _message: "",
+    )
+
+    assert result == 1
+    assert store.value == LocalConfig(spotify_client_id="new-client")
+    assert stdout.getvalue() == "Music Friend setup complete.\n"
+    assert stderr.getvalue() == (
+        "Daily refresh was not enabled. Run 'music-friend schedule install' to retry.\n"
     )
 
 

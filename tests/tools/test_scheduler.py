@@ -9,10 +9,12 @@ import pytest
 from music_friend.providers.credentials import CredentialStoreError
 from music_friend.tools.scheduler import (
     SchedulePlatform,
+    ScheduleStatus,
     _windows_argument,
     install_schedule,
     remove_schedule,
     render_schedule,
+    schedule_status,
 )
 
 
@@ -69,6 +71,75 @@ def test_scheduler_install_and_remove_use_a_temporary_user_root_and_fake_runner(
         ("systemctl", "--user", "disable", "--now", "music-friend-refresh.timer"),
         ("systemctl", "--user", "daemon-reload"),
     ]
+
+
+def test_scheduler_status_requires_all_definitions_and_an_active_native_job(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    missing = schedule_status(
+        SchedulePlatform.LINUX,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda arguments: calls.append(arguments) or True,
+    )
+
+    assert missing == ScheduleStatus(
+        installed=False,
+        active=False,
+        platform=SchedulePlatform.LINUX,
+        interval_minutes=1440,
+    )
+    assert calls == []
+
+    rendered = render_schedule(
+        SchedulePlatform.LINUX,
+        command=("python", "-m", "music_friend.runtimes.cli", "refresh", "all", "--json"),
+        interval_minutes=1440,
+    )
+    primary = tmp_path / rendered.relative_path
+    primary.parent.mkdir(parents=True)
+    primary.write_text(rendered.content, encoding="utf-8")
+
+    incomplete = schedule_status(
+        SchedulePlatform.LINUX,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda arguments: calls.append(arguments) or True,
+    )
+    assert incomplete.installed is False
+    assert calls == []
+
+    assert rendered.companion_relative_path is not None
+    companion = tmp_path / rendered.companion_relative_path
+    companion.write_text(rendered.companion_content or "", encoding="utf-8")
+
+    active = schedule_status(
+        SchedulePlatform.LINUX,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda arguments: calls.append(arguments) or True,
+    )
+    assert active.installed is True
+    assert active.active is True
+    assert calls == [("systemctl", "--user", "is-active", "music-friend-refresh.timer")]
+
+
+def test_reinstalling_macos_schedule_reloads_the_existing_job(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+    arguments = {
+        "user_root": tmp_path,
+        "command": ("python", "-m", "music_friend.runtimes.cli", "refresh", "all", "--json"),
+        "interval_minutes": 1440,
+        "runner": calls.append,
+        "native_store_factory": lambda: _EligibleStore(),
+    }
+
+    install_schedule(SchedulePlatform.MACOS, **arguments)  # type: ignore[arg-type]
+    install_schedule(SchedulePlatform.MACOS, **arguments)  # type: ignore[arg-type]
+
+    assert [call[1] for call in calls] == ["bootstrap", "bootout", "bootstrap"]
 
 
 @pytest.mark.parametrize("platform", (SchedulePlatform.MACOS, SchedulePlatform.WINDOWS))
