@@ -252,3 +252,69 @@ def test_schedule_mutations_require_path_user_roots() -> None:
 
     with pytest.raises(ValueError, match="platform and user_root are required"):
         remove_schedule(SchedulePlatform.LINUX, user_root="not-a-path")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    (
+        (SchedulePlatform.MACOS, ("launchctl", "print")),
+        (SchedulePlatform.WINDOWS, ("schtasks", "/Query")),
+        (SchedulePlatform.LINUX, ("systemctl", "--user", "is-active")),
+    ),
+)
+def test_schedule_status_queries_the_native_job_only_when_installed(
+    tmp_path: Path, platform: SchedulePlatform, expected: tuple[str, ...]
+) -> None:
+    """Catches status reporting an active job without a definition, or querying the wrong tool."""
+    queries: list[tuple[str, ...]] = []
+
+    def _active(arguments: tuple[str, ...]) -> bool:
+        queries.append(arguments)
+        return True
+
+    before = schedule_status(platform, user_root=tmp_path, interval_minutes=1440, runner=_active)
+    install_schedule(
+        platform,
+        user_root=tmp_path,
+        command=("python", "-m", "music_friend.runtimes.cli", "refresh", "--json"),
+        interval_minutes=1440,
+        runner=lambda _arguments: None,
+        native_store_factory=lambda: _EligibleStore(),
+    )
+    after = schedule_status(platform, user_root=tmp_path, interval_minutes=1440, runner=_active)
+
+    assert before == ScheduleStatus(False, False, platform, 1440)
+    assert after == ScheduleStatus(True, True, platform, 1440)
+    assert len(queries) == 1
+    assert queries[0][: len(expected)] == expected
+
+
+def test_schedule_status_requires_a_path_user_root() -> None:
+    with pytest.raises(ValueError, match="user_root must be a Path"):
+        schedule_status(  # type: ignore[arg-type]
+            SchedulePlatform.LINUX, user_root="not-a-path", interval_minutes=1440
+        )
+
+
+def test_reinstall_proceeds_when_the_previous_macos_job_is_already_unloaded(
+    tmp_path: Path,
+) -> None:
+    """Catches a stale or already-unloaded LaunchAgent blocking a schedule update."""
+    invoked: list[tuple[str, ...]] = []
+
+    def _runner(arguments: tuple[str, ...]) -> None:
+        invoked.append(arguments)
+        if arguments[1] == "bootout":
+            raise subprocess.CalledProcessError(5, arguments)
+
+    options = {
+        "user_root": tmp_path,
+        "command": ("python", "-m", "music_friend.runtimes.cli", "refresh", "--json"),
+        "interval_minutes": 1440,
+        "runner": _runner,
+        "native_store_factory": lambda: _EligibleStore(),
+    }
+    install_schedule(SchedulePlatform.MACOS, **options)  # type: ignore[arg-type]
+    install_schedule(SchedulePlatform.MACOS, **options)  # type: ignore[arg-type]
+
+    assert [entry[1] for entry in invoked] == ["bootstrap", "bootout", "bootstrap"]
