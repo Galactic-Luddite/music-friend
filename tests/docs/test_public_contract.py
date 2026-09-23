@@ -63,7 +63,7 @@ def test_readme_leads_with_outcomes_flow_first_success_and_privacy() -> None:
         assert outcome.lower() in first_section.lower(), outcome
     for heading in (
         "## How it works",
-        "## First success in five commands",
+        "## First success in six commands",
         "## Follow an artist through the inbox",
         "## Import and query listening history",
         "## Privacy at a glance",

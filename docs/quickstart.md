@@ -18,8 +18,12 @@ application client identifier through the local prompt and complete the browser 
 ```bash
 music-friend setup
 music-friend connect spotify
+music-friend doctor
 music-friend status --json
 ```
+
+`doctor` reports every remaining prerequisite in one local check and names its fix. If it
+reports a failed `credential_store`, the MCP server cannot run on this computer yet.
 
 Music Friend uses a public client identifier and PKCE. Do not create or enter a Spotify client
 secret. See [setup](setup.md) for permissions, credential storage, and optional event discovery.
