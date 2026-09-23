@@ -43,12 +43,13 @@ Spotify history ZIP -----(local import)----+                          \--> histo
 Music Friend contacts a provider only when you run a refresh or connect an account. Reading the
 catalog, watchlist, inbox, or history never leaves your computer.
 
-## First success in five commands
+## First success in six commands
 
 After [installing](docs/install.md) and creating a Spotify developer application
 ([setup guide](docs/setup.md)):
 
 ```bash
+music-friend doctor
 music-friend setup
 music-friend connect spotify
 music-friend refresh catalog --json
@@ -56,7 +57,8 @@ music-friend watchlist list --json
 music-friend inbox list --json
 ```
 
-The [quickstart](docs/quickstart.md) walks through each step. Refreshes can report a partial
+`doctor` lists anything still missing, with its fix, before you start. The
+[quickstart](docs/quickstart.md) walks through each step. Refreshes can report a partial
 result when a provider limit interrupts them; see [provider limits](docs/limits.md).
 
 ## Follow an artist through the inbox

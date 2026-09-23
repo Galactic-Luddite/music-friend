@@ -10,7 +10,7 @@ a provider-specific MCP tool (see: docs/design/product-design.md).
 
 ## Source map
 
-- `src/music_friend/runtimes/cli.py` is the `music-friend` command. It owns setup, credentials,
+- `src/music_friend/runtimes/cli.py` is the `music-friend` command. It owns the `doctor` preflight, setup, credentials,
   refreshes, data lifecycle, schedules, and skill installation (see: docs/operations.md).
 - `src/music_friend/runtimes/mcp_stdio.py` is the `music-friend-mcp` command. It runs the catalog
   server from `src/music_friend/mcp/catalog_server.py`, whose `_TOOL_SCHEMAS` mapping is the
@@ -66,6 +66,25 @@ runtime code or package metadata.
 4. Update documentation in the same change when a command, MCP tool, schema, data format,
    validation command, or boundary changes. Update `CHANGELOG.md` for user-visible changes.
 5. Run the fast validation while iterating and the full validation before proposing the change.
+
+## Development environment
+
+Use a virtual environment; current Debian and Ubuntu refuse installs into the system Python
+(PEP 668):
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/music-friend doctor
+```
+
+Run the commands below with `.venv/bin/python`, or activate the environment first. `doctor` checks
+Python, the native credential store, and provider configuration locally; it never contacts a
+provider. Use synthetic configuration; never connect a real account while developing.
+
+`tests/agent_skill/test_install.py::test_wheel_contains_the_exact_canonical_skill_and_installs_it`
+installs the built wheel offline and needs `MF_PHASE1_TEST_WHEELHOUSE` pointing at a wheelhouse of
+the runtime dependencies; without it the test fails locally and passes in CI.
 
 ## Validation
 
