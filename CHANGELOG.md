@@ -2,6 +2,7 @@
 
 ## 0.1.1
 
+- Repositions the README and MCP guide around AI-agent-first use: what runs on your computer, how the MCP client starts `music-friend-mcp`, what you need before starting, and how to register the server with Claude Code and Codex.
 - Provides explicit daily per-user refresh scheduling while keeping installation and setup free of scheduler side effects.
 - Runs scheduled refreshes with the exact Python runtime used to install Music Friend.
 - Reports installed and active scheduler state without opening the local music catalog.

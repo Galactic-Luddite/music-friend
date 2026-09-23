@@ -1,26 +1,54 @@
 # Music Friend
 
-Music Friend is a local-first music companion. It watches the artists you care about, tells you
-when they release something or play near you, and answers questions about your own listening
-history. Its catalog, watchlist, inbox, and imported listening history live in a SQLite file on
-your computer; provider credentials are stored separately in your operating-system credential
-store.
+Music Friend is an **AI-agent-first** music companion that runs on your own computer. There is no
+app, GUI, or TUI to learn: you ask your AI assistant (Claude, Codex, or any MCP-capable client, in
+the terminal or the desktop apps) and it uses Music Friend's tools to answer with real data about
+*your* music.
 
-With Music Friend you can:
+> "Anything new from the artists I follow this week?"
+> "Any of them playing within 50 miles next month?"
+> "What did I listen to most in March, and who fell off my rotation?"
+
+Behind those answers, Music Friend keeps a local catalog, a watchlist of artists you care about,
+an inbox of new releases and nearby shows (each with the reason it appeared), and your imported
+Spotify listening history. They are stored together in one SQLite file on your machine; provider
+credentials live in your operating-system credential store.
+
+## Is this for you?
+
+Music Friend is a power-user tool. Before it is useful you need:
+
+- **A computer that stays yours.** Everything runs locally: the `music-friend-mcp` server your AI
+  client launches, the local catalog, and (if you opt in) a once-a-day refresh job. Nothing is
+  hosted; there is no Music Friend account or cloud service.
+- **An AI client that speaks MCP**, such as Claude Code, Claude Desktop, or Codex. The optional
+  packaged skill teaches the assistant how to use the tools well (see [install](docs/install.md)).
+- **Your own Spotify developer application.** Spotify does not offer a shared public app for tools
+  like this, so every user registers a free developer app and uses its public client ID
+  ([setup](docs/setup.md)). Ticketmaster event discovery is optional and needs its own free key.
+- **Comfort with a terminal** for one-time setup: install, `music-friend setup`,
+  `music-friend connect spotify`, and `music-friend doctor` to confirm everything is ready.
+
+After that, your assistant does the work. Refreshes run when the assistant (or you) asks, or once a
+day if you install the optional per-user schedule with `music-friend schedule install`.
+
+What your assistant can do with it:
 
 - **Build a local catalog** from the artists you follow and the music you have saved on Spotify.
 - **Watch artists** by adding, pinning, or muting them so that discovery follows your choices.
 - **Triage new releases and nearby events** in a local inbox, with a stored explanation for why
   each item appeared. Event discovery through Ticketmaster is optional.
-- **Import your Spotify listening history** and ask bounded questions such as "what did I play
-  most in March?"
-- **Use it from an AI client** through a small, provider-neutral MCP server, or from the local CLI.
+- **Answer questions about your listening history** after you import your Spotify extended
+  streaming-history archive, such as "what did I play most in March?"
 
-It has no Music Friend account, hosted catalog, background daemon, telemetry, or ticket
-purchasing. Refreshes are on demand by default; an optional schedule runs one bounded refresh and
+It has no Music Friend account, hosted catalog, resident daemon, telemetry, or ticket purchasing.
+The MCP server runs only while your AI client is using it, and a scheduled refresh runs once and
 exits.
 
 ## How it works
+
+You talk to your AI client; it starts `music-friend-mcp` on your computer over stdio and calls
+its tools. Those tools read and update the local data below.
 
 ```text
 Spotify account ----(read-only refresh)----+
