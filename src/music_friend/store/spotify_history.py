@@ -228,28 +228,61 @@ def import_spotify_history(
         raise ValueError("invalid Spotify history archive") from None
 
 
+def _range_timestamp(value: object, field: str) -> datetime:
+    """Parse a caller-supplied ``since``/``until`` bound.
+
+    Unlike ``_timestamp`` (which only accepts the ``Z``-suffixed format Spotify's
+    export always uses), this accepts any RFC 3339 offset -- positive, negative,
+    or ``Z`` -- and normalizes the result to UTC. A naive timestamp (no offset and
+    no ``Z``) is rejected with a message that says an offset is required, and an
+    impossible calendar date (e.g. 2026-02-30) is rejected as an invalid date-time,
+    both surfaced by ``datetime.fromisoformat`` itself.
+    """
+    text = _text(value, field)
+    assert text is not None
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as error:
+        raise ValueError(f"{field} must be a valid RFC 3339 date-time") from error
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a UTC offset or 'Z' suffix")
+    return parsed.astimezone(timezone.utc)
+
+
 def summarize_history(
     catalog: Catalog, *, since: str | None = None, until: str | None = None, limit: int = 10
 ) -> HistorySummary:
-    """Summarize imported evidence in the half-open UTC interval ``[since, until)``."""
+    """Summarize imported evidence in the half-open UTC interval ``[since, until)``.
+
+    A zero-length range (``since == until``) is rejected as ``invalid_arguments``
+    rather than returning an empty summary, for the same reason a reversed range
+    is rejected: both describe a range the caller almost certainly did not intend,
+    and a loud error is more useful than a silent empty result.
+    """
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("limit must be from 1 through 50")
-    normalized_since = None if since is None else _timestamp(since, "since")
-    normalized_until = None if until is None else _timestamp(until, "until")
-    if (
-        normalized_since is not None
-        and normalized_until is not None
-        and normalized_since.replace("Z", "+00:00") >= normalized_until.replace("Z", "+00:00")
-    ):
-        raise ValueError("since must be before until")
+    normalized_since = None if since is None else _range_timestamp(since, "since")
+    normalized_until = None if until is None else _range_timestamp(until, "until")
+    if normalized_since is not None and normalized_until is not None:
+        if normalized_since > normalized_until:
+            raise ValueError("since must not be after until")
+        if normalized_since == normalized_until:
+            raise ValueError("since and until must not be equal; the range would be empty")
+    since_text = (
+        None if normalized_since is None else normalized_since.isoformat().replace("+00:00", "Z")
+    )
+    until_text = (
+        None if normalized_until is None else normalized_until.isoformat().replace("+00:00", "Z")
+    )
     clauses: list[str] = []
     arguments: list[object] = []
-    if normalized_since is not None:
+    if since_text is not None:
         clauses.append("replace(played_at, 'Z', '+00:00') >= ?")
-        arguments.append(normalized_since.replace("Z", "+00:00"))
-    if normalized_until is not None:
+        arguments.append(since_text.replace("Z", "+00:00"))
+    if until_text is not None:
         clauses.append("replace(played_at, 'Z', '+00:00') < ?")
-        arguments.append(normalized_until.replace("Z", "+00:00"))
+        arguments.append(until_text.replace("Z", "+00:00"))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     connection = catalog._require_connection()
     aggregate = connection.execute(
@@ -270,8 +303,8 @@ def summarize_history(
         return tuple(HistoryRanking(str(row[0]), int(row[1]), int(row[2])) for row in rows)
 
     return HistorySummary(
-        since=normalized_since,
-        until=normalized_until,
+        since=since_text,
+        until=until_text,
         first_played_at=None if aggregate[0] is None else str(aggregate[0]).replace("+00:00", "Z"),
         last_played_at=None if aggregate[1] is None else str(aggregate[1]).replace("+00:00", "Z"),
         play_count=int(aggregate[2]),

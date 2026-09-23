@@ -173,6 +173,62 @@ def test_listening_history_summary_names_its_evidence_boundary(tmp_path: Path) -
     application.close()
 
 
+def test_listening_history_summary_accepts_rfc_3339_offsets_and_rejects_naive_timestamps(
+    tmp_path: Path,
+) -> None:
+    application = _application(tmp_path)
+    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+
+    for since in (
+        "2026-03-01T08:00:00Z",
+        "2026-03-01T09:00:00+01:00",
+        "2026-03-01T00:00:00-08:00",
+    ):
+        result = _call(
+            server,
+            "summarize_listening_history",
+            {"since": since, "until": "2026-04-01T00:00:00Z", "limit": 5},
+        )
+        assert "category" not in result
+
+    naive = _call(
+        server,
+        "summarize_listening_history",
+        {"since": "2026-03-01T00:00:00", "until": None, "limit": 5},
+    )
+    assert naive["category"] == "invalid_arguments"
+    assert "offset" in naive["message"] or "Z" in naive["message"]
+    application.close()
+
+
+def test_listening_history_summary_rejects_reversed_zero_length_and_impossible_ranges(
+    tmp_path: Path,
+) -> None:
+    application = _application(tmp_path)
+    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+
+    reversed_range = _call(
+        server,
+        "summarize_listening_history",
+        {"since": "2026-04-01T00:00:00Z", "until": "2026-03-01T00:00:00Z", "limit": 5},
+    )
+    zero_length = _call(
+        server,
+        "summarize_listening_history",
+        {"since": "2026-03-01T00:00:00Z", "until": "2026-03-01T00:00:00Z", "limit": 5},
+    )
+    impossible_date = _call(
+        server,
+        "summarize_listening_history",
+        {"since": "2026-02-30T00:00:00Z", "until": None, "limit": 5},
+    )
+
+    for result in (reversed_range, zero_length, impossible_date):
+        assert result["category"] == "invalid_arguments"
+        assert result["message"] != "Invalid tool arguments."
+    application.close()
+
+
 def test_catalog_server_publishes_exact_tool_effect_annotations(tmp_path: Path) -> None:
     """Catches tool metadata under-reporting provider access or destructive local mutations."""
     application = _application(tmp_path)

@@ -44,7 +44,7 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 | `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries | read-only, local |
 | `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry, or `not_found` | local write |
 | `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry`, `record`, and `reasons` (why it was included) | read-only, local |
-| `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (UTC or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
+| `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
 
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
 result when it cannot complete the request. Error messages are redacted and never include provider
@@ -139,10 +139,19 @@ a runtime discovery mechanism.
 music plays. Import the archive first with the CLI (see
 [CLI and data operations](operations.md#import-spotify-listening-history)); MCP cannot import.
 
-Supply nullable UTC `since` and `until` timestamps (ISO 8601 ending in `Z`, or null for an open
-end) and a ranking limit from 1 through 50. The
-result identifies its evidence boundary, covered dates, play time, brief/skipped counts, and top
-artists and tracks. Imported plays remain separate from preferences and watchlist affinity.
+Supply nullable `since` and `until` timestamps and a ranking limit from 1 through 50. `since` and
+`until` accept any RFC 3339 date-time with an explicit UTC offset -- `Z`, or a positive or negative
+`±HH:MM` offset -- and are normalized to UTC before the catalog is queried; the result's `since`
+and `until` are always reported back in UTC (`Z` suffix). A naive timestamp (no offset and no `Z`)
+is rejected as `invalid_arguments`, with a message stating that an offset or `Z` is required. A
+reversed range (`since` after `until`), a zero-length range (`since` equal to `until`), and an
+impossible calendar date (e.g. `2026-02-30T00:00:00Z`) are each rejected as `invalid_arguments`
+with a message naming the specific problem; a zero-length range is treated as a caller error rather
+than an empty summary, for the same reason a reversed range is: it almost certainly was not the
+caller's intent, and a loud error is more useful than a silent empty result. No caller-supplied
+value can produce `internal_error`. The result identifies its evidence boundary, covered dates,
+play time, brief/skipped counts, and top artists and tracks. Imported plays remain separate from
+preferences and watchlist affinity.
 
 A synthetic example: "What did I listen to most in March 2024?" becomes
 `summarize_listening_history` with `since: "2024-03-01T00:00:00Z"`,
