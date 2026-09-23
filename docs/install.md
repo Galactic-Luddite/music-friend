@@ -5,6 +5,22 @@ schedule, or network listener during installation.
 
 Music Friend v0.1 supports macOS and Linux. Windows is not a supported runtime in v0.1.
 
+## Before you start
+
+Gather these once so setup never stops halfway:
+
+- **Python 3.10 or newer.**
+- **A native credential store.** macOS Keychain works out of the box. On Linux, install and unlock
+  Secret Service (for example `gnome-keyring`) or KWallet. The MCP server and scheduled refreshes
+  require it; without one, only interactive CLI commands work, through a passphrase vault.
+- **A Spotify developer application** with a public client ID, PKCE enabled, and the exact redirect
+  URI `http://127.0.0.1/callback` (see [setup](setup.md)).
+- **Optional: a Ticketmaster Discovery API key** and an event area (country code, postal code, and
+  radius) if you want concert discovery.
+
+After installing, `music-friend doctor` checks all of these in one local report and names the fix
+for anything missing. It never contacts a provider or prints a credential value.
+
 ## Intel macOS
 
 No PyPI wheel is available for the Intel macOS build of the required `cryptography` 50
@@ -29,30 +45,6 @@ OPENSSL_STATIC=1 \
 ```
 
 On platforms with a supported cryptography wheel, use the regular release-file installation below.
-
-## From a release file
-
-Download the release file for Music Friend, then install it with pip:
-
-```bash
-python -m pip install music_friend-0.1.0-py3-none-any.whl
-music-friend version
-music-friend --help
-```
-
-For an isolated command installation, use pipx with the same file:
-
-```bash
-pipx install music_friend-0.1.0-py3-none-any.whl
-music-friend version
-```
-
-## From a source checkout
-
-```bash
-python -m pip install .
-music-friend version
-```
 
 ## Optional Agent Skill
 
@@ -80,5 +72,7 @@ Installation requires secure directory-relative filesystem operations that do no
 On platforms without those operations, the command stops without writing instead of using a
 path-based fallback.
 
-After installation, continue with the [quickstart](quickstart.md). `music-friend status --json`
-is a safe local check; it reports Spotify as disconnected until you connect it.
+After installation, run `music-friend doctor` and resolve anything it reports, then continue with
+the [quickstart](quickstart.md). `music-friend status --json` is a safe local check; it reports
+Spotify as disconnected until you connect it, and its `mcp_ready` field is `false` when no native
+credential store is available for the MCP server.
