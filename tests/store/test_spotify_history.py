@@ -234,8 +234,22 @@ def test_import_accepts_nullable_optional_history_fields(tmp_path: Path) -> None
         ({"limit": 0}, "limit must be from 1 through 50"),
         (
             {"since": "2026-02-01T00:00:00Z", "until": "2026-01-01T00:00:00Z"},
-            "since must be before until",
+            "since must not be after until",
         ),
+        (
+            {"since": "2026-01-01T00:00:00Z", "until": "2026-01-01T00:00:00Z"},
+            "since and until must not be equal",
+        ),
+        (
+            # Same instant expressed with different offsets is still a reversed
+            # range once normalized to UTC.
+            {"since": "2026-02-01T01:00:00+01:00", "until": "2026-02-01T00:00:00Z"},
+            "since and until must not be equal",
+        ),
+        ({"since": "2026-03-01T00:00:00"}, "since must include a UTC offset"),
+        ({"until": "2026-03-01T00:00:00"}, "until must include a UTC offset"),
+        ({"since": "2026-02-30T00:00:00Z"}, "since must be a valid RFC 3339 date-time"),
+        ({"since": "not-a-timestamp"}, "since must be a valid RFC 3339 date-time"),
     ],
 )
 def test_summary_rejects_invalid_bounds(
@@ -244,6 +258,28 @@ def test_summary_rejects_invalid_bounds(
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         with pytest.raises(ValueError, match=message):
             summarize_history(catalog, **arguments)  # type: ignore[arg-type]
+
+
+def test_summary_accepts_rfc_3339_offsets_and_normalizes_to_utc(tmp_path: Path) -> None:
+    source = _archive(tmp_path / "spotify.zip", [_track(ts="2026-03-01T09:00:00Z")])
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        import_spotify_history(catalog, source)
+
+        via_z = summarize_history(
+            catalog, since="2026-03-01T08:00:00Z", until="2026-03-01T10:00:00Z"
+        )
+        via_positive_offset = summarize_history(
+            catalog, since="2026-03-01T09:00:00+01:00", until="2026-03-01T11:00:00+01:00"
+        )
+        via_negative_offset = summarize_history(
+            catalog, since="2026-03-01T00:00:00-08:00", until="2026-03-01T02:00:00-08:00"
+        )
+
+    assert via_z.play_count == 1
+    assert via_positive_offset.play_count == 1
+    assert via_negative_offset.play_count == 1
+    assert via_positive_offset.since == "2026-03-01T08:00:00Z"
+    assert via_negative_offset.since == "2026-03-01T08:00:00Z"
 
 
 def test_summary_reports_range_rankings_and_brief_skip_breakdown(tmp_path: Path) -> None:

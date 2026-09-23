@@ -137,7 +137,15 @@ Clock = Callable[[], datetime]
 
 
 class _InvalidArguments(ValueError):
-    """Internal marker for a closed MCP argument failure."""
+    """Internal marker for a closed MCP argument failure.
+
+    Carries an optional caller-facing message (e.g. naming which range or
+    date-time rule was violated); falls back to the generic message when none
+    is given.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or str(_INVALID_ARGUMENTS["message"]))
 
 
 async def _enforce_tool_contract(
@@ -354,9 +362,12 @@ def create_music_server(
     ) -> CallToolResult:
         def action() -> dict[str, object]:
             parsed_since, parsed_until, parsed_limit = _history_arguments(since, until, limit)
-            summary = application.summarize_history(
-                since=parsed_since, until=parsed_until, limit=parsed_limit
-            )
+            try:
+                summary = application.summarize_history(
+                    since=parsed_since, until=parsed_until, limit=parsed_limit
+                )
+            except ValueError as error:
+                raise _InvalidArguments(str(error)) from error
             return {
                 "evidence_boundary": "imported Spotify music history",
                 "since": summary.since,
@@ -379,8 +390,8 @@ def create_music_server(
 def _safe_call(action: Callable[[], dict[str, object]]) -> CallToolResult:
     try:
         result = action()
-    except _InvalidArguments:
-        result = dict(_INVALID_ARGUMENTS)
+    except _InvalidArguments as error:
+        result = {"category": "invalid_arguments", "message": str(error)}
     except Exception:
         result = dict(_INTERNAL_ERROR)
     return _tool_result(result)
@@ -451,11 +462,18 @@ def _inbox_state(value: object, *, required: bool = False) -> InboxState | None:
 def _history_arguments(
     since: object, until: object, limit: object
 ) -> tuple[str | None, str | None, int]:
+    # Only a shallow type/length check happens here. The MCP request-validation
+    # middleware (`_has_valid_tool_arguments`) runs this same function ahead of
+    # the actual tool call, before the domain layer's database connection is
+    # necessarily available, so it cannot perform full RFC 3339 parsing or range
+    # checks. Real timestamp parsing (accepting any RFC 3339 offset, rejecting
+    # naive timestamps and impossible calendar dates) and range validation
+    # (reversed or zero-length) happen in `summarize_history`
+    # (music_friend.store.spotify_history), whose `ValueError` the tool handler
+    # above translates into `_InvalidArguments` with the specific message.
     for value in (since, until):
-        if value is not None and (
-            type(value) is not str or len(value) > 64 or not value.endswith("Z")
-        ):
-            raise _InvalidArguments()
+        if value is not None and (type(value) is not str or not value.strip() or len(value) > 64):
+            raise _InvalidArguments("since and until must be RFC 3339 date-time strings")
     return since, until, _limit(limit, maximum=50)  # type: ignore[return-value]
 
 
