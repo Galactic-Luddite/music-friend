@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import stat
 import time
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -87,6 +89,29 @@ def _bounded_limit(limit: object) -> int:
     if type(limit) is not int or not 1 <= limit <= _MAX_QUERY_LIMIT:
         raise ValueError("limit must be an integer from 1 through 500")
     return limit
+
+
+_MATCH_PUNCTUATION = re.compile(r"[-&]+")
+_MATCH_WHITESPACE = re.compile(r"\s+")
+
+
+def _normalize_for_match(text: str) -> str:
+    """Fold text for accent- and stylization-insensitive substring matching.
+
+    Applies a Unicode NFKD decomposition (splitting stylized/compatibility forms such as ``Ÿ``
+    into a base letter plus combining marks, and folding compatibility variants toward their
+    common form), strips the resulting combining marks, case-folds, and collapses ``-``/``&`` and
+    surrounding whitespace to a single space so hyphenated or ampersand-joined names compare the
+    same as their spaced-out equivalents. Both the query and stored display names are normalized
+    through this function before comparison; display names returned to callers are never altered.
+    """
+    decomposed = unicodedata.normalize("NFKD", text)
+    without_marks = "".join(
+        character for character in decomposed if not unicodedata.combining(character)
+    )
+    folded = without_marks.casefold()
+    despunctuated = _MATCH_PUNCTUATION.sub(" ", folded)
+    return _MATCH_WHITESPACE.sub(" ", despunctuated).strip()
 
 
 def _datetime_text(value: datetime) -> str:
@@ -698,32 +723,42 @@ class Catalog:
         )
 
     def search_artists(self, query: str, *, limit: int) -> tuple[Artist, ...]:
-        """Search canonical artist names with an explicit bound and stable ordering."""
+        """Search canonical artist names with an explicit bound and stable ordering.
+
+        Matching is case-insensitive and accent/stylization-insensitive: both the query and each
+        stored ``display_name`` are folded through :func:`_normalize_for_match` (Unicode NFKD,
+        combining marks stripped, case-folded, ``-``/``&`` and repeated whitespace collapsed)
+        before comparison. Because SQLite's ``LIKE ... COLLATE NOCASE`` only folds ASCII case and
+        cannot express that fold, exact SQL-side narrowing would silently miss accented and
+        stylized matches (e.g. a query of ``elodie cafe`` must find a stored ``Élodie Café``), so
+        matching runs in Python over every stored display name; the display name itself is never
+        altered, only the comparison. A literal ``%`` or ``_`` in the query still matches
+        literally, since comparison is now plain substring containment rather than SQL ``LIKE``.
+        """
         if not isinstance(query, str) or not query.strip() or len(query) > 256:
             raise ValueError("query must contain 1..256 characters")
         selected_limit = _bounded_limit(limit)
-        escape_character = chr(92)
-        escaped = (
-            query.replace(escape_character, escape_character * 2)
-            .replace("%", escape_character + "%")
-            .replace("_", escape_character + "_")
-        )
+        normalized_query = _normalize_for_match(query)
         rows = (
             self._require_connection()
             .execute(
                 """
-            SELECT local_id FROM artists
-            WHERE display_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+            SELECT local_id, display_name FROM artists
             ORDER BY display_name COLLATE NOCASE, display_name, local_id
-            LIMIT ?
-            """,
-                (f"%{escaped}%", selected_limit),
+            """
             )
             .fetchall()
         )
+        matched_ids: list[str] = []
+        if normalized_query:
+            for row in rows:
+                if normalized_query in _normalize_for_match(str(row[1])):
+                    matched_ids.append(str(row[0]))
+                    if len(matched_ids) == selected_limit:
+                        break
         artists: list[Artist] = []
-        for row in rows:
-            artist = self.get_artist(str(row[0]))
+        for local_id in matched_ids:
+            artist = self.get_artist(local_id)
             if artist is None:
                 raise sqlite3.IntegrityError("artist disappeared during search")
             artists.append(artist)

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `search_catalog` now matches case- and accent/stylization-insensitively: the query and stored
+  artist names are folded (Unicode NFKD, combining marks stripped, case-folded, `-`/`&` treated as
+  separators) before comparison, so a plain-ASCII query finds an accented or stylized stored name.
+  Display names in results are unchanged; matching runs in Python over the catalog rather than
+  through SQLite `LIKE`, which cannot express the fold.
+- `list_inbox` items now include a compact `summary` (`kind`, `title`, `artist_names`, `date`), so
+  most "anything new?" requests no longer need a follow-up `explain_inbox_item` call per item.
+  `explain_inbox_item`'s `record` now includes `artist_names` alongside `artist_ids`. Both changes
+  are additive; no existing field was removed or renamed.
 - Fixes `summarize_listening_history` to accept any RFC 3339 `since`/`until` timestamp with a
   positive or negative UTC offset (previously only the `Z` suffix was accepted), normalizing to
   UTC before querying. A naive timestamp (no offset and no `Z`) is still rejected, now with a
