@@ -29,6 +29,7 @@ from music_friend.domain import (
 )
 from music_friend.providers import Capability, MusicSource
 from music_friend.providers.credentials import CredentialStore
+from music_friend.providers.keyring_store import KeyringCredentialStore
 from music_friend.providers.spotify.config import SpotifySettings
 from music_friend.providers.spotify.oauth import AuthorizationMode, SpotifyAuthorization
 from music_friend.providers.spotify.source import SpotifySource
@@ -57,12 +58,13 @@ Prompt = Callable[[str], str]
 SecretPrompt = Callable[[str], str]
 RefreshRunner = Callable[[str], object]
 Clock = Callable[[], datetime]
+NativeStoreProbe = Callable[[], bool]
 AuthorizerFactory = Callable[
     [SpotifySettings, SpotifyTokenManager, BrowserOpener], SpotifyAuthorization
 ]
 
 _USAGE = (
-    "Usage: music-friend setup | connect spotify | disconnect spotify | status | "
+    "Usage: music-friend doctor | setup | connect spotify | disconnect spotify | status | "
     "refresh catalog|releases|events|all | watchlist list | inbox list|show | "
     "data export|import|import-spotify|backup|restore|delete | diagnostics | "
     "schedule install|status|remove | version\n"
@@ -83,6 +85,15 @@ def _default_authorizer(
     settings: SpotifySettings, tokens: SpotifyTokenManager, browser_opener: BrowserOpener
 ) -> SpotifyAuthorization:
     return SpotifyAuthorization(settings=settings, tokens=tokens, browser_opener=browser_opener)
+
+
+def _native_store_available() -> bool:
+    """Report whether an approved native credential store opens, without reading any value."""
+    try:
+        KeyringCredentialStore()
+    except Exception:
+        return False
+    return True
 
 
 def _default_prompt(message: str) -> str:
@@ -187,6 +198,7 @@ def run_cli(
     credential_store_factory: CredentialStoreFactory = open_interactive_credential_store,
     browser_opener: BrowserOpener = webbrowser.open,
     authorizer_factory: AuthorizerFactory = _default_authorizer,
+    native_store_probe: NativeStoreProbe | None = None,
 ) -> int:
     """Run one local operation without accepting credentials through command arguments."""
     command, structured = _split_json(argv)
@@ -228,6 +240,7 @@ def run_cli(
                 credential_store_factory,
                 browser_opener,
                 authorizer_factory,
+                _native_store_available if native_store_probe is None else native_store_probe,
             )
     except Exception:
         print("Music Friend could not complete the command.", file=stderr)
@@ -256,7 +269,18 @@ def _run_local_command(
     credential_store_factory: CredentialStoreFactory,
     browser_opener: BrowserOpener,
     authorizer_factory: AuthorizerFactory,
+    native_store_probe: NativeStoreProbe,
 ) -> int:
+    if argv == ["doctor"]:
+        return _doctor(
+            config_store,
+            structured,
+            stdout,
+            connector_factory,
+            credential_store_factory,
+            native_store_probe,
+            now,
+        )
     if argv == ["setup"]:
         return _setup(config_store, prompt, secret_prompt, credential_store_factory, stdout, stderr)
     if argv == ["version"]:
@@ -265,7 +289,7 @@ def _run_local_command(
         try:
             config = _load_config(config_store)
         except Exception:
-            return _unavailable_status(application, structured, stdout)
+            return _unavailable_status(application, structured, stdout, native_store_probe)
         return _status_command(
             application,
             config,
@@ -273,6 +297,7 @@ def _run_local_command(
             stdout,
             connector_factory,
             credential_store_factory,
+            native_store_probe,
             now,
         )
     if argv == ["diagnostics"]:
@@ -602,6 +627,7 @@ def _status_command(
     stdout: TextIO,
     connector_factory: ConnectorFactory,
     credential_store_factory: CredentialStoreFactory,
+    native_store_probe: NativeStoreProbe,
     now: Clock,
 ) -> int:
     connection = "disconnected"
@@ -614,7 +640,7 @@ def _status_command(
             ) as (_settings, tokens):
                 connection = "connected" if tokens.status().connected else "disconnected"
         except Exception:
-            return _unavailable_status(application, structured, stdout)
+            return _unavailable_status(application, structured, stdout, native_store_probe)
     payload = _catalog_status(application)
     payload.update(
         {
@@ -623,6 +649,7 @@ def _status_command(
             "events": {
                 "ready": _events_ready(config, connector_factory, credential_store_factory, now)
             },
+            "mcp_ready": _probe(native_store_probe),
         }
     )
     return _emit(payload, structured, stdout)
@@ -656,7 +683,10 @@ def _events_ready(
 
 
 def _unavailable_status(
-    application: MusicFriendApplication, structured: bool, stdout: TextIO
+    application: MusicFriendApplication,
+    structured: bool,
+    stdout: TextIO,
+    native_store_probe: NativeStoreProbe,
 ) -> int:
     payload = _catalog_status(application)
     payload.update(
@@ -664,11 +694,109 @@ def _unavailable_status(
             "connected": False,
             "connection": "unavailable",
             "events": {"ready": False},
+            "mcp_ready": _probe(native_store_probe),
             "status": "unavailable",
         }
     )
     _emit(payload, structured, stdout)
     return 4
+
+
+def _probe(native_store_probe: NativeStoreProbe) -> bool:
+    try:
+        return native_store_probe() is True
+    except Exception:
+        return False
+
+
+_DOCTOR_REMEDIES = {
+    "python": "Install Python 3.10 or newer.",
+    "credential_store": (
+        "Install and unlock a native credential store (macOS Keychain, Windows Credential "
+        "Manager, or Secret Service/KWallet on Linux). The MCP server and schedules require it; "
+        "the passphrase vault works only for interactive CLI commands."
+    ),
+    "spotify_client_id": "Create a Spotify developer app and run: music-friend setup",
+    "spotify_connection": "Run: music-friend connect spotify",
+    "event_area": "Run: music-friend setup and enter a country, postal code, and radius",
+    "ticketmaster_key": "Add a Ticketmaster Discovery API key with: music-friend setup",
+}
+
+
+def _doctor(
+    config_store: object,
+    structured: bool,
+    stdout: TextIO,
+    connector_factory: ConnectorFactory,
+    credential_store_factory: CredentialStoreFactory,
+    native_store_probe: NativeStoreProbe,
+    now: Clock,
+) -> int:
+    """Report every onboarding blocker at once, locally, without reading secret values."""
+    checks: dict[str, bool | None] = {
+        "python": sys.version_info >= (3, 10),
+        "credential_store": _probe(native_store_probe),
+    }
+    try:
+        config: LocalConfig | None = _load_config(config_store)
+    except Exception:
+        config = None
+    checks["spotify_client_id"] = config is not None and config.spotify_client_id is not None
+    checks["event_area"] = config is not None and all(
+        value is not None
+        for value in (
+            config.event_country_code,
+            config.event_postal_code,
+            config.event_radius,
+            config.event_radius_unit,
+        )
+    )
+    checks["spotify_connection"] = None
+    checks["ticketmaster_key"] = None
+    if checks["credential_store"] and config is not None:
+        if checks["spotify_client_id"]:
+            try:
+                with _spotify_tokens(
+                    config,
+                    connector_factory=connector_factory,
+                    credential_store_factory=credential_store_factory,
+                ) as (_settings, tokens):
+                    checks["spotify_connection"] = tokens.status().connected
+            except Exception:
+                checks["spotify_connection"] = False
+        try:
+            with _ticketmaster_client(
+                connector_factory=connector_factory,
+                credential_store_factory=credential_store_factory,
+                now=now,
+            ) as client:
+                checks["ticketmaster_key"] = client.is_configured()
+        except Exception:
+            checks["ticketmaster_key"] = False
+    ready = all(value is True for value in checks.values())
+    payload: dict[str, object] = {
+        "status": "ready" if ready else "not_ready",
+        "checks": {
+            name: {
+                "state": "ok" if value is True else "unchecked" if value is None else "failed",
+                "remedy": None if value is True else _DOCTOR_REMEDIES[name],
+            }
+            for name, value in checks.items()
+        },
+    }
+    _emit(payload, structured, stdout, text=_doctor_text(payload))
+    return 0 if ready else 5
+
+
+def _doctor_text(payload: dict[str, object]) -> str:
+    lines = [f"Music Friend doctor: {'ready' if payload['status'] == 'ready' else 'not ready'}"]
+    checks = payload["checks"]
+    assert isinstance(checks, dict)
+    for name, result in checks.items():
+        lines.append(f"[{result['state']}] {name}")
+        if result["remedy"] is not None:
+            lines.append(f"    {result['remedy']}")
+    return "\n".join(lines)
 
 
 def _refresh(
@@ -963,6 +1091,12 @@ def _text(payload: dict[str, object]) -> str:
         if isinstance(events, dict) and type(events.get("ready")) is bool:
             suffix = suffix.removesuffix(")") + (
                 f"; Events: {'ready' if events['ready'] else 'not ready'})"
+            )
+        if type(payload.get("mcp_ready")) is bool:
+            suffix = suffix.removesuffix(")") + (
+                "; MCP: ready)"
+                if payload["mcp_ready"]
+                else "; MCP: needs a native credential store, run music-friend doctor)"
             )
         return f"Music Friend: {payload['status']}{suffix}"
     if type(payload.get("records")) is int:

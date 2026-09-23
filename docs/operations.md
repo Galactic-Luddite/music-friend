@@ -8,12 +8,29 @@ and listening-history summaries.
 
 | Group | Commands | What they do |
 |-------|----------|--------------|
-| Setup and connection | `setup`, `connect spotify`, `disconnect spotify`, `version` | Enter the Spotify client identifier and optional event area, authorize or remove the Spotify credential |
+| Setup and connection | `doctor`, `setup`, `connect spotify`, `disconnect spotify`, `version` | Check every onboarding prerequisite locally, enter the Spotify client identifier and optional event area, authorize or remove the Spotify credential |
 | Inspect | `status`, `diagnostics`, `watchlist list`, `inbox list`, `inbox show ITEM_ID` | Read local state without contacting a provider |
 | Refresh | `refresh catalog`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
 | Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete` | Move, protect, or erase local data |
 | Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional six-hour refresh |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
+
+## Check prerequisites
+
+```bash
+music-friend doctor
+music-friend doctor --json
+```
+
+`doctor` reports Python, the native credential store, the Spotify client ID and connection, the
+event area, and the Ticketmaster key in one pass. Each check is `ok`, `failed`, or `unchecked`
+(credential checks are skipped when no native store is available, so the vault is never
+unlocked), and every non-`ok` check names its fix. It exits 0 when everything is ready and 5
+otherwise. It reads only local state, never contacts a provider, and never prints credential
+values, so its output is safe to paste into an issue.
+
+`status --json` includes `mcp_ready`, which is `false` when the MCP server could not open an
+approved native credential store.
 
 ## Inspect and refresh
 
