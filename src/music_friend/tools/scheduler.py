@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from music_friend._local_files import atomic_replace
 from music_friend.providers.credentials import CredentialStore, CredentialStoreError
 from music_friend.providers.store_selection import open_scheduled_credential_store
 
@@ -33,7 +34,18 @@ class RenderedSchedule:
     companion_content: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleStatus:
+    """Observed installation and activation state for one per-user schedule."""
+
+    installed: bool
+    active: bool
+    platform: SchedulePlatform
+    interval_minutes: int
+
+
 CommandRunner = Callable[[tuple[str, ...]], None]
+StatusRunner = Callable[[tuple[str, ...]], bool]
 NativeStoreFactory = Callable[[], CredentialStore]
 
 
@@ -78,10 +90,17 @@ def install_schedule(
     if getattr(store, "scheduled_eligible", False) is not True:
         raise CredentialStoreError()
     rendered = render_schedule(platform, command=command, interval_minutes=interval_minutes)
+    primary = user_root / rendered.relative_path
+    reload_existing = platform is SchedulePlatform.MACOS and primary.is_file()
+    execute = _default_runner if runner is None else runner
+    if reload_existing:
+        try:
+            _remove_command(platform, primary, execute)
+        except (OSError, subprocess.SubprocessError):
+            pass
     primary = _write_definition(user_root, rendered.relative_path, rendered.content)
     if rendered.companion_relative_path is not None and rendered.companion_content is not None:
         _write_definition(user_root, rendered.companion_relative_path, rendered.companion_content)
-    execute = _default_runner if runner is None else runner
     _install_command(platform, primary, execute)
     return primary
 
@@ -106,6 +125,30 @@ def remove_schedule(
                 (user_root / relative_path).unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def schedule_status(
+    platform: SchedulePlatform,
+    *,
+    user_root: Path,
+    interval_minutes: int,
+    runner: StatusRunner | None = None,
+) -> ScheduleStatus:
+    """Inspect whether the known definition exists and its native job is active."""
+    if not isinstance(user_root, Path):
+        raise ValueError("user_root must be a Path")
+    rendered = render_schedule(
+        platform,
+        command=("music-friend", "refresh", "all"),
+        interval_minutes=interval_minutes,
+    )
+    paths = [user_root / rendered.relative_path]
+    if rendered.companion_relative_path is not None:
+        paths.append(user_root / rendered.companion_relative_path)
+    installed = all(path.is_file() for path in paths)
+    execute = _default_status_runner if runner is None else runner
+    active = installed and execute(_status_command(platform))
+    return ScheduleStatus(installed, active, platform, interval_minutes)
 
 
 def _validate(platform: SchedulePlatform, command: tuple[str, ...], interval_minutes: int) -> None:
@@ -179,8 +222,12 @@ def _windows_argument(value: str) -> str:
 
 def _write_definition(user_root: Path, relative_path: Path, content: str) -> Path:
     destination = user_root / relative_path
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    destination.write_text(content, encoding="utf-8")
+    if not atomic_replace(
+        destination,
+        content.encode("utf-8"),
+        prefix=f".{destination.name}.",
+    ):
+        raise OSError("schedule definition could not be written")
     return destination
 
 
@@ -204,14 +251,37 @@ def _remove_command(platform: SchedulePlatform, definition: Path, runner: Comman
         runner(("systemctl", "--user", "daemon-reload"))
 
 
+def _status_command(platform: SchedulePlatform) -> tuple[str, ...]:
+    if platform is SchedulePlatform.MACOS:
+        return ("launchctl", "print", f"gui/{os.getuid()}/com.musicfriend.refresh")
+    if platform is SchedulePlatform.WINDOWS:
+        return ("schtasks", "/Query", "/TN", "MusicFriendRefresh")
+    return ("systemctl", "--user", "is-active", "music-friend-refresh.timer")
+
+
 def _default_runner(arguments: tuple[str, ...]) -> None:
     subprocess.run(arguments, check=True)
 
 
+def _default_status_runner(arguments: tuple[str, ...]) -> bool:
+    return (
+        subprocess.run(
+            arguments,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode
+        == 0
+    )
+
+
 __all__ = [
     "RenderedSchedule",
+    "ScheduleStatus",
     "SchedulePlatform",
     "install_schedule",
     "remove_schedule",
     "render_schedule",
+    "schedule_status",
 ]

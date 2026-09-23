@@ -98,10 +98,12 @@ to remove the Spotify credential, then rerun setup with `-` at the Ticketmaster 
 the Ticketmaster credential. In other words, disconnect Spotify separately before discarding the
 local installation.
 
-## Optional schedule
+## Daily schedule
 
-Music Friend does not install a schedule by default. A schedule runs `music-friend refresh all`
-every six hours and exits. It requires an approved native credential store; the interactive vault
+Package installation and `music-friend setup` never create a schedule. Explicitly installing one
+creates a per-user schedule that runs a bounded
+`refresh all --json` once every 1,440 minutes with the Python runtime from the Music Friend
+installation, then exits. It requires an approved native credential store; the interactive vault
 cannot be used for scheduled refreshes.
 
 ```bash
@@ -110,9 +112,10 @@ music-friend schedule install
 music-friend schedule remove
 ```
 
-The command uses the current supported platform’s per-user scheduler: LaunchAgent on macOS or a
-systemd user timer on Linux. Review the rendered platform entry after installation and remove it
-when it is no longer wanted.
+Status reports whether the definition is installed and whether the native job is active, together
+with its platform and interval. The command uses the current supported platform’s per-user
+scheduler: LaunchAgent on macOS or a systemd user timer on Linux. Repeated installation updates the
+same named schedule. Remove it when it is no longer wanted.
 
 ## Optional skill
 

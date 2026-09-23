@@ -11,6 +11,18 @@ manage credentials, schedules, imports, restores, backups, or full-data deletion
 encrypted-vault fallback is interactive CLI only; the current stdio MCP server requires an
 approved native credential store.
 
+## How it runs
+
+Music Friend is built to be used by an AI assistant, not through its own interface. Your MCP client
+(Claude Code, Claude Desktop, Codex, or another stdio client) starts `music-friend-mcp` as a child
+process on the same computer when a conversation needs it, calls its tools, and stops it when the
+session ends. There is no resident service, port, or hosted component: the assistant reads the
+local catalog directly, and only `refresh_music` reaches out to Spotify or Ticketmaster, read-only.
+
+Because the server runs on your computer, register it on the machine that holds your Music Friend
+data and credentials. Run `music-friend doctor` there first; the server needs an approved native
+credential store.
+
 ## Interface boundary
 
 MCP schemas are the universal integration interface. A compatible client discovers the advertised
@@ -57,7 +69,7 @@ The server uses stdio only. It has no network listener.
 
 ## Codex
 
-Add this local server configuration to the appropriate Codex configuration file:
+Add this local server configuration to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.music-friend]
@@ -66,7 +78,13 @@ command = "music-friend-mcp"
 
 ## Claude Code
 
-Add the equivalent server entry to the Claude Code MCP configuration:
+Register the server from a terminal:
+
+```bash
+claude mcp add music-friend -- music-friend-mcp
+```
+
+Or add the equivalent entry to a Claude Code or Claude Desktop MCP configuration:
 
 ```json
 {
@@ -78,6 +96,10 @@ Add the equivalent server entry to the Claude Code MCP configuration:
   }
 }
 ```
+
+If you installed into a virtual environment, use the absolute path to `music-friend-mcp` inside
+that environment's `bin` directory, because MCP clients do not inherit your shell's activated
+environment.
 
 ## Other stdio clients
 

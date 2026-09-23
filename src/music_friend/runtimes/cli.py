@@ -46,9 +46,10 @@ from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import RefreshInvocation, refresh_once
 from music_friend.tools.scheduler import (
     SchedulePlatform,
+    ScheduleStatus,
     install_schedule,
     remove_schedule,
-    render_schedule,
+    schedule_status,
 )
 
 ConnectorFactory = Callable[[], httpx.BaseTransport]
@@ -71,6 +72,7 @@ _USAGE = (
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
 )
+_DAILY_REFRESH_MINUTES = 1440
 
 
 class _ConnectionFailed(RuntimeError):
@@ -210,6 +212,17 @@ def run_cli(
             print(_USAGE, end="", file=stderr)
             return 2
         return _skill_install_command(command[2:], stdout, stderr)
+    if (
+        len(command) == 2
+        and command[0] == "schedule"
+        and command[1]
+        in {
+            "install",
+            "status",
+            "remove",
+        }
+    ):
+        return _schedule_command(command[1], structured, stdout, stderr)
 
     store = LocalConfigStore() if config_store is None else config_store
     if not callable(getattr(store, "load", None)) or not callable(getattr(store, "save", None)):
@@ -356,8 +369,6 @@ def _run_local_command(
         return 2
     if len(argv) >= 2 and argv[0] == "data":
         return _data_command(argv[1:], application, prompt, structured, stdout, stderr)
-    if len(argv) == 2 and argv[0] == "schedule" and argv[1] in {"install", "status", "remove"}:
-        return _schedule_command(argv[1], structured, stdout, stderr)
     print(_USAGE, end="", file=stderr)
     return 2
 
@@ -912,25 +923,54 @@ def _data_command(
 def _schedule_command(action: str, structured: bool, stdout: TextIO, stderr: TextIO) -> int:
     platform = _schedule_platform()
     root = Path.home()
-    command = ("music-friend", "refresh", "all")
+    command = _scheduled_refresh_command()
     try:
         if action == "install":
-            install_schedule(platform, user_root=root, command=command, interval_minutes=360)
+            install_schedule(
+                platform,
+                user_root=root,
+                command=command,
+                interval_minutes=_DAILY_REFRESH_MINUTES,
+            )
             return _emit({"status": "installed"}, structured, stdout, text="Schedule: installed.")
         if action == "remove":
             remove_schedule(platform, user_root=root)
             return _emit({"status": "removed"}, structured, stdout, text="Schedule: removed.")
-        path = root / render_schedule(platform, command=command, interval_minutes=360).relative_path
-        installed = path.is_file()
+        status: ScheduleStatus = schedule_status(
+            platform, user_root=root, interval_minutes=_DAILY_REFRESH_MINUTES
+        )
+        payload: dict[str, object] = {
+            "installed": status.installed,
+            "active": status.active,
+            "platform": status.platform.value,
+            "interval_minutes": status.interval_minutes,
+        }
         return _emit(
-            {"installed": installed},
+            payload,
             structured,
             stdout,
-            text="Schedule: installed." if installed else "Schedule: not installed.",
+            text=(
+                "Schedule: installed."
+                if status.installed and status.active
+                else "Schedule: installed but inactive."
+                if status.installed
+                else "Schedule: not installed."
+            ),
         )
     except Exception:
         print("Music Friend could not complete the command.", file=stderr)
         return 1
+
+
+def _scheduled_refresh_command() -> tuple[str, ...]:
+    return (
+        str(Path(sys.executable).absolute()),
+        "-m",
+        "music_friend.runtimes.cli",
+        "refresh",
+        "all",
+        "--json",
+    )
 
 
 def _schedule_platform() -> SchedulePlatform:

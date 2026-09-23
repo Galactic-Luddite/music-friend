@@ -26,7 +26,8 @@ music-friend status --json
 reports a failed `credential_store`, the MCP server cannot run on this computer yet.
 
 Music Friend uses a public client identifier and PKCE. Do not create or enter a Spotify client
-secret. See [setup](setup.md) for permissions, credential storage, and optional event discovery.
+secret. Setup leaves refreshes manual. See [setup](setup.md) for permissions, credential storage,
+optional scheduling, and event discovery.
 
 ## 3. Refresh your catalog
 

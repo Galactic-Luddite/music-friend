@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "music-friend"
-version = "0.1.0"
+version = "0.1.1"
 description = "A local-first, provider-neutral music companion."
 readme = "README.md"
 requires-python = ">=3.10"

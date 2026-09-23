@@ -3,7 +3,8 @@
 This file is the cold-start contract for anyone, person or coding agent, who opens this source
 checkout. Read it before changing code, tests, or documentation.
 
-Music Friend is a local-first music companion. It keeps music data on the person's computer and
+Music Friend is a local-first, AI-agent-first music companion: people use it through an MCP
+client (Claude, Codex, and similar) running on their own computer, not through a GUI or TUI. It keeps music data on the person's computer and
 provides a provider-neutral interface for local discovery, watchlists, inboxes, and imported
 listening history. Do not add a hosted account, network listener, telemetry, ticket purchasing, or
 a provider-specific MCP tool (see: docs/design/product-design.md).

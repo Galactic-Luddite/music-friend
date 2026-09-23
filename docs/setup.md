@@ -25,6 +25,8 @@ the CLI or MCP conversation.
 The app prefers an approved operating-system credential store. If one is unavailable, interactive
 use can fall back to a passphrase-protected local vault. This fallback is interactive CLI only; the
 current stdio MCP server and schedule commands require an approved native credential store.
+Setup does not install a refresh schedule. To enable a daily per-user schedule explicitly, use
+`music-friend schedule install` on a computer intended to run scheduled jobs.
 Disconnecting removes the locally stored Spotify credential:
 
 ```bash
