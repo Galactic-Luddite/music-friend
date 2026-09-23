@@ -112,6 +112,7 @@ def test_catalog_server_exposes_only_the_stable_local_tool_inventory(tmp_path: P
         "list_inbox",
         "update_inbox_item",
         "explain_inbox_item",
+        "summarize_listening_history",
     ]
 
     async def listed_schemas() -> dict[str, dict[str, object]]:
@@ -132,6 +133,43 @@ def test_catalog_server_exposes_only_the_stable_local_tool_inventory(tmp_path: P
         "maximum": 100,
         "type": "integer",
     }
+    application.close()
+
+
+def test_listening_history_summary_names_its_evidence_boundary(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    connection = application._catalog._require_connection()
+    connection.execute(
+        """INSERT INTO listening_history (
+            event_id, source, played_at, milliseconds_played, track_uri, track_name,
+            artist_name, album_name, archive_digest, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "event-1",
+            "spotify-history",
+            "2026-01-02T03:04:05Z",
+            123000,
+            "spotify:track:one",
+            "Track One",
+            "Artist One",
+            "Album One",
+            "digest",
+            "2026-09-04T00:00:00Z",
+        ),
+    )
+    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+
+    result = _call(
+        server,
+        "summarize_listening_history",
+        {"since": "2026-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z", "limit": 5},
+    )
+
+    assert result["evidence_boundary"] == "imported Spotify music history"
+    assert result["play_count"] == 1
+    assert result["top_artists"] == [
+        {"name": "Artist One", "play_count": 1, "milliseconds_played": 123000}
+    ]
     application.close()
 
 
@@ -200,6 +238,13 @@ def test_catalog_server_publishes_exact_tool_effect_annotations(tmp_path: Path) 
             "openWorldHint": False,
         },
         "explain_inbox_item": {
+            "title": None,
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": None,
+            "openWorldHint": False,
+        },
+        "summarize_listening_history": {
             "title": None,
             "readOnlyHint": True,
             "destructiveHint": False,

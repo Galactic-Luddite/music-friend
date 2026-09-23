@@ -234,7 +234,7 @@ def _artifact_smoke_code(cwd: Path) -> str | None:
         f"catalog = Catalog.open(Path({str(database)!r})); "
         "assert catalog._connection.execute("
         "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]; "
+        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]; "
         "catalog.close()"
     )
 
@@ -357,16 +357,20 @@ def _validate_named_child(
             and _within(str(cwd), (test_root,))
         )
     if identifier == "python-wheel-install":
+        wheelhouse = os.environ.get("MF_PHASE1_TEST_WHEELHOUSE")
+        dependencies = (
+            ("--find-links", str(Path(wheelhouse).resolve())) if wheelhouse else ("--no-deps",)
+        )
         return (
-            len(argv) == 9
+            len(argv) == 8 + len(dependencies)
             and Path(argv[0]).name in {"python", "python.exe"}
             and test_root is not None
             and _within(argv[0], (test_root,))
-            and argv[1:8]
-            == ("-I", "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall")
+            and argv[1:-1]
+            == ("-I", "-m", "pip", "install", "--no-index", *dependencies, "--force-reinstall")
             and build_root is not None
-            and _within(argv[8], (build_root,))
-            and Path(argv[8]).suffix == ".whl"
+            and _within(argv[-1], (build_root,))
+            and Path(argv[-1]).suffix == ".whl"
             and _within(str(cwd), (test_root,))
         )
     if identifier == "installed-wheel-skill":

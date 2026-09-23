@@ -120,6 +120,16 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
         "required": ["inbox_id"],
         "type": "object",
     },
+    "summarize_listening_history": {
+        "additionalProperties": False,
+        "properties": {
+            "since": {"format": "date-time", "type": ["string", "null"]},
+            "until": {"format": "date-time", "type": ["string", "null"]},
+            "limit": {"minimum": 1, "maximum": 50, "type": "integer"},
+        },
+        "required": ["since", "until", "limit"],
+        "type": "object",
+    },
 }
 
 RefreshCallback = Callable[[Literal["catalog", "releases", "events", "all"]], object]
@@ -178,6 +188,8 @@ def _has_valid_tool_arguments(params: Mapping[str, Any] | None) -> bool:
             _inbox_state(arguments["state"], required=True)
         elif name == "explain_inbox_item":
             _local_id(arguments["inbox_id"])
+        elif name == "summarize_listening_history":
+            _history_arguments(arguments["since"], arguments["until"], arguments["limit"])
     except _InvalidArguments:
         return False
     return True
@@ -332,6 +344,35 @@ def create_music_server(
     async def explain_inbox_item(inbox_id: str) -> CallToolResult:
         return _safe_call(lambda: _explain_inbox(application, _local_id(inbox_id)))
 
+    @server.tool(
+        name="summarize_listening_history",
+        description="Summarize locally imported listening evidence for a UTC date range.",
+        annotations=_READ_ONLY,
+    )
+    async def summarize_listening_history(
+        since: str | None, until: str | None, limit: int
+    ) -> CallToolResult:
+        def action() -> dict[str, object]:
+            parsed_since, parsed_until, parsed_limit = _history_arguments(since, until, limit)
+            summary = application.summarize_history(
+                since=parsed_since, until=parsed_until, limit=parsed_limit
+            )
+            return {
+                "evidence_boundary": "imported Spotify music history",
+                "since": summary.since,
+                "until": summary.until,
+                "first_played_at": summary.first_played_at,
+                "last_played_at": summary.last_played_at,
+                "play_count": summary.play_count,
+                "milliseconds_played": summary.milliseconds_played,
+                "skipped_count": summary.skipped_count,
+                "brief_count": summary.brief_count,
+                "top_artists": [_history_ranking(item) for item in summary.top_artists],
+                "top_tracks": [_history_ranking(item) for item in summary.top_tracks],
+            }
+
+        return _safe_call(action)
+
     return server
 
 
@@ -405,6 +446,25 @@ def _inbox_state(value: object, *, required: bool = False) -> InboxState | None:
         return InboxState(value)
     except ValueError as error:
         raise _InvalidArguments() from error
+
+
+def _history_arguments(
+    since: object, until: object, limit: object
+) -> tuple[str | None, str | None, int]:
+    for value in (since, until):
+        if value is not None and (
+            type(value) is not str or len(value) > 64 or not value.endswith("Z")
+        ):
+            raise _InvalidArguments()
+    return since, until, _limit(limit, maximum=50)  # type: ignore[return-value]
+
+
+def _history_ranking(value: object) -> dict[str, object]:
+    return {
+        "name": getattr(value, "name"),
+        "play_count": getattr(value, "play_count"),
+        "milliseconds_played": getattr(value, "milliseconds_played"),
+    }
 
 
 def _now(clock: Clock) -> datetime:

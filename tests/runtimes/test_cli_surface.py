@@ -215,7 +215,7 @@ def test_cli_help_lists_the_complete_operational_command_surface(tmp_path: Path)
         "refresh catalog|releases|events|all",
         "watchlist list",
         "inbox list|show",
-        "data export|import|backup|restore|delete",
+        "data export|import|import-spotify|backup|restore|delete",
         "diagnostics",
         "schedule install|status|remove",
         "version",
@@ -255,6 +255,7 @@ def test_cli_delegates_status_refresh_watchlist_and_inbox_as_deterministic_json(
         "connection": "disconnected",
         "events": {"ready": False},
         "inbox": {"has_unread": False},
+        "mcp_ready": True,
         "latest_refresh": None,
         "status": "ready",
     }
@@ -380,6 +381,7 @@ def test_cli_status_reports_credential_access_failure_as_unavailable_json(
         "connection": "unavailable",
         "events": {"ready": False},
         "inbox": {"has_unread": False},
+        "mcp_ready": True,
         "latest_refresh": None,
         "status": "unavailable",
     }
@@ -410,6 +412,7 @@ def test_cli_status_reports_configuration_access_failure_as_unavailable_json(
         "connection": "unavailable",
         "events": {"ready": False},
         "inbox": {"has_unread": False},
+        "mcp_ready": True,
         "latest_refresh": None,
         "status": "unavailable",
     }
@@ -910,7 +913,10 @@ def test_cli_status_text_includes_optional_event_readiness(tmp_path: Path) -> No
     )
 
     assert result == 0
-    assert stdout.getvalue() == "Music Friend: ready (Spotify: disconnected; Events: ready)\n"
+    assert (
+        stdout.getvalue()
+        == "Music Friend: ready (Spotify: disconnected; Events: ready; MCP: ready)\n"
+    )
     assert stderr.getvalue() == ""
     application.close()
 

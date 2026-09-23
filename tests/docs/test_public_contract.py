@@ -20,7 +20,135 @@ EXPECTED_TOOLS = {
     "list_inbox",
     "update_inbox_item",
     "explain_inbox_item",
+    "summarize_listening_history",
 }
+
+
+def test_expected_tools_match_the_canonical_mcp_surface() -> None:
+    """The documented tool set is checked against the server's own schema table."""
+    from music_friend.mcp.catalog_server import _TOOL_SCHEMAS
+
+    assert set(_TOOL_SCHEMAS) == EXPECTED_TOOLS
+    assert len(EXPECTED_TOOLS) == 9
+
+
+def test_mcp_guide_covers_every_tool_with_purpose_inputs_result_and_behavior() -> None:
+    """Every advertised tool has one table row and no doc claims a stale tool count."""
+    mcp = (ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+    rows = {
+        match.group(1): match.group(0)
+        for match in re.finditer(r"^\| `([a-z_]+)` \|(?:[^|\n]*\|){4}[ \t]*$", mcp, re.MULTILINE)
+    }
+
+    assert set(rows) == EXPECTED_TOOLS
+    for name, row in rows.items():
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert len(cells) == 5, name
+        assert all(cells), name
+        assert re.search(r"read-only|local write", cells[4]), name
+    assert re.search(r"provider contact", rows["refresh_music"])
+    assert "exactly these nine tools" in mcp
+    for path in _public_markdown_files():
+        text = path.read_text(encoding="utf-8").lower()
+        assert "eight tools" not in text, path
+        assert "eight bounded tools" not in text, path
+
+
+def test_readme_leads_with_outcomes_flow_first_success_and_privacy() -> None:
+    """The front door explains outcomes before implementation terminology."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    first_section = readme.split("## How it works", 1)[0]
+
+    for outcome in ("catalog", "watch", "inbox", "listening history"):
+        assert outcome.lower() in first_section.lower(), outcome
+    for heading in (
+        "## How it works",
+        "## First success in five commands",
+        "## Follow an artist through the inbox",
+        "## Import and query listening history",
+        "## Privacy at a glance",
+        "## Documentation",
+    ):
+        assert heading in readme, heading
+    assert "never writes to your Spotify or Ticketmaster account" in readme
+    assert "ticket" in readme.lower() and "purchasing" in readme.lower()
+    for guide in (
+        "docs/install.md",
+        "docs/quickstart.md",
+        "docs/setup.md",
+        "docs/mcp.md",
+        "docs/operations.md",
+        "docs/limits.md",
+        "docs/security.md",
+        "docs/troubleshooting.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+    ):
+        assert guide in readme, guide
+    for privacy_fact in (
+        "no telemetry",
+        "credential store",
+        "connection-country",
+        "exports and backups",
+    ):
+        assert privacy_fact in readme.lower(), privacy_fact
+
+
+def test_documentation_index_routes_by_goal() -> None:
+    index = (ROOT / "docs" / "README.md").read_text(encoding="utf-8")
+
+    for goal in (
+        "## Get started",
+        "## Use an AI client",
+        "## Import my history",
+        "## Manage or erase data",
+        "## Troubleshoot",
+        "## Contribute",
+    ):
+        assert goal in index, goal
+
+
+def test_documented_validation_commands_match_ci() -> None:
+    """Contributor validation commands cannot drift from the workflow definition."""
+    workflow = (ROOT / ".github" / "workflows" / "local-validation.yml").read_text(encoding="utf-8")
+    contributor_guide = (ROOT / ("AGENTS" + ".md")).read_text(encoding="utf-8")
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    for command in (
+        "python -m pytest -q --ignore=tests/clean_room",
+        "python -m ruff check src tests scripts",
+        "python -m ruff format --check src tests scripts",
+        "python -m mypy --strict src/music_friend",
+        "python scripts/scan_public_tree.py .",
+    ):
+        assert command in workflow, command
+        assert command in contributor_guide, command
+        assert command in contributing, command
+    for section in (
+        "## Source map",
+        "## Architectural boundaries",
+        "## Sources of truth",
+        "## Implementation workflow",
+        "## Validation",
+        "## Documentation responsibilities",
+        "## Public-repository safety",
+    ):
+        assert section in contributor_guide, section
+    for rule in ("issue", "synthetic data", "credentials", "focused", "documentation"):
+        assert rule in contributor_guide.lower(), rule
+    assert "_TOOL_SCHEMAS" in contributor_guide
+
+
+def test_examples_are_synthetic_and_never_show_a_secret_or_purchase() -> None:
+    """Public examples cannot teach an unsafe pattern."""
+    for path in _public_markdown_files():
+        text = path.read_text(encoding="utf-8")
+        lower = text.lower()
+        assert "client_secret=" not in lower, path
+        assert not re.search(r"SPOTIFY_CLIENT_SECRET\s*=", text), path
+        assert not re.search(r"(?i)authorization:\s*bearer\s+\S", text), path
+        assert "buy tickets" not in lower or "never buys tickets" in lower, path
+        assert not re.search(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b(?<!127\.0\.0\.1)", text), path
 
 
 def test_skill_has_cross_client_frontmatter() -> None:
@@ -214,6 +342,8 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend setup",
         "music-friend connect spotify",
         "music-friend disconnect spotify",
+        "music-friend doctor",
+        "music-friend doctor --json",
         "music-friend status --json",
         "music-friend refresh catalog --json",
         "music-friend refresh releases --json",
@@ -226,6 +356,8 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend data export music-friend-export.json",
         "music-friend data backup music-friend-backup.json",
         "music-friend data import music-friend-export.json",
+        "music-friend data import-spotify my_spotify_data.zip --dry-run --json",
+        "music-friend data import-spotify my_spotify_data.zip --json",
         "music-friend data restore music-friend-backup.json",
         "music-friend data delete",
         "music-friend schedule status --json",

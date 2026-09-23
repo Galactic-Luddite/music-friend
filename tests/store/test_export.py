@@ -55,7 +55,7 @@ def test_export_writes_canonical_private_deterministic_file(
     payload = json.loads(raw)
     assert list(payload) == ["format", "version", "exported_at", "records"]
     assert payload["format"] == "music-friend-catalog"
-    assert payload["version"] == 3
+    assert payload["version"] == 4
     assert payload["exported_at"] == "2026-09-01T12:00:00+00:00"
     assert [(record["kind"], record["local_id"]) for record in payload["records"]] == [
         ("artist", "artist-1"),
@@ -115,7 +115,7 @@ def test_export_replace_is_explicit_and_atomic(catalog: Catalog, tmp_path: Path)
 
     export_catalog(catalog, destination, replace=True, exported_at=NOW)
 
-    assert json.loads(destination.read_text(encoding="utf-8"))["version"] == 3
+    assert json.loads(destination.read_text(encoding="utf-8"))["version"] == 4
     assert not tuple(tmp_path.glob(".catalog.json.*.tmp"))
 
 

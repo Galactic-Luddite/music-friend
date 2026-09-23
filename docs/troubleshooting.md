@@ -25,6 +25,8 @@ Review [Spotify setup](setup.md) for redirect-URI and credential-store requireme
 
 Complete Spotify setup with the CLI first. The MCP server requires an approved native credential
 store; the passphrase-protected vault works only with the interactive CLI. See the [MCP guide](mcp.md).
+Run `music-friend doctor`: a failed `credential_store` check means this host has no approved
+native store, and `music-friend status --json` reports `"mcp_ready": false`.
 
 ## A refresh is partial or unavailable
 

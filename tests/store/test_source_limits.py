@@ -28,7 +28,7 @@ def test_source_limit_migration_and_catalog_round_trip(tmp_path: Path) -> None:
         ).fetchall()
         catalog.put_source_limit(expected)
 
-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
         assert catalog.get_source_limit("spotify") == expected
 
 
@@ -50,7 +50,7 @@ def test_source_limit_portable_export_import_round_trip(tmp_path: Path) -> None:
     payload = json.loads(portable.read_text(encoding="utf-8"))
     record = next(item for item in payload["records"] if item["kind"] == "source_limit")
 
-    assert payload["version"] == 3
+    assert payload["version"] == 4
     assert record == {
         "kind": "source_limit",
         "local_id": "spotify",

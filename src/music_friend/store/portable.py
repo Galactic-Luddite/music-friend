@@ -51,12 +51,13 @@ from music_friend.domain import (
 )
 from music_friend.domain.text import _canonical_source_text
 from music_friend.store.catalog import Catalog
+from music_friend.store.spotify_history import _text as _history_text
 
 _FORMAT = "music-friend-catalog"
-_VERSION = 3
-_SUPPORTED_VERSIONS = frozenset({1, 2, 3})
-DEFAULT_MAX_BYTES = 100 * 1024 * 1024
-DEFAULT_MAX_RECORDS = 1_000_000
+_VERSION = 4
+_SUPPORTED_VERSIONS = frozenset({1, 2, 3, 4})
+DEFAULT_MAX_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_RECORDS = 2_000_000
 _PortableCanonical = Artist | Release | Event
 _TEXT_LIMIT = 4096
 _SOURCE_MAPPING_ID_LIMIT = (_TEXT_LIMIT * 3) + 35
@@ -264,6 +265,33 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
                 "time_precision": row[5],
                 "source_links": source_links,
                 "observed_at": _iso(row[6]),
+            }
+        )
+    for row in connection.execute(
+        """SELECT event_id, source, played_at, milliseconds_played, track_uri, track_name,
+                  artist_name, album_name, reason_start, reason_end, shuffle, skipped, offline,
+                  incognito, archive_digest, imported_at
+           FROM listening_history"""
+    ):
+        records.append(
+            {
+                "kind": "listening_history",
+                "local_id": str(row[0]),
+                "source": str(row[1]),
+                "played_at": str(row[2]),
+                "milliseconds_played": int(row[3]),
+                "track_uri": str(row[4]),
+                "track_name": str(row[5]),
+                "artist_name": str(row[6]),
+                "album_name": row[7],
+                "reason_start": row[8],
+                "reason_end": row[9],
+                "shuffle": row[10],
+                "skipped": row[11],
+                "offline": row[12],
+                "incognito": row[13],
+                "archive_digest": str(row[14]),
+                "imported_at": str(row[15]),
             }
         )
     for row in connection.execute(
@@ -720,7 +748,9 @@ def _source_text(value: object, *, maximum: int = 4096) -> str:
 def _datetime(value: object, name: str) -> datetime:
     text = _text(value, name)
     try:
-        parsed = datetime.fromisoformat(text)
+        # Python 3.10 does not accept the ISO 8601 UTC designator even though
+        # newer supported versions do. Normalize it to the equivalent offset.
+        parsed = datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith("Z") else text)
     except ValueError as error:
         raise ValueError(f"{name} is invalid") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -878,6 +908,8 @@ def _validate_document(
             )
         if version >= 3:
             deferred_kinds.add("source_limit")
+        if version >= 4:
+            deferred_kinds.add("listening_history")
         if kind in deferred_kinds:
             if kind != "source_mapping":
                 deferred.append(record)
@@ -1012,6 +1044,7 @@ def _replay(
         "source_limit": 8,
         "signal": 9,
         "inbox_entry": 10,
+        "listening_history": 11,
     }
     ordered_deferred = sorted(
         deferred,
@@ -1277,6 +1310,71 @@ def _replay(
                     updated_at=_datetime(record["updated_at"], "updated_at"),
                 )
             )
+        elif kind == "listening_history":
+            _require_keys(
+                record,
+                frozenset(
+                    {
+                        "kind",
+                        "local_id",
+                        "source",
+                        "played_at",
+                        "milliseconds_played",
+                        "track_uri",
+                        "track_name",
+                        "artist_name",
+                        "album_name",
+                        "reason_start",
+                        "reason_end",
+                        "shuffle",
+                        "skipped",
+                        "offline",
+                        "incognito",
+                        "archive_digest",
+                        "imported_at",
+                    }
+                ),
+            )
+            boolean_values = [
+                record[name] for name in ("shuffle", "skipped", "offline", "incognito")
+            ]
+            if any(
+                value not in (None, 0, 1) or type(value) not in (int, type(None))
+                for value in boolean_values
+            ):
+                raise ValueError("listening history boolean is invalid")
+            milliseconds = _integer(record["milliseconds_played"], "milliseconds_played")
+            if milliseconds < 0:
+                raise ValueError("listening history duration is invalid")
+            connection = _connection(catalog)
+            connection.execute(
+                """INSERT OR IGNORE INTO listening_history (
+                    event_id, source, played_at, milliseconds_played, track_uri, track_name,
+                    artist_name, album_name, reason_start, reason_end, shuffle, skipped, offline,
+                    incognito, archive_digest, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(record["local_id"]),
+                    _text(record["source"], "source"),
+                    _datetime(record["played_at"], "played_at")
+                    .astimezone(timezone.utc)
+                    .isoformat(),
+                    milliseconds,
+                    _text(record["track_uri"], "track_uri"),
+                    _text(record["track_name"], "track_name"),
+                    _text(record["artist_name"], "artist_name"),
+                    _optional_text(record["album_name"], "album_name"),
+                    _history_text(
+                        record["reason_start"], "reason_start", nullable=True, allow_empty=True
+                    ),
+                    _history_text(
+                        record["reason_end"], "reason_end", nullable=True, allow_empty=True
+                    ),
+                    *boolean_values,
+                    _text(record["archive_digest"], "archive_digest", maximum=128),
+                    _datetime(record["imported_at"], "imported_at").isoformat(),
+                ),
+            )
         else:
             raise ValueError("unknown portable record kind")
 
@@ -1316,6 +1414,7 @@ def purge_source(catalog: Catalog, source_name: str) -> PurgeResult:
     source = _text(source_name, "source_name")
     connection = _connection(catalog)
     with catalog.transaction():
+        connection.execute("DELETE FROM listening_history WHERE source = ?", (source,))
         affected_targets = {
             (str(row[0]), str(row[1]))
             for row in connection.execute(
