@@ -25,6 +25,8 @@ _EXPECTED_MCP_TOOLS = (
     "update_inbox_item",
     "explain_inbox_item",
     "summarize_listening_history",
+    "get_setup",
+    "update_setup",
 )
 
 

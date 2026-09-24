@@ -11,6 +11,7 @@ from mcp.server.context import CallNext, HandlerResult, ServerMiddleware, Server
 from mcp.server.mcpserver import MCPServer
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 
+from music_friend.configuration import LocalConfig, LocalConfigStore
 from music_friend.domain import (
     Artist,
     Event,
@@ -224,6 +225,44 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
         "required": ["since", "until", "limit"],
         "type": "object",
     },
+    "get_setup": _EMPTY_SCHEMA,
+    "update_setup": {
+        "additionalProperties": False,
+        "properties": {
+            "client_id": {
+                "description": ("Developer application client ID, or null to leave unchanged."),
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": r"^\S(?:[\s\S]*\S)?$",
+                "type": ["string", "null"],
+            },
+            "event_country_code": {
+                "description": "Two-letter uppercase event discovery country code (e.g., 'US'), or null.",
+                "pattern": r"^[A-Z]{2}$",
+                "type": ["string", "null"],
+            },
+            "event_postal_code": {
+                "description": "Event discovery postal code (e.g., '94110'), or null.",
+                "maxLength": 16,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9 -]{0,15}$",
+                "type": ["string", "null"],
+            },
+            "event_radius": {
+                "description": (
+                    "Event discovery search radius, 1-100 km/miles (depends on event_radius_unit), or null."
+                ),
+                "minimum": 1,
+                "maximum": 100,
+                "type": ["number", "null"],
+            },
+            "event_radius_unit": {
+                "description": "Event discovery radius unit: 'miles' or 'kilometers', or null.",
+                "enum": ["miles", "kilometers", None],
+                "type": ["string", "null"],
+            },
+        },
+        "type": "object",
+    },
 }
 
 RefreshCallback = Callable[[Literal["catalog", "releases", "events", "all"]], object]
@@ -299,9 +338,45 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
             _local_id(arguments["inbox_id"], field="inbox_id")
         elif name == "summarize_listening_history":
             _history_arguments(arguments["since"], arguments["until"], arguments["limit"])
+        elif name == "get_setup":
+            pass  # No validation needed
+        elif name == "update_setup":
+            _update_setup_arguments(arguments)
     except _InvalidArguments as error:
         return error
     return None
+
+
+def _update_setup_arguments(arguments: Mapping[str, Any]) -> None:
+    """Validate update_setup arguments."""
+    if "client_id" in arguments:
+        value = arguments["client_id"]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise _InvalidArguments("client_id must be a non-empty string or null")
+
+    if "event_country_code" in arguments:
+        value = arguments["event_country_code"]
+        if value is not None and (
+            not isinstance(value, str) or not value or len(value) != 2 or not value.isupper()
+        ):
+            raise _InvalidArguments(
+                "event_country_code must be a two-letter uppercase code or null"
+            )
+
+    if "event_postal_code" in arguments:
+        value = arguments["event_postal_code"]
+        if value is not None and (not isinstance(value, str) or not value):
+            raise _InvalidArguments("event_postal_code must be a non-empty string or null")
+
+    if "event_radius" in arguments:
+        value = arguments["event_radius"]
+        if value is not None and (not isinstance(value, (int, float)) or value < 1 or value > 100):
+            raise _InvalidArguments("event_radius must be 1-100 or null")
+
+    if "event_radius_unit" in arguments:
+        value = arguments["event_radius_unit"]
+        if value is not None and value not in {"miles", "kilometers"}:
+            raise _InvalidArguments("event_radius_unit must be 'miles', 'kilometers', or null")
 
 
 def _with_fixed_input_schema(tool: object) -> object:
@@ -318,6 +393,7 @@ def create_music_server(
     *,
     refresh: RefreshCallback,
     now: Clock | None = None,
+    config_store_factory: Callable[[], LocalConfigStore] | None = None,
 ) -> MCPServer[Any]:
     """Create the fixed provider-neutral local Music Friend MCP surface."""
     if not isinstance(application, MusicFriendApplication) or not callable(refresh):
@@ -325,6 +401,9 @@ def create_music_server(
     clock = _utc_now if now is None else now
     if not callable(clock):
         raise ValueError("now must be callable")
+    make_config_store = LocalConfigStore if config_store_factory is None else config_store_factory
+    if not callable(make_config_store):
+        raise ValueError("config_store_factory must be callable")
     server: MCPServer[Any] = MCPServer(
         name="music-friend",
         title="Music Friend",
@@ -586,6 +665,108 @@ def create_music_server(
                 "brief_count": summary.brief_count,
                 "top_artists": [_history_ranking(item) for item in summary.top_artists],
                 "top_tracks": [_history_ranking(item) for item in summary.top_tracks],
+            }
+
+        return _safe_call(action)
+
+    @server.tool(
+        name="get_setup",
+        description=(
+            "Inspect Music Friend setup state: which configuration fields are set, "
+            "which are missing, and what's needed for mcp_ready/doctor compliance. "
+            "Secret values (like Ticketmaster key) are never returned. "
+            "Purpose: check what agent-driven setup is incomplete. "
+            "When to use: before update_setup, or to determine if setup is needed. "
+            "Call before: nothing required. Call after: update_setup if fields are missing. "
+            "Local-only; does not contact a provider."
+        ),
+        annotations=_READ_ONLY,
+    )
+    async def get_setup() -> CallToolResult:
+        def action() -> dict[str, object]:
+            store = make_config_store()
+            config = store.load()
+            return {
+                "status": "ready"
+                if all(
+                    value is not None
+                    for value in (
+                        config.spotify_client_id,
+                        config.event_country_code,
+                        config.event_postal_code,
+                        config.event_radius,
+                        config.event_radius_unit,
+                    )
+                )
+                else "incomplete",
+                "client_id": config.spotify_client_id is not None,
+                "event_country_code": config.event_country_code,
+                "event_postal_code": config.event_postal_code,
+                "event_radius": config.event_radius,
+                "event_radius_unit": config.event_radius_unit,
+                "missing_fields": [
+                    name
+                    for name, value in [
+                        ("client_id", config.spotify_client_id),
+                        ("event_country_code", config.event_country_code),
+                        ("event_postal_code", config.event_postal_code),
+                        ("event_radius", config.event_radius),
+                        ("event_radius_unit", config.event_radius_unit),
+                    ]
+                    if value is None
+                ],
+            }
+
+        return _safe_call(action)
+
+    @server.tool(
+        name="update_setup",
+        description=(
+            "Update Music Friend setup configuration fields (non-secret only). "
+            "Secret values must be set through the CLI. "
+            "Pass null for any field to leave it unchanged. "
+            "Purpose: programmatically complete setup from an agent. "
+            "When to use: after get_setup reports missing fields. "
+            "Call before: nothing required. Call after: get_setup to verify completion. "
+            "Local-only, mutating; does not contact a provider."
+        ),
+        annotations=_MUTATING,
+    )
+    async def update_setup(
+        client_id: str | None = None,
+        event_country_code: str | None = None,
+        event_postal_code: str | None = None,
+        event_radius: float | None = None,
+        event_radius_unit: Literal["miles", "kilometers"] | None = None,
+    ) -> CallToolResult:
+        def action() -> dict[str, object]:
+            store = make_config_store()
+            config = store.load()
+
+            # Build updated config, keeping unchanged fields
+            updated_config = LocalConfig(
+                spotify_client_id=client_id if client_id is not None else config.spotify_client_id,
+                event_country_code=event_country_code
+                if event_country_code is not None
+                else config.event_country_code,
+                event_postal_code=event_postal_code
+                if event_postal_code is not None
+                else config.event_postal_code,
+                event_radius=event_radius if event_radius is not None else config.event_radius,
+                event_radius_unit=event_radius_unit
+                if event_radius_unit is not None
+                else config.event_radius_unit,
+            )
+            store.save(updated_config)
+
+            return {
+                "status": "updated",
+                "client_id": updated_config.spotify_client_id is not None,
+                "event_country_code": updated_config.event_country_code,
+                "event_postal_code": updated_config.event_postal_code,
+                "event_radius": updated_config.event_radius,
+                "event_radius_unit": updated_config.event_radius_unit,
+                "note": "To set the Ticketmaster key, run: music-friend setup --ticketmaster-key-env VAR_NAME",
             }
 
         return _safe_call(action)

@@ -15,6 +15,54 @@ and listening-history summaries.
 | Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional six-hour refresh |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
 
+## Agent-driven setup
+
+All setup operations support non-interactive flags and JSON output for automation:
+
+```bash
+# Non-interactive setup (TTY optional)
+music-friend setup --spotify-client-id <id> --event-country US --event-postal 94110 --event-radius 50 --event-unit miles
+
+# Clear individual fields
+music-friend setup --clear-spotify-client-id
+
+# Ticketmaster key from environment variable
+music-friend setup --ticketmaster-key-env TICKETMASTER_KEY
+
+# Ticketmaster key from file (must be chmod 600)
+music-friend setup --ticketmaster-key-file /path/to/key
+
+# Ticketmaster key from stdin
+cat /path/to/key | music-friend setup --ticketmaster-key-stdin
+
+# Structured output
+music-friend setup --spotify-client-id <id> --json
+```
+
+**Secret handling:** The Ticketmaster key never appears in stdout, stderr, JSON output, exception messages, or logs. It is read from the specified source (env, file, or stdin) and stored securely in the operating system credential store.
+
+**MCP setup tools:** Agents can query and update setup programmatically via MCP:
+- `get_setup`: Reports configured fields (without secret values), which fields are missing for MCP readiness, and what gaps remain
+- `update_setup`: Updates non-secret configuration fields via MCP; secrets must be set through CLI
+
+**Backward compatibility:** Running `music-friend setup` with no flags continues to prompt interactively, preserving existing workflows.
+
+## Destructive data commands with confirmation
+
+Data operations that erase local state now support non-interactive confirmation:
+
+```bash
+# Automatic confirmation (no prompt)
+music-friend data delete --yes
+music-friend data restore backup.json --yes
+
+# Token-based confirmation (no TTY required)
+music-friend data delete --confirm DELETE
+music-friend data restore backup.json --confirm RESTORE
+```
+
+Without a TTY and without `--yes` or `--confirm`, these commands refuse to proceed and exit with code 2.
+
 ## Check prerequisites
 
 ```bash

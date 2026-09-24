@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import getpass
 import json
+import os
+import stat
 import sys
 import warnings
 import webbrowser
@@ -306,8 +308,17 @@ def _run_local_command(
             native_store_probe,
             now,
         )
-    if argv == ["setup"]:
-        return _setup(config_store, prompt, secret_prompt, credential_store_factory, stdout, stderr)
+    if len(argv) >= 1 and argv[0] == "setup":
+        return _setup_command(
+            argv[1:],
+            config_store,
+            prompt,
+            secret_prompt,
+            credential_store_factory,
+            structured,
+            stdout,
+            stderr,
+        )
     if argv == ["version"]:
         return _emit({"version": __version__}, structured, stdout)
     if argv == ["status"]:
@@ -328,9 +339,11 @@ def _run_local_command(
     if argv == ["diagnostics"]:
         diagnostics = _diagnostics(application, _load_config(config_store), now)
         return _emit(diagnostics, structured, stdout, text=_diagnostics_text(diagnostics))
-    if argv == ["connect", "spotify"]:
-        return _connect(
+    if len(argv) >= 2 and argv[:2] == ["connect", "spotify"]:
+        return _connect_command(
+            argv[2:],
             _load_config(config_store),
+            structured,
             stdout,
             stderr,
             connector_factory,
@@ -434,52 +447,6 @@ def _load_config(store: object) -> LocalConfig:
 
 def _save_config(store: object, config: LocalConfig) -> None:
     getattr(store, "save")(config)
-
-
-def _setup(
-    config_store: object,
-    prompt: Prompt,
-    secret_prompt: SecretPrompt,
-    credential_store_factory: CredentialStoreFactory,
-    stdout: TextIO,
-    stderr: TextIO,
-) -> int:
-    try:
-        prior = _load_config(config_store)
-        configured = _setup_config(prior, prompt)
-        key_action = _setup_key_action(
-            secret_prompt("Ticketmaster API key (blank to preserve, - to remove): ")
-        )
-    except Exception:
-        print("Music Friend could not complete the command.", file=stderr)
-        return 1
-
-    credentials: CredentialStore | None = None
-    prior_key: str | None = None
-    changed_key = False
-    try:
-        if key_action is not _PRESERVE:
-            credentials = credential_store_factory()
-            prior_key = credentials.load(TICKETMASTER_CREDENTIAL_KEY)
-            changed_key = True
-            if key_action is None:
-                credentials.delete(TICKETMASTER_CREDENTIAL_KEY)
-            elif isinstance(key_action, str):
-                credentials.save(TICKETMASTER_CREDENTIAL_KEY, key_action)
-        _save_config(config_store, configured)
-    except Exception:
-        if changed_key and credentials is not None:
-            try:
-                if prior_key is None:
-                    credentials.delete(TICKETMASTER_CREDENTIAL_KEY)
-                else:
-                    credentials.save(TICKETMASTER_CREDENTIAL_KEY, prior_key)
-            except Exception:
-                pass
-        print("Music Friend could not complete the command.", file=stderr)
-        return 1
-    print("Music Friend setup complete.", file=stdout)
-    return 0
 
 
 class _Preserve:
@@ -590,39 +557,6 @@ def _setup_key_action(value: str) -> str | None | _Preserve:
     if not value.strip() or len(value) > 4096:
         raise ValueError("Ticketmaster key is invalid")
     return value
-
-
-def _connect(
-    config: LocalConfig,
-    stdout: TextIO,
-    stderr: TextIO,
-    connector_factory: ConnectorFactory,
-    credential_store_factory: CredentialStoreFactory,
-    browser_opener: BrowserOpener,
-    authorizer_factory: AuthorizerFactory,
-) -> int:
-    try:
-        with _spotify_tokens(
-            config,
-            connector_factory=connector_factory,
-            credential_store_factory=credential_store_factory,
-        ) as (settings, tokens):
-            result = authorizer_factory(settings, tokens, browser_opener).authorize(
-                frozenset(Capability), mode=AuthorizationMode.DYNAMIC_LOOPBACK
-            )
-            if not result.authorized:
-                raise _ConnectionFailed()
-        print("Music Friend connected to Spotify.", file=stdout)
-        return 0
-    except _ConnectionFailed:
-        print("Music Friend could not connect to Spotify.", file=stderr)
-        return 1
-    except _ProviderNotConfigured:
-        print(_PROVIDER_NOT_CONFIGURED_MESSAGE, file=stderr)
-        return 1
-    except Exception:
-        print("Music Friend could not complete the command.", file=stderr)
-        return 1
 
 
 def _disconnect(
@@ -745,10 +679,10 @@ _DOCTOR_REMEDIES = {
         "Manager, or Secret Service/KWallet on Linux). The MCP server and schedules require it; "
         "the passphrase vault works only for interactive CLI commands."
     ),
-    "spotify_client_id": "Create a Spotify developer app and run: music-friend setup",
-    "spotify_connection": "Run: music-friend connect spotify",
-    "event_area": "Run: music-friend setup and enter a country, postal code, and radius",
-    "ticketmaster_key": "Add a Ticketmaster Discovery API key with: music-friend setup",
+    "spotify_client_id": "music-friend setup --spotify-client-id example-client-id",
+    "spotify_connection": "music-friend connect spotify",
+    "event_area": "music-friend setup --event-country US --event-postal 94110 --event-radius 50 --event-unit miles",
+    "ticketmaster_key": "music-friend setup --ticketmaster-key-env TICKETMASTER_KEY",
 }
 
 
@@ -892,14 +826,28 @@ def _data_archive_invalid(stderr: TextIO) -> int:
     return 1
 
 
-def _data_confirm(prompt: Prompt, message: str, expected: str, stderr: TextIO) -> int | None:
-    """Run a destructive-command confirmation prompt.
+def _data_confirm(
+    prompt: Prompt,
+    message: str,
+    expected: str,
+    stderr: TextIO,
+    *,
+    yes_flag: bool = False,
+    confirm_token: str | None = None,
+) -> int | None:
+    """Run a destructive-command confirmation.
 
-    Returns ``None`` when the caller typed the exact confirmation word (the
-    command may proceed), or the exit code to return immediately when it did
-    not, including when the prompt could not be read at all because stdin is
-    not interactive (``EOFError`` from the default ``input``-backed prompt).
+    Returns ``None`` when confirmed (by flag, token, or prompt), or the exit
+    code to return immediately when not, including when the prompt could not
+    be read because stdin is not interactive.
     """
+    if yes_flag:
+        return None
+    if confirm_token is not None:
+        if confirm_token == expected:
+            return None
+        print("Confirmation was not accepted.", file=stderr)
+        return 2
     try:
         answered = prompt(message)
     except EOFError:
@@ -974,14 +922,38 @@ def _data_command(
             stdout,
             text="Data import complete.",
         )
-    if len(argv) == 2 and argv[0] == "restore":
-        rejected = _data_confirm(prompt, "Type RESTORE to continue: ", "RESTORE", stderr)
+    if len(argv) >= 2 and argv[0] == "restore":
+        file_path = argv[1]
+        yes_flag = False
+        confirm_token = None
+        extra_args = argv[2:]
+
+        i = 0
+        while i < len(extra_args):
+            if extra_args[i] == "--yes":
+                yes_flag = True
+                i += 1
+            elif extra_args[i] == "--confirm" and i + 1 < len(extra_args):
+                confirm_token = extra_args[i + 1]
+                i += 2
+            else:
+                print(_USAGE, end="", file=stderr)
+                return 2
+
+        rejected = _data_confirm(
+            prompt,
+            "Type RESTORE to continue: ",
+            "RESTORE",
+            stderr,
+            yes_flag=yes_flag,
+            confirm_token=confirm_token,
+        )
         if rejected is not None:
             return rejected
         try:
-            record_count = application.import_data(Path(argv[1])).record_count
+            record_count = application.import_data(Path(file_path)).record_count
         except FileNotFoundError:
-            return _data_file_not_found(argv[1], stderr)
+            return _data_file_not_found(file_path, stderr)
         except ValueError:
             return _data_archive_invalid(stderr)
         return _emit(
@@ -990,8 +962,31 @@ def _data_command(
             stdout,
             text="Data restore complete.",
         )
-    if argv == ["delete"]:
-        rejected = _data_confirm(prompt, "Type DELETE to continue: ", "DELETE", stderr)
+    if len(argv) >= 1 and argv[0] == "delete":
+        yes_flag = False
+        confirm_token = None
+        extra_args = argv[1:]
+
+        i = 0
+        while i < len(extra_args):
+            if extra_args[i] == "--yes":
+                yes_flag = True
+                i += 1
+            elif extra_args[i] == "--confirm" and i + 1 < len(extra_args):
+                confirm_token = extra_args[i + 1]
+                i += 2
+            else:
+                print(_USAGE, end="", file=stderr)
+                return 2
+
+        rejected = _data_confirm(
+            prompt,
+            "Type DELETE to continue: ",
+            "DELETE",
+            stderr,
+            yes_flag=yes_flag,
+            confirm_token=confirm_token,
+        )
         if rejected is not None:
             return rejected
         application.delete_data()
@@ -1209,6 +1204,292 @@ def _refresh_run(value: RefreshRun) -> dict[str, object]:
             {"kind": item.kind.value, "count": item.count} for item in value.summary.metrics
         ],
     }
+
+
+def _setup_command(
+    argv: list[str],
+    config_store: object,
+    prompt: Prompt,
+    secret_prompt: SecretPrompt,
+    credential_store_factory: CredentialStoreFactory,
+    structured: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """Handle setup with optional flags or interactive prompts."""
+    try:
+        prior = _load_config(config_store)
+    except Exception:
+        print("Music Friend could not complete the command.", file=stderr)
+        return 1
+
+    # Parse flags
+    flags: dict[str, str | None] = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in {
+            "--event-country",
+            "--event-postal",
+            "--event-radius",
+            "--event-unit",
+            "--spotify-client-id",
+        }:
+            if i + 1 >= len(argv):
+                print(_USAGE, end="", file=stderr)
+                return 2
+            flags[arg[2:].replace("-", "_")] = argv[i + 1]
+            i += 2
+        elif arg.startswith("--clear-"):
+            field = arg[8:]
+            if field not in {
+                "event-country",
+                "event-postal",
+                "event-radius",
+                "event-unit",
+                "spotify-client-id",
+            }:
+                print(_USAGE, end="", file=stderr)
+                return 2
+            flags[f"clear_{field.replace('-', '_')}"] = "true"
+            i += 1
+        elif arg in {
+            "--ticketmaster-key-env",
+            "--ticketmaster-key-file",
+            "--ticketmaster-key-stdin",
+        }:
+            if arg == "--ticketmaster-key-stdin":
+                flags["ticketmaster_key_stdin"] = "true"
+                i += 1
+            else:
+                if i + 1 >= len(argv):
+                    print(_USAGE, end="", file=stderr)
+                    return 2
+                flags[arg[2:].replace("-", "_")] = argv[i + 1]
+                i += 2
+        else:
+            print(_USAGE, end="", file=stderr)
+            return 2
+
+    try:
+        # If no flags, use interactive prompts
+        if not flags:
+            configured = _setup_config(prior, prompt)
+            key_action = _setup_key_action(
+                secret_prompt("Ticketmaster API key (blank to preserve, - to remove): ")
+            )
+        else:
+            # Non-interactive setup with flags
+            configured = _setup_config_from_flags(prior, flags)
+            key_action = _setup_key_from_flags(flags)
+    except Exception as e:
+        print(f"Music Friend could not complete the command: {e}", file=stderr)
+        return 1
+
+    credentials: CredentialStore | None = None
+    prior_key: str | None = None
+    changed_key = False
+    try:
+        if key_action is not _PRESERVE:
+            credentials = credential_store_factory()
+            prior_key = credentials.load(TICKETMASTER_CREDENTIAL_KEY)
+            changed_key = True
+            if key_action is None:
+                credentials.delete(TICKETMASTER_CREDENTIAL_KEY)
+            elif isinstance(key_action, str):
+                credentials.save(TICKETMASTER_CREDENTIAL_KEY, key_action)
+        _save_config(config_store, configured)
+    except Exception:
+        if changed_key and credentials is not None:
+            try:
+                if prior_key is None:
+                    credentials.delete(TICKETMASTER_CREDENTIAL_KEY)
+                else:
+                    credentials.save(TICKETMASTER_CREDENTIAL_KEY, prior_key)
+            except Exception:
+                pass
+        print("Music Friend could not complete the command.", file=stderr)
+        return 1
+
+    result: dict[str, object] = {
+        "status": "setup_complete",
+        "spotify_client_id": configured.spotify_client_id,
+        "event_country_code": configured.event_country_code,
+        "event_postal_code": configured.event_postal_code,
+        "event_radius": configured.event_radius,
+        "event_radius_unit": configured.event_radius_unit,
+    }
+    return _emit(result, structured, stdout, text="Music Friend setup complete.")
+
+
+def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -> LocalConfig:
+    """Apply flag-based changes to configuration."""
+    spotify_client_id = prior.spotify_client_id
+    event_country_code = prior.event_country_code
+    event_postal_code = prior.event_postal_code
+    event_radius = prior.event_radius
+    event_radius_unit = prior.event_radius_unit
+
+    # Handle clears
+    if flags.get("clear_spotify_client_id") == "true":
+        spotify_client_id = None
+    if flags.get("clear_event_country") == "true":
+        event_country_code = None
+    if flags.get("clear_event_postal") == "true":
+        event_postal_code = None
+    if flags.get("clear_event_radius") == "true":
+        event_radius = None
+    if flags.get("clear_event_unit") == "true":
+        event_radius_unit = None
+
+    # Handle sets
+    if "spotify_client_id" in flags and flags["spotify_client_id"] is not None:
+        spotify_client_id = _setup_text(
+            prior.spotify_client_id,
+            flags["spotify_client_id"],
+            normalize=lambda value: value.strip(),
+        )
+
+    if (
+        "event_country" in flags
+        or "event_postal" in flags
+        or "event_radius" in flags
+        or "event_unit" in flags
+    ):
+        country = event_country_code
+        postal = event_postal_code
+        radius = event_radius
+        unit = event_radius_unit
+
+        if "event_country" in flags and flags["event_country"] is not None:
+            country = flags["event_country"].strip().upper()
+        if "event_postal" in flags and flags["event_postal"] is not None:
+            postal = flags["event_postal"].strip()
+        if "event_radius" in flags and flags["event_radius"] is not None:
+            try:
+                numeric = float(flags["event_radius"].strip())
+                radius = int(numeric) if numeric.is_integer() else numeric
+            except ValueError:
+                raise ValueError("event_radius is invalid")
+        if "event_unit" in flags and flags["event_unit"] is not None:
+            normalized = flags["event_unit"].strip().lower()
+            if normalized == "miles":
+                unit = "miles"
+            elif normalized == "kilometers":
+                unit = "kilometers"
+            else:
+                raise ValueError("event_radius_unit is invalid")
+
+        if country is None or postal is None:
+            if "event_country" in flags or "event_postal" in flags:
+                if country is None or postal is None:
+                    raise ValueError("event area is incomplete")
+        if unit is None and ("event_unit" in flags or radius is not None):
+            unit = "miles"
+        if radius is None and "event_radius" in flags and unit is not None:
+            radius = 80 if unit == "kilometers" else 50
+
+        event_country_code = country
+        event_postal_code = postal
+        event_radius = radius
+        event_radius_unit = unit
+
+    return LocalConfig(
+        spotify_client_id=spotify_client_id,
+        event_country_code=event_country_code,
+        event_postal_code=event_postal_code,
+        event_radius=event_radius,
+        event_radius_unit=event_radius_unit,
+    )
+
+
+def _setup_key_from_flags(flags: dict[str, str | None]) -> str | None | _Preserve:
+    """Get Ticketmaster key from flags."""
+
+    if "ticketmaster_key_stdin" in flags:
+        # Read from stdin (must be available)
+        try:
+            key = sys.stdin.read().strip()
+            if not key or len(key) > 4096:
+                raise ValueError("Ticketmaster key is invalid")
+            return key
+        except Exception:
+            raise ValueError("Could not read Ticketmaster key from stdin")
+
+    if "ticketmaster_key_env" in flags:
+        env_var = flags["ticketmaster_key_env"]
+        if env_var is None:
+            raise ValueError("Environment variable name required")
+        key = os.environ.get(env_var)
+        if key is None:
+            raise ValueError(f"Environment variable {env_var} not set")
+        if not key or len(key) > 4096:
+            raise ValueError("Ticketmaster key is invalid")
+        return key
+
+    if "ticketmaster_key_file" in flags:
+        file_path = flags["ticketmaster_key_file"]
+        if file_path is None:
+            raise ValueError("File path required")
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                raise ValueError(f"File not found: {file_path}")
+            stat_info = path.stat()
+            if stat.S_IMODE(stat_info.st_mode) != 0o600:
+                raise ValueError(
+                    f"File must have permissions 0o600 (chmod 600), got {oct(stat.S_IMODE(stat_info.st_mode))}"
+                )
+            key = path.read_text(encoding="utf-8").strip()
+            if not key or len(key) > 4096:
+                raise ValueError("Ticketmaster key is invalid")
+            return key
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError(f"Could not read Ticketmaster key from {file_path}")
+
+    return _PRESERVE
+
+
+def _connect_command(
+    argv: list[str],
+    config: LocalConfig,
+    structured: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+    connector_factory: ConnectorFactory,
+    credential_store_factory: CredentialStoreFactory,
+    browser_opener: BrowserOpener,
+    authorizer_factory: AuthorizerFactory,
+) -> int:
+    """Handle connect spotify with optional flags."""
+    if argv and argv[0] not in {"--json"}:
+        print(_USAGE, end="", file=stderr)
+        return 2
+
+    try:
+        with _spotify_tokens(
+            config,
+            connector_factory=connector_factory,
+            credential_store_factory=credential_store_factory,
+        ) as (settings, tokens):
+            result = authorizer_factory(settings, tokens, browser_opener).authorize(
+                frozenset(Capability), mode=AuthorizationMode.DYNAMIC_LOOPBACK
+            )
+            if not result.authorized:
+                raise _ConnectionFailed()
+        payload: dict[str, object] = {"status": "connected"}
+        return _emit(payload, structured, stdout, text="Music Friend connected to Spotify.")
+    except _ConnectionFailed:
+        print("Music Friend could not connect to Spotify.", file=stderr)
+        return 1
+    except _ProviderNotConfigured:
+        print(_PROVIDER_NOT_CONFIGURED_MESSAGE, file=stderr)
+        return 1
+    except Exception:
+        print("Music Friend could not complete the command.", file=stderr)
+        return 1
 
 
 def _emit(

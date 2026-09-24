@@ -551,6 +551,77 @@ def test_cli_connect_and_disconnect_delegate_through_the_published_grammar(
     application.close()
 
 
+def test_cli_connect_spotify_json_emits_structured_output(tmp_path: Path) -> None:
+    """`connect spotify --json` (issue #33 AC6) returns a structured, agent-parseable result."""
+    application = _application(tmp_path)
+    store = _TrackingCredentialStore()
+
+    class _Authorizer:
+        def authorize(self, capabilities: object, *, mode: object) -> AuthorizationResult:
+            return AuthorizationResult(True, frozenset())
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    result = cli.run_cli(
+        ["connect", "spotify", "--json"],
+        stdout=stdout,
+        stderr=stderr,
+        application=application,
+        config_store=_ConfigStore(),  # type: ignore[arg-type]
+        credential_store_factory=lambda: store,
+        browser_opener=lambda _url: True,
+        authorizer_factory=lambda _settings, _tokens, _opener: _Authorizer(),  # type: ignore[arg-type]
+    )
+
+    assert result == 0
+    payload = json.loads(stdout.getvalue())
+    assert payload["status"] == "connected"
+    application.close()
+
+
+def test_cli_connect_spotify_rejects_an_unrecognized_flag(tmp_path: Path) -> None:
+    """An unrecognized flag on `connect spotify` prints usage instead of attempting a connection."""
+    application = _application(tmp_path)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    result = cli.run_cli(
+        ["connect", "spotify", "--not-a-real-flag"],
+        stdout=stdout,
+        stderr=stderr,
+        application=application,
+        config_store=_ConfigStore(),  # type: ignore[arg-type]
+    )
+
+    assert result == 2
+    assert stderr.getvalue()
+    application.close()
+
+
+def test_cli_connect_spotify_reports_an_unexpected_error_actionably(tmp_path: Path) -> None:
+    """An unexpected exception during connect is reported, not raised to the caller."""
+    application = _application(tmp_path)
+    store = _TrackingCredentialStore()
+
+    class _ExplodingAuthorizer:
+        def authorize(self, capabilities: object, *, mode: object) -> AuthorizationResult:
+            raise RuntimeError("synthetic failure")
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    result = cli.run_cli(
+        ["connect", "spotify"],
+        stdout=stdout,
+        stderr=stderr,
+        application=application,
+        config_store=_ConfigStore(),  # type: ignore[arg-type]
+        credential_store_factory=lambda: store,
+        browser_opener=lambda _url: True,
+        authorizer_factory=lambda _settings, _tokens, _opener: _ExplodingAuthorizer(),  # type: ignore[arg-type]
+    )
+
+    assert result == 1
+    assert "could not complete the command" in stderr.getvalue()
+    application.close()
+
+
 def test_cli_connect_names_the_unconfigured_provider_with_a_doctor_hint(tmp_path: Path) -> None:
     application = _application(tmp_path)
 
@@ -910,7 +981,8 @@ def test_cli_setup_rejects_invalid_event_input_without_persisting_partial_state(
 
     assert result == 1
     assert stdout.getvalue() == ""
-    assert stderr.getvalue() == "Music Friend could not complete the command.\n"
+    assert "Music Friend could not complete the command:" in stderr.getvalue()
+    assert "event_country_code must be a two-letter uppercase code" in stderr.getvalue()
     assert config.config == initial
     assert credentials.saves == credentials.deletes == []
     assert "ticketmaster-secret-canary" not in stdout.getvalue() + stderr.getvalue()
