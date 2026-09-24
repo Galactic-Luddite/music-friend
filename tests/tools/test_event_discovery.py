@@ -461,3 +461,72 @@ def test_event_discovery_sanitizes_keyed_urls_from_any_ticketmaster_client(tmp_p
         assert event.source_links == ("https://www.ticketmaster.com/event/event-1",)
         assert event.source_refs[0].canonical_url == "https://www.ticketmaster.com/event/event-1"
         assert query_value not in dump
+
+
+def test_event_discovery_strips_bidi_and_control_characters_from_names(tmp_path: Path) -> None:
+    """Issue #24: a bidi override in a provider-supplied event/venue name must not survive refresh."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        _watch(application, _artist("one", "One"))
+        client = FakeTicketmasterClient()
+        client.attractions["One"] = (_attraction("attraction-1", "One"),)
+        client.events["attraction-1"] = (
+            TicketmasterEvent(
+                native_id="event-1",
+                title="Example‮",
+                starts_at=NOW + timedelta(days=10),
+                time_precision="minute",
+                venue_name="Venue⁦Name⁩",
+                locality="City​Name",
+                source_url="https://www.ticketmaster.com/event/event-1",
+                purchase_url=None,
+                attribution="Ticketmaster",
+            ),
+        )
+
+        result = discover_ticketmaster_events(
+            catalog, config=_config(), client=client, checked_at=NOW
+        )
+
+        event = result.artists[0].candidates[0].event
+        assert event.title == "Example"
+        assert event.venue_name == "VenueName"
+        assert event.locality == "CityName"
+        for forbidden in ("‮", "⁦", "⁩", "​"):
+            assert forbidden not in event.title
+            assert event.venue_name is not None and forbidden not in event.venue_name
+            assert event.locality is not None and forbidden not in event.locality
+
+
+def test_event_discovery_preserves_legitimate_scripts_and_emoji_in_names(tmp_path: Path) -> None:
+    """Issue #24: non-Latin scripts and emoji ZWJ sequences must pass through unchanged."""
+    japanese_title = "音楽フェス"  # music festival
+    emoji_venue = "The \U0001f3a4‍\U0001f3b6 Room"  # microphone+musical-note ZWJ sequence
+    arabic_locality = "القاهرة"  # Cairo
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        _watch(application, _artist("one", "One"))
+        client = FakeTicketmasterClient()
+        client.attractions["One"] = (_attraction("attraction-1", "One"),)
+        client.events["attraction-1"] = (
+            TicketmasterEvent(
+                native_id="event-1",
+                title=japanese_title,
+                starts_at=NOW + timedelta(days=10),
+                time_precision="minute",
+                venue_name=emoji_venue,
+                locality=arabic_locality,
+                source_url="https://www.ticketmaster.com/event/event-1",
+                purchase_url=None,
+                attribution="Ticketmaster",
+            ),
+        )
+
+        result = discover_ticketmaster_events(
+            catalog, config=_config(), client=client, checked_at=NOW
+        )
+
+        event = result.artists[0].candidates[0].event
+        assert event.title == japanese_title
+        assert event.venue_name == emoji_venue
+        assert event.locality == arabic_locality

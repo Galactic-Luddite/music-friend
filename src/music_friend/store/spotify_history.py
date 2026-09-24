@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from music_friend.domain.text import sanitize_display_name
 from music_friend.store.catalog import Catalog
 
 _AUDIO_MEMBER = re.compile(
@@ -80,6 +81,22 @@ def _text(
     return value
 
 
+def _display_text(
+    value: object, field: str, *, nullable: bool = False, allow_empty: bool = False
+) -> str | None:
+    """Validate like `_text`, then strip bidi/control characters from the result.
+
+    Applied only to the fields that are Spotify-supplied display names (track,
+    artist, and album names) so imported history never carries bidirectional
+    overrides or other control/format characters into the local catalog; see
+    `music_friend.domain.text.sanitize_display_name`.
+    """
+    text = _text(value, field, nullable=nullable, allow_empty=allow_empty)
+    if text is None:
+        return None
+    return sanitize_display_name(text, limit=4096) if text else text
+
+
 def _boolean(value: object, field: str) -> int | None:
     if value is None:
         return None
@@ -141,9 +158,9 @@ def _event(
         played_at,
         milliseconds,
         _text(track_uri, "spotify_track_uri"),
-        _text(record.get("master_metadata_track_name"), "track name"),
-        _text(record.get("master_metadata_album_artist_name"), "artist name"),
-        _text(record.get("master_metadata_album_album_name"), "album name", nullable=True),
+        _display_text(record.get("master_metadata_track_name"), "track name"),
+        _display_text(record.get("master_metadata_album_artist_name"), "artist name"),
+        _display_text(record.get("master_metadata_album_album_name"), "album name", nullable=True),
         _text(record.get("reason_start"), "reason_start", nullable=True, allow_empty=True),
         _text(record.get("reason_end"), "reason_end", nullable=True, allow_empty=True),
         _boolean(record.get("shuffle"), "shuffle"),
@@ -316,7 +333,15 @@ def summarize_history(
                 LIMIT ?""",
             [*arguments, limit],
         ).fetchall()
-        return tuple(HistoryRanking(str(row[0]), int(row[1]), int(row[2])) for row in rows)
+        # Read-time sanitization: rows imported before bidi/control stripping was
+        # added at ingestion (see `_display_text`) may still carry those
+        # characters in stored `artist_name`/`track_name` values. Rather than a
+        # schema migration, sanitize lazily here at the query boundary so old
+        # rows are cleaned without a one-time rewrite of `listening_history`.
+        return tuple(
+            HistoryRanking(sanitize_display_name(str(row[0]), limit=4096), int(row[1]), int(row[2]))
+            for row in rows
+        )
 
     return HistorySummary(
         since=since_text,

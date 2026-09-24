@@ -65,7 +65,7 @@ EXPECTED_IMPORTS = {
             "from music_friend.domain import Artist, CatalogItem, CatalogItemBatch, "
             "IdentityConfidence, Release, ReleaseDatePrecision, SourceReference"
         ),
-        "from music_friend.domain.text import sanitize_source_text",
+        "from music_friend.domain.text import sanitize_display_name",
         "from music_friend.errors import InvalidSourceResponseError",
         "import re",
     ),

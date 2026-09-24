@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from music_friend.domain.text import sanitize_source_text
+from music_friend.domain.text import sanitize_display_name, sanitize_source_text
 
 FIXTURE_PATH = Path(__file__).parent / "injection-fixtures" / "source_text.json"
 FRAME_TRANSLATION = str.maketrans(
@@ -164,3 +164,71 @@ def test_instruction_shaped_text_is_only_normalized_not_interpreted() -> None:
     result = sanitize_source_text(value)
 
     assert result == value.translate(FRAME_TRANSLATION)
+
+
+def test_sanitize_display_name_shares_sanitize_source_text_validation() -> None:
+    for limit in (True, False, 1.0, "4", None):
+        with pytest.raises(TypeError):
+            sanitize_display_name("sample", limit=limit)  # type: ignore[arg-type]
+    for limit in (-1, 0, 4097, 5000):
+        with pytest.raises(ValueError):
+            sanitize_display_name("sample", limit=limit)
+    with pytest.raises(TypeError):
+        sanitize_display_name(None)  # type: ignore[arg-type]
+
+
+def test_sanitize_display_name_strips_bidi_controls_like_sanitize_source_text() -> None:
+    value = "Example‮"
+
+    assert sanitize_display_name(value) == "Example"
+    assert sanitize_display_name(value) == sanitize_source_text(value)
+
+
+def test_sanitize_display_name_strips_every_bidi_and_other_control_but_keeps_zwj_and_zwnj() -> None:
+    # U+202A-U+202E (embedding/override/pop) and U+2066-U+2069 (isolates/pop) are all
+    # stripped, matching sanitize_source_text; U+200C (ZWNJ) and U+200D (ZWJ) are the
+    # two format characters `sanitize_display_name` keeps that `sanitize_source_text`
+    # strips.
+    value = "a‪‫‬‭‮b⁦⁧⁨⁩c\x00\x1fd‌‍e"
+
+    result = sanitize_display_name(value)
+
+    assert result == "abcd‌‍e"
+    for stripped in ("‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨", "⁩", "\x00", "\x1f"):
+        assert stripped not in result
+
+
+def test_sanitize_display_name_preserves_emoji_zwj_sequences_and_skin_tone_modifiers() -> None:
+    family = "\U0001f468‍\U0001f469‍\U0001f467‍\U0001f466"
+    waving_hand_medium_skin = "\U0001f44b\U0001f3fd"
+
+    assert sanitize_display_name(family) == family
+    assert sanitize_display_name(waving_hand_medium_skin) == waving_hand_medium_skin
+
+
+def test_sanitize_display_name_preserves_scripts_that_require_zwnj() -> None:
+    # A Persian compound word that is only correctly shaped with a ZWNJ between
+    # its two parts.
+    value = "چهره‌شنبه"
+
+    assert sanitize_display_name(value) == value
+
+
+def test_sanitize_display_name_preserves_non_latin_scripts_unchanged() -> None:
+    for value in (
+        "موسيقى",  # Arabic
+        "מוסיקה",  # Hebrew
+        "音楽",  # CJK
+        "Музыка",  # Cyrillic
+    ):
+        assert sanitize_display_name(value) == value
+
+
+def test_sanitize_display_name_is_deterministic_and_idempotent() -> None:
+    value = "a‮b‌c‍d"
+
+    first = sanitize_display_name(value)
+    second = sanitize_display_name(value)
+
+    assert first == second
+    assert sanitize_display_name(first) == first

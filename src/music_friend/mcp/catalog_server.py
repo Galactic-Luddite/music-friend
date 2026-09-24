@@ -23,6 +23,7 @@ from music_friend.domain import (
     WatchlistAction,
     WatchlistEntry,
 )
+from music_friend.domain.text import sanitize_display_name
 from music_friend.store.spotify_history import HistoryArgumentError
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import update_inbox_state
@@ -58,12 +59,35 @@ _LOCAL_ID_SCHEMA: dict[str, object] = {
     "pattern": r"^\S(?:[\s\S]*\S)?$",
     "type": "string",
 }
+
+
+def _local_id_schema(description: str) -> dict[str, object]:
+    """Return `_LOCAL_ID_SCHEMA` with a per-argument `description` naming its source tool.
+
+    A shared base dict is kept so every local-identifier argument stays subject
+    to the same length/pattern validation (types, required fields, and enums
+    are unchanged); only the description text, which names where the value
+    comes from, differs per argument.
+    """
+    return {**_LOCAL_ID_SCHEMA, "description": description}
+
+
 _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     "music_status": _EMPTY_SCHEMA,
     "refresh_music": {
         "additionalProperties": False,
         "properties": {
-            "kind": {"enum": ["catalog", "releases", "events", "all"], "type": "string"}
+            "kind": {
+                "description": (
+                    "Which local record kinds to refresh from the provider: "
+                    "'catalog' (watched artists' tracks/releases), 'releases' "
+                    "(new release discovery for watched artists), 'events' "
+                    "(new Ticketmaster event discovery for watched artists), "
+                    "or 'all' for every kind in one bounded run."
+                ),
+                "enum": ["catalog", "releases", "events", "all"],
+                "type": "string",
+            }
         },
         "required": ["kind"],
         "type": "object",
@@ -72,27 +96,51 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
         "additionalProperties": False,
         "properties": {
             "query": {
+                "description": "Free-text artist name or fragment to search for in the local catalog.",
                 "maxLength": 256,
                 "minLength": 1,
                 "pattern": r"^\S(?:[\s\S]*\S)?$",
                 "type": "string",
             },
-            "limit": {"minimum": 1, "maximum": 50, "type": "integer"},
+            "limit": {
+                "description": "Maximum number of matching artists to return (1-50).",
+                "minimum": 1,
+                "maximum": 50,
+                "type": "integer",
+            },
         },
         "required": ["query", "limit"],
         "type": "object",
     },
     "list_watchlist": {
         "additionalProperties": False,
-        "properties": {"limit": {"minimum": 1, "maximum": 100, "type": "integer"}},
+        "properties": {
+            "limit": {
+                "description": "Maximum number of watchlist entries to return (1-100).",
+                "minimum": 1,
+                "maximum": 100,
+                "type": "integer",
+            }
+        },
         "required": ["limit"],
         "type": "object",
     },
     "update_watchlist": {
         "additionalProperties": False,
         "properties": {
-            "artist_id": _LOCAL_ID_SCHEMA,
-            "action": {"enum": ["add", "pin", "mute", "remove"], "type": "string"},
+            "artist_id": _local_id_schema(
+                "The artist's local_id, from a search_catalog result item or a "
+                "list_watchlist entry's artist.local_id."
+            ),
+            "action": {
+                "description": (
+                    "'add' starts watching the artist; 'pin' watches it with "
+                    "priority; 'mute' keeps it watched but suppresses new inbox "
+                    "entries for it; 'remove' stops watching it entirely."
+                ),
+                "enum": ["add", "pin", "mute", "remove"],
+                "type": "string",
+            },
         },
         "required": ["artist_id", "action"],
         "type": "object",
@@ -100,8 +148,20 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     "list_inbox": {
         "additionalProperties": False,
         "properties": {
-            "state": {"enum": ["unread", "saved", "dismissed", None], "type": ["string", "null"]},
-            "limit": {"minimum": 1, "maximum": 100, "type": "integer"},
+            "state": {
+                "description": (
+                    "Filter by inbox decision state ('unread', 'saved', or "
+                    "'dismissed'), or omit/null for every state."
+                ),
+                "enum": ["unread", "saved", "dismissed", None],
+                "type": ["string", "null"],
+            },
+            "limit": {
+                "description": "Maximum number of inbox entries to return (1-100).",
+                "minimum": 1,
+                "maximum": 100,
+                "type": "integer",
+            },
         },
         "required": ["limit"],
         "type": "object",
@@ -109,24 +169,57 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     "update_inbox_item": {
         "additionalProperties": False,
         "properties": {
-            "inbox_id": _LOCAL_ID_SCHEMA,
-            "state": {"enum": ["unread", "saved", "dismissed"], "type": "string"},
+            "inbox_id": _local_id_schema(
+                "The inbox entry's local_id, from a list_inbox result item or "
+                "the entry.local_id returned by explain_inbox_item."
+            ),
+            "state": {
+                "description": (
+                    "New decision state for the entry: 'unread' (undecided), "
+                    "'saved' (kept), or 'dismissed' (not interested)."
+                ),
+                "enum": ["unread", "saved", "dismissed"],
+                "type": "string",
+            },
         },
         "required": ["inbox_id", "state"],
         "type": "object",
     },
     "explain_inbox_item": {
         "additionalProperties": False,
-        "properties": {"inbox_id": _LOCAL_ID_SCHEMA},
+        "properties": {
+            "inbox_id": _local_id_schema(
+                "The inbox entry's local_id, from a list_inbox result item."
+            )
+        },
         "required": ["inbox_id"],
         "type": "object",
     },
     "summarize_listening_history": {
         "additionalProperties": False,
         "properties": {
-            "since": {"format": "date-time", "type": ["string", "null"]},
-            "until": {"format": "date-time", "type": ["string", "null"]},
-            "limit": {"minimum": 1, "maximum": 50, "type": "integer"},
+            "since": {
+                "description": (
+                    "Inclusive RFC 3339 UTC date-time lower bound for imported "
+                    "listening history, or null for no lower bound."
+                ),
+                "format": "date-time",
+                "type": ["string", "null"],
+            },
+            "until": {
+                "description": (
+                    "Exclusive RFC 3339 UTC date-time upper bound for imported "
+                    "listening history, or null for no upper bound."
+                ),
+                "format": "date-time",
+                "type": ["string", "null"],
+            },
+            "limit": {
+                "description": "Maximum number of top artists/tracks to return in the summary (1-50).",
+                "minimum": 1,
+                "maximum": 50,
+                "type": "integer",
+            },
         },
         "required": ["since", "until", "limit"],
         "type": "object",
@@ -241,7 +334,16 @@ def create_music_server(
 
     @server.tool(
         name="music_status",
-        description="Inspect local Music Friend status.",
+        description=(
+            "Inspect local Music Friend status: whether the inbox has unread "
+            "entries and a summary of the most recent refresh_music run. "
+            "Purpose: a cheap first call to orient before deciding what to do "
+            "next. When to use: at the start of a session, or after "
+            "refresh_music to see whether it produced anything. Call before: "
+            "nothing required, but often precedes list_inbox when unread is "
+            "true, or refresh_music when there is no recent refresh. Call "
+            "after: nothing required. Local-only; does not contact a provider."
+        ),
         annotations=_READ_ONLY,
     )
     async def music_status() -> CallToolResult:
@@ -249,7 +351,21 @@ def create_music_server(
 
     @server.tool(
         name="refresh_music",
-        description="Run one bounded local music refresh.",
+        description=(
+            "Run one bounded refresh of local music data for watched artists: "
+            "'catalog' pulls tracks/releases, 'releases' discovers new "
+            "releases, 'events' discovers new Ticketmaster events, and 'all' "
+            "runs every kind in one call. Purpose: pull fresh provider data "
+            "into the local catalog and inbox. When to use: when data looks "
+            "stale, or before search_catalog/list_watchlist/list_inbox if "
+            "the user wants current results rather than what was last "
+            "imported. Call before: nothing required, though checking "
+            "music_status first avoids starting a refresh that is already "
+            "running. Call after: list_inbox or explain_inbox_item to see "
+            "what the refresh surfaced, or music_status for a summary. "
+            "THIS IS THE ONLY TOOL THAT CONTACTS A PROVIDER (read-only); "
+            "every other tool in this server is local-only."
+        ),
         annotations=_OPEN_WORLD_MUTATING,
     )
     async def refresh_music(
@@ -258,7 +374,20 @@ def create_music_server(
         return _safe_call(lambda: _refresh_result(refresh(_refresh_kind(kind))))
 
     @server.tool(
-        name="search_catalog", description="Search local catalog artists.", annotations=_READ_ONLY
+        name="search_catalog",
+        description=(
+            "Search local catalog artists by name, returning each match's "
+            "local_id, display_name, and identity_confidence. Purpose: find "
+            "an artist's local_id so it can be passed to update_watchlist. "
+            "When to use: before update_watchlist, when the user names an "
+            "artist that is not already on the watchlist (check "
+            "list_watchlist first if unsure). Call before: nothing required; "
+            "run refresh_music('catalog') first only if the catalog is "
+            "known to be stale or empty for that artist. Call after: "
+            "update_watchlist, using the returned artist local_id. "
+            "Local-only; does not contact a provider."
+        ),
+        annotations=_READ_ONLY,
     )
     async def search_catalog(query: str, limit: int) -> CallToolResult:
         def action() -> dict[str, object]:
@@ -273,7 +402,20 @@ def create_music_server(
         return _safe_call(action)
 
     @server.tool(
-        name="list_watchlist", description="List monitored local artists.", annotations=_READ_ONLY
+        name="list_watchlist",
+        description=(
+            "List locally monitored artists with their inclusion reason and "
+            "affinity, each including the artist's local_id. Purpose: see "
+            "who is currently watched and why, and get artist local_ids for "
+            "update_watchlist without a separate search_catalog call. When "
+            "to use: to answer 'who am I watching', or before "
+            "update_watchlist when the artist is likely already watched. "
+            "Call before: nothing required. Call after: update_watchlist "
+            "(using an entry's artist.local_id) to pin/mute/remove an entry, "
+            "or search_catalog if the artist is not in the results. "
+            "Local-only; does not contact a provider."
+        ),
+        annotations=_READ_ONLY,
     )
     async def list_watchlist(limit: int) -> CallToolResult:
         return _safe_call(
@@ -289,7 +431,17 @@ def create_music_server(
 
     @server.tool(
         name="update_watchlist",
-        description="Update one local artist watchlist decision.",
+        description=(
+            "Add, pin, mute, or remove one artist's local watchlist "
+            "decision, identified by artist_id. Purpose: change which "
+            "artists Music Friend monitors and how strongly. When to use: "
+            "after the user names an artist to watch, prioritize, quiet, or "
+            "stop watching. Call before: search_catalog or list_watchlist, "
+            "to obtain the artist_id this tool requires (see the artist_id "
+            "argument). Call after: nothing required; list_watchlist can "
+            "confirm the change. Local-only, mutating; does not contact a "
+            "provider."
+        ),
         annotations=_DESTRUCTIVE_MUTATING,
     )
     async def update_watchlist(
@@ -315,7 +467,18 @@ def create_music_server(
 
     @server.tool(
         name="list_inbox",
-        description="List local Music Friend inbox entries.",
+        description=(
+            "List local inbox entries (new releases/events surfaced for "
+            "watched artists), optionally filtered by decision state, each "
+            "including a summary and the inbox_id. Purpose: see what is "
+            "waiting for a decision or what was already saved/dismissed. "
+            "When to use: after refresh_music or music_status reports "
+            "unread entries, or whenever the user asks what's new. Call "
+            "before: refresh_music first if the inbox is likely stale. Call "
+            "after: explain_inbox_item for full detail on one entry, or "
+            "update_inbox_item (using an entry's local_id) to decide it. "
+            "Local-only; does not contact a provider."
+        ),
         annotations=_READ_ONLY,
     )
     async def list_inbox(
@@ -336,7 +499,16 @@ def create_music_server(
 
     @server.tool(
         name="update_inbox_item",
-        description="Update one local inbox decision.",
+        description=(
+            "Set one inbox entry's decision state to unread, saved, or "
+            "dismissed, identified by inbox_id. Purpose: record the user's "
+            "decision about one surfaced release or event. When to use: "
+            "after the user says to keep, dismiss, or reconsider an inbox "
+            "item. Call before: list_inbox or explain_inbox_item, to obtain "
+            "the inbox_id this tool requires (see the inbox_id argument). "
+            "Call after: nothing required. Local-only, mutating; does not "
+            "contact a provider."
+        ),
         annotations=_MUTATING,
     )
     async def update_inbox_item(
@@ -356,7 +528,17 @@ def create_music_server(
 
     @server.tool(
         name="explain_inbox_item",
-        description="Explain one local inbox entry.",
+        description=(
+            "Return one inbox entry's full record (the release or event "
+            "it's about) and the reasons it was surfaced, identified by "
+            "inbox_id. Purpose: give the full detail list_inbox's compact "
+            "summary omits, so the user can decide. When to use: before "
+            "asking the user to decide on an inbox item, or when they ask "
+            "'why was I shown this'. Call before: list_inbox, to obtain the "
+            "inbox_id this tool requires (see the inbox_id argument). Call "
+            "after: update_inbox_item to record the decision. Local-only; "
+            "does not contact a provider."
+        ),
         annotations=_READ_ONLY,
     )
     async def explain_inbox_item(inbox_id: str) -> CallToolResult:
@@ -366,7 +548,19 @@ def create_music_server(
 
     @server.tool(
         name="summarize_listening_history",
-        description="Summarize locally imported listening evidence for a UTC date range.",
+        description=(
+            "Summarize imported Spotify listening history (play counts, "
+            "milliseconds played, top artists/tracks) over an optional UTC "
+            "date range. Purpose: answer questions about past listening. "
+            "This is evidence, not preference, and never feeds watchlist "
+            "affinity or update_watchlist decisions automatically -- the "
+            "user decides what it implies. When to use: when the user asks "
+            "about their listening history or wants a period summarized. "
+            "Call before: nothing required; the history must already be "
+            "imported via the CLI (`music-friend data import-spotify`), "
+            "which MCP cannot do. Call after: nothing required. Local-only; "
+            "does not contact a provider."
+        ),
         annotations=_READ_ONLY,
     )
     async def summarize_listening_history(
@@ -541,10 +735,27 @@ def _refresh_result(value: object) -> dict[str, object]:
     raise ValueError("refresh callback returned an invalid result")
 
 
+def _display(value: str) -> str:
+    """Sanitize a display name at the MCP read boundary.
+
+    Every write path already sanitizes display names at ingestion (see
+    `music_friend.domain.text.sanitize_display_name` and its call sites in
+    `providers.spotify.normalize`, `tools.event_discovery`, and
+    `store.spotify_history`). This second pass at the MCP boundary is the
+    read-time half of the ingestion fix: it cleans any row written before that
+    ingestion sanitization existed, without a schema migration.
+    """
+    return sanitize_display_name(value, limit=4096)
+
+
+def _optional_display(value: str | None) -> str | None:
+    return None if value is None else _display(value)
+
+
 def _artist(value: Artist) -> dict[str, object]:
     return {
         "local_id": value.local_id,
-        "display_name": value.display_name,
+        "display_name": _display(value.display_name),
         "identity_confidence": value.identity_confidence.value,
     }
 
@@ -587,7 +798,7 @@ def _inbox_summary(
             return None
         return {
             "kind": "release",
-            "title": release.title,
+            "title": _display(release.title),
             "artist_names": _artist_names(application, release.artist_refs),
             "date": release.release_date.isoformat(),
         }
@@ -596,7 +807,7 @@ def _inbox_summary(
         return None
     return {
         "kind": "event",
-        "title": event.title,
+        "title": _display(event.title),
         "artist_names": _artist_names(application, event.artist_refs),
         "date": None if event.starts_at is None else event.starts_at.isoformat(),
     }
@@ -607,7 +818,7 @@ def _artist_names(application: MusicFriendApplication, artist_ids: tuple[str, ..
     for artist_id in artist_ids:
         artist = application.get_artist(artist_id)
         if artist is not None:
-            names.append(artist.display_name)
+            names.append(_display(artist.display_name))
     return names
 
 
@@ -655,7 +866,7 @@ def _release(application: MusicFriendApplication, value: Release) -> dict[str, o
     return {
         "kind": "release",
         "local_id": value.local_id,
-        "title": value.title,
+        "title": _display(value.title),
         "release_type": value.release_type,
         "release_date": value.release_date.isoformat(),
         "date_precision": value.date_precision.value,
@@ -668,11 +879,11 @@ def _event(application: MusicFriendApplication, value: Event) -> dict[str, objec
     return {
         "kind": "event",
         "local_id": value.local_id,
-        "title": value.title,
+        "title": _display(value.title),
         "artist_ids": list(value.artist_refs),
         "artist_names": _artist_names(application, value.artist_refs),
-        "venue_name": value.venue_name,
-        "locality": value.locality,
+        "venue_name": _optional_display(value.venue_name),
+        "locality": _optional_display(value.locality),
         "starts_at": None if value.starts_at is None else value.starts_at.isoformat(),
         "time_precision": value.time_precision,
         "links": list(value.source_links),

@@ -55,6 +55,13 @@ sensitive-looking value never appears in the response. `internal_error` is reser
 that are not the caller's mistake (an unexpected local failure decoding stored data, for example);
 its message is always the same generic sentence and never includes exception text.
 
+Every `local_id`-shaped argument (`artist_id`, `inbox_id`) is a value returned by another tool, not
+something to invent: `artist_id` comes from `search_catalog` or a `list_watchlist` entry's
+`artist.local_id`; `inbox_id` comes from `list_inbox` or the `entry.local_id` in
+`explain_inbox_item`'s result. Every display name a tool returns -- artist, release, event, venue,
+and imported-history names -- has bidirectional-override and other control characters removed; see
+[display-name sanitization](limits.md#display-name-sanitization) for the allowlist and rationale.
+
 `refresh_music` with `kind: "events"` and no event area configured makes no source requests; it
 returns `{"status": "skipped", "reason": "event_area_not_configured"}` instead of reporting
 `succeeded`, so a caller never tells the person "no nearby events" when nothing was actually

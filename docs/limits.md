@@ -30,6 +30,26 @@ Consult [Spotify developer documentation](https://developer.spotify.com/document
 [Ticketmaster Discovery API documentation](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/)
 before relying on a provider result.
 
+## Display-name sanitization
+
+Every display name that enters Music Friend from an external source -- imported Spotify listening
+history (track, artist, and album names), Spotify catalog/provider refresh (artist, track, and
+release names), and Ticketmaster event discovery (event title, venue name, and locality) -- is
+sanitized before it is stored. Sanitization removes Unicode bidirectional-control characters
+(`U+202A`-`U+202E`, `U+2066`-`U+2069`) and every other Unicode control (`Cc`) and format (`Cf`)
+character, so a name cannot visually reorder or hide text in a terminal or agent transcript.
+
+Two format characters are kept rather than stripped: ZERO WIDTH JOINER (`U+200D`), required to keep
+multi-codepoint emoji sequences (for example a skin-tone or gender modifier) rendering as one
+glyph, and ZERO WIDTH NON-JOINER (`U+200C`), required by some scripts -- for example Persian and
+several Indic scripts -- to select the correct glyph shape. Legitimate non-Latin text (Arabic,
+Hebrew, CJK, Cyrillic, and others) is never altered; only control and format characters are
+affected. The shared sanitizer is `music_friend.domain.text.sanitize_display_name`.
+
+Rows written before this sanitization existed are cleaned lazily: every display name an MCP tool
+returns is sanitized again at that read boundary, so old data never needs a database migration to
+become clean. See [MCP clients](mcp.md#tool-surface) for the MCP tool surface this applies to.
+
 ## Manual provider check
 
 After creating a test provider application and using a non-sensitive test account, verify locally:
