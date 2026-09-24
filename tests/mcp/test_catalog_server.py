@@ -20,13 +20,17 @@ from music_friend.domain import (
     IdentityConfidence,
     InboxEntry,
     InboxState,
+    RefreshKind,
+    RefreshRun,
+    RefreshStatus,
+    RefreshSummary,
     Release,
     ReleaseDatePrecision,
     Signal,
     SignalKind,
     SourceReference,
 )
-from music_friend.mcp import create_music_server
+from music_friend.mcp import catalog_server, create_music_server
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import RefreshInvocation
@@ -487,6 +491,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
         "inbox": {"has_unread": True},
         "latest_refresh": None,
         "status": "ready",
+        "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
     }
     assert _call(server, "search_catalog", {"query": "Artist", "limit": 1}) == {
         "items": [
@@ -861,3 +866,29 @@ def test_create_music_server_rejects_a_non_callable_config_store_factory(tmp_pat
         )
     application.close()
     application.close()
+
+
+def test_refresh_result_carries_reason_retry_after_and_remaining() -> None:
+    """Catches the MCP refresh result dropping AC6's partial-outcome detail."""
+    run = RefreshRun(
+        "run-1",
+        "spotify",
+        RefreshKind.RELEASES,
+        RefreshStatus.PARTIAL,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+    invocation = RefreshInvocation(
+        run,
+        already_running=False,
+        reason="quota_exhausted",
+        retry_after=None,
+        remaining=2,
+    )
+
+    payload = catalog_server._refresh_result(invocation)
+
+    assert payload["reason"] == "quota_exhausted"
+    assert payload["remaining"] == 2
+    assert "retry_after" not in payload

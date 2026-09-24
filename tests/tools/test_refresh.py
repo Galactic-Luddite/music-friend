@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,7 @@ from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import (
     RefreshInvocation,
     _acquire_lock,
+    _jittered_delay,
     _PacedSource,
     _read_lock,
     _release_lock,
@@ -217,6 +219,13 @@ def _config() -> LocalConfig:
     return LocalConfig(event_country_code="US", event_postal_code="94103")
 
 
+class _MaxJitterRandom(random.Random):
+    """A deterministic RNG that always jitters to the top of its range (no-op jitter)."""
+
+    def random(self) -> float:
+        return 1.0
+
+
 def _refresh(
     application: MusicFriendApplication,
     source: FakeMusicSource,
@@ -228,6 +237,7 @@ def _refresh(
     lock_clock: object | None = None,
     sleeper: object | None = None,
     checked_at: datetime = NOW,
+    rng: object | None = None,
 ) -> RefreshInvocation:
     return refresh_once(
         application,
@@ -241,6 +251,7 @@ def _refresh(
         monotonic=monotonic,
         lock_clock=lock_clock,
         sleeper=sleeper,
+        rng=rng if rng is not None else _MaxJitterRandom(0),
     )
 
 
@@ -657,7 +668,7 @@ def test_refresh_deadline_stops_between_components_after_preserving_completed_wo
         source = FakeMusicSource()
         source.followed = Page((artist,), None)
         source.releases[("one", None)] = Page((_release("release-1", artist),), None)
-        values = iter((0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 601.0))
+        values = iter((0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 601.0, 601.0))
 
         result = _refresh(
             application,
@@ -714,7 +725,7 @@ def test_refresh_deadline_prevents_later_ticketmaster_calls_after_expiry(tmp_pat
         events = FakeEventClient()
         events.events["attraction:One"] = (_event("event-1"),)
         events.events["attraction:Two"] = (_event("event-2"),)
-        values = iter((0.0, 0.0, 1.0, 1.0, 1.0, 601.0))
+        values = iter((0.0, 0.0, 1.0, 1.0, 1.0, 601.0, 601.0))
 
         result = _refresh(
             application,
@@ -785,7 +796,13 @@ def test_exact_retry_after_is_paused_and_the_same_request_is_retried(tmp_path: P
             ("limit_pauses", 1),
         }
         assert catalog.get_source_limit("spotify") == SourceLimitObservation(
-            "spotify", SourceLimitState.AVAILABLE, NOW + timedelta(seconds=60), None, False, 0
+            "spotify",
+            SourceLimitState.AVAILABLE,
+            NOW + timedelta(seconds=60),
+            None,
+            False,
+            0,
+            4,
         )
 
 
@@ -823,6 +840,7 @@ def test_estimated_retry_uses_exponential_delay_and_stops_above_sixty_seconds(
             NOW + timedelta(seconds=60),
             NOW + timedelta(seconds=180),
             False,
+            2,
             2,
         )
         assert catalog.get_source_cursor(
@@ -896,7 +914,11 @@ def test_two_limit_pause_cap_checkpoints_the_third_short_limit(tmp_path: Path) -
 
         assert result.run is not None
         assert result.run.status.value == "partial"
-        assert clock.sleeps == [1, 1]
+        # Two Retry-After pauses of 1s each, plus a rolling-window wait: AIMD has halved the
+        # per-window call budget twice by the third attempt (8 -> 4 -> 2), so pacing itself
+        # now throttles the third call in addition to the explicit Retry-After pauses.
+        assert clock.sleeps[:2] == [1, 1]
+        assert len(clock.sleeps) == 3
         assert source.release_calls == ["one", "one", "one"]
         assert ("limit_pauses", 2) in {
             (metric.kind.value, metric.count) for metric in result.run.summary.metrics
@@ -990,7 +1012,7 @@ def test_quota_exhaustion_checkpoints_current_artist_without_calling_later_artis
         assert result.run.status.value == "partial"
         assert source.release_calls == ["one", "two"]
         assert catalog.get_source_limit("spotify") == SourceLimitObservation(
-            "spotify", SourceLimitState.QUOTA_EXHAUSTED, NOW, None, False, 1
+            "spotify", SourceLimitState.QUOTA_EXHAUSTED, NOW, None, False, 1, 4
         )
         assert catalog.get_source_cursor(
             "spotify", SourceCapability.RECENT_RELEASES
@@ -1023,7 +1045,7 @@ def test_all_refresh_stops_before_events_after_release_quota_exhaustion(tmp_path
         assert result.run.status.value == "partial"
         assert events.calls == []
         assert catalog.get_source_limit("spotify") == SourceLimitObservation(
-            "spotify", SourceLimitState.QUOTA_EXHAUSTED, NOW, None, False, 1
+            "spotify", SourceLimitState.QUOTA_EXHAUSTED, NOW, None, False, 1, 4
         )
         assert catalog.get_source_cursor(
             "spotify", SourceCapability.RECENT_RELEASES
@@ -1114,6 +1136,7 @@ def test_long_delay_checkpoints_and_resume_starts_at_stopped_artist(tmp_path: Pa
             None,
             False,
             0,
+            4,
         )
 
 
@@ -1149,6 +1172,7 @@ def test_all_refresh_stops_before_events_after_long_release_cooldown(tmp_path: P
             NOW + timedelta(seconds=120),
             True,
             1,
+            4,
         )
         assert catalog.get_source_cursor(
             "spotify", SourceCapability.RECENT_RELEASES
@@ -1198,7 +1222,15 @@ def test_resumed_non_limit_failure_preserves_checkpoint_and_limit_state(tmp_path
         assert (
             catalog.get_source_cursor("spotify", SourceCapability.RECENT_RELEASES) == saved_cursor
         )
-        assert catalog.get_source_limit("spotify") == saved_limit
+        # The saved cooldown had already expired by `checked_at`, so the source is available
+        # again and the persisted observation reflects that rather than the stale cooldown;
+        # the learned window (unaffected by a non-limit failure) is carried forward unchanged.
+        refreshed_limit = catalog.get_source_limit("spotify")
+        assert refreshed_limit is not None
+        assert refreshed_limit.state is SourceLimitState.AVAILABLE
+        assert refreshed_limit.retry_at is None
+        assert refreshed_limit.consecutive_limits == 0
+        assert refreshed_limit.window_calls == saved_limit.window_calls
 
 
 def test_missing_checkpoint_artist_falls_back_to_first_current_watchlist_artist(
@@ -1544,6 +1576,7 @@ def test_paced_source_preserves_read_contracts_and_stops_after_deadline() -> Non
         monotonic=clock.monotonic,
         sleeper=clock.sleep,
         saved_limit=None,
+        rng=random.Random(0),
     )
     assert paced.capabilities() == source.capabilities()
     assert paced.health() == source.health()
@@ -1592,3 +1625,231 @@ def test_refresh_lock_rejects_invalid_clock_value_before_filesystem_mutation(
     with pytest.raises(ValueError, match="lock_clock"):
         _acquire_lock(path, lock_clock=lambda: "bad")  # type: ignore[arg-type]
     assert not path.exists()
+
+
+def test_rng_must_be_a_random_instance(tmp_path: Path) -> None:
+    """Catches an injected RNG that is not a random.Random from silently misbehaving."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        with pytest.raises(ValueError, match="rng"):
+            refresh_once(
+                application,
+                kind="catalog",
+                source_name="spotify",
+                source=FakeMusicSource(),
+                config=_config(),
+                event_client=None,
+                checked_at=NOW,
+                lock_path=tmp_path / "lock",
+                rng=object(),  # type: ignore[arg-type]
+            )
+
+
+def test_jittered_delay_stays_within_half_to_full_base_under_a_seeded_rng() -> None:
+    """Catches a fallback delay that ignores its floor/ceiling bounds (AC3)."""
+    rng = random.Random(42)
+    for base in (60, 120, 240, 480, 900):
+        for _ in range(50):
+            delay = _jittered_delay(base, rng)
+            assert base / 2 <= delay <= base
+
+
+def test_success_streak_recovers_the_learned_window_after_five_successes(
+    tmp_path: Path,
+) -> None:
+    """Catches AIMD recovery never growing the pacing window back after it was halved."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artists = tuple(_artist(f"artist-{n}", f"Artist {n}") for n in range(7))
+        for artist in artists:
+            _watch(application, artist)
+        catalog.put_source_limit(
+            SourceLimitObservation(
+                "spotify",
+                SourceLimitState.AVAILABLE,
+                NOW - timedelta(minutes=5),
+                None,
+                False,
+                0,
+                4,
+            )
+        )
+        source = FakeMusicSource()
+        for number in range(7):
+            source.releases[(f"artist-{number}", None)] = Page((), None)
+        clock = FakeClock()
+
+        result = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW,
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "succeeded"
+        limit = catalog.get_source_limit("spotify")
+        assert limit is not None
+        # Five successes recover exactly one call back onto the learned window.
+        assert limit.window_calls == 5
+
+
+def test_partial_refresh_reports_rate_limited_reason_retry_after_and_remaining(
+    tmp_path: Path,
+) -> None:
+    """Catches the CLI/MCP partial payload dropping reason/retry_after/remaining (AC6)."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeMusicSource()
+        source.releases[("one", None)] = RateLimitedError(120)
+        clock = FakeClock()
+
+        result = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW,
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "partial"
+        assert result.reason == "rate_limited"
+        assert result.retry_after == (NOW + timedelta(seconds=120)).isoformat()
+        assert result.remaining is not None
+
+
+def test_partial_refresh_reports_quota_exhausted_reason(tmp_path: Path) -> None:
+    """Catches quota exhaustion losing its distinct partial reason (AC6)."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeMusicSource()
+        source.releases[("one", None)] = QuotaExhaustedError()
+
+        result = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW,
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "partial"
+        assert result.reason == "quota_exhausted"
+        assert result.retry_after is None
+
+
+def test_partial_refresh_reports_deadline_reason(tmp_path: Path) -> None:
+    """Catches a deadline-driven partial result losing its distinct reason (AC6)."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        source = FakeMusicSource()
+        source.followed = Page((artist,), None)
+        values = iter((0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 601.0, 601.0))
+
+        result = _refresh(
+            application,
+            source,
+            kind="all",
+            lock_path=tmp_path / "lock",
+            monotonic=lambda: next(values),
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "partial"
+        assert result.reason == "deadline"
+
+
+def test_now_must_be_callable(tmp_path: Path) -> None:
+    """Catches a non-callable ``now`` override bypassing input validation."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        with pytest.raises(ValueError, match="now must be callable"):
+            refresh_once(
+                application,
+                kind="catalog",
+                source_name="spotify",
+                source=FakeMusicSource(),
+                config=_config(),
+                event_client=None,
+                checked_at=NOW,
+                lock_path=tmp_path / "lock",
+                now=object(),  # type: ignore[arg-type]
+            )
+
+
+def test_resume_after_a_partial_run_makes_no_requests_for_completed_artists(
+    tmp_path: Path,
+) -> None:
+    """Measures the request-count drop resume gives on a synthetic ten-artist fixture (AC5).
+
+    Without a cursor, a second run that repeats a stopped first run would re-request every
+    artist: 10 (first run) + 10 (second run, from scratch) = 20 requests. With the persisted
+    cursor, the second run resumes at the interrupted artist instead of the first: 5 (first
+    run, four successes plus the one that hit the limit) + 6 (second run, the interrupted
+    artist plus the five never reached) = 11 requests -- and zero re-requests for any of the
+    four artists the first run had already completed.
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artists = tuple(_artist(f"artist-{n}", f"Artist {n}") for n in range(10))
+        for artist in artists:
+            _watch(application, artist)
+        source = FakeMusicSource()
+        for number in range(4):
+            source.releases[(f"artist-{number}", None)] = Page((), None)
+        source.releases[("artist-4", None)] = RateLimitedError(900)
+        first_clock = FakeClock()
+
+        first = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW,
+            monotonic=first_clock.monotonic,
+            sleeper=first_clock.sleep,
+        )
+
+        assert first.run is not None
+        assert first.run.status.value == "partial"
+        before_requests = len(source.release_calls)
+        assert before_requests == 5  # four successes plus the one that hit the limit
+        assert source.release_calls == [f"artist-{n}" for n in range(5)]
+
+        resumed = FakeMusicSource()
+        for number in range(4, 10):
+            resumed.releases[(f"artist-{number}", None)] = Page((), None)
+        second_clock = FakeClock()
+
+        second = _refresh(
+            application,
+            resumed,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW + timedelta(seconds=900),
+            monotonic=second_clock.monotonic,
+            sleeper=second_clock.sleep,
+        )
+
+        assert second.run is not None
+        assert second.run.status.value == "succeeded"
+        after_requests = len(resumed.release_calls)
+        # No re-request for the six artists the first run had not reached (4 = "one" is
+        # replayed once more since it was the interrupted, not-yet-checkpointed artist).
+        assert resumed.release_calls == [f"artist-{n}" for n in range(4, 10)]
+        assert after_requests == 6
+        total_requests = before_requests + after_requests
+        assert total_requests == 11  # 5 + 6, vs. 20 for a naive from-scratch second pass
+        assert total_requests < 2 * len(artists)

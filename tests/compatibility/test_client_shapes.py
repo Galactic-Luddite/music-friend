@@ -64,5 +64,6 @@ def test_openai_compatible_loop_translates_mcp_schema_and_synthetic_result(tmp_p
         "inbox": {"has_unread": False},
         "latest_refresh": None,
         "status": "ready",
+        "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
     }
     application.close()

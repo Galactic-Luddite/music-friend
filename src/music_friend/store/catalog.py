@@ -1561,14 +1561,16 @@ class Catalog:
             self._require_connection().execute(
                 """
                 INSERT INTO source_limits (
-                    source, state, observed_at, retry_at, retry_is_exact, consecutive_limits
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    source, state, observed_at, retry_at, retry_is_exact, consecutive_limits,
+                    window_calls
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (source) DO UPDATE SET
                     state = excluded.state,
                     observed_at = excluded.observed_at,
                     retry_at = excluded.retry_at,
                     retry_is_exact = excluded.retry_is_exact,
-                    consecutive_limits = excluded.consecutive_limits
+                    consecutive_limits = excluded.consecutive_limits,
+                    window_calls = excluded.window_calls
                 """,
                 (
                     observation.source,
@@ -1577,6 +1579,7 @@ class Catalog:
                     None if observation.retry_at is None else _datetime_text(observation.retry_at),
                     int(observation.retry_is_exact),
                     observation.consecutive_limits,
+                    observation.window_calls,
                 ),
             )
 
@@ -1586,7 +1589,8 @@ class Catalog:
             self._require_connection()
             .execute(
                 """
-            SELECT source, state, observed_at, retry_at, retry_is_exact, consecutive_limits
+            SELECT source, state, observed_at, retry_at, retry_is_exact, consecutive_limits,
+                   window_calls
             FROM source_limits WHERE source = ?
             """,
                 (source,),
@@ -1602,6 +1606,7 @@ class Catalog:
             retry_at=None if row[3] is None else datetime.fromisoformat(str(row[3])),
             retry_is_exact=bool(row[4]),
             consecutive_limits=int(row[5]),
+            window_calls=int(row[6]),
         )
 
     def put_release_check_cursor(self, cursor: ReleaseCheckCursor) -> None:

@@ -234,7 +234,7 @@ def _artifact_smoke_code(cwd: Path) -> str | None:
         f"catalog = Catalog.open(Path({str(database)!r})); "
         "assert catalog._connection.execute("
         "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]; "
+        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]; "
         "catalog.close()"
     )
 

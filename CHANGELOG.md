@@ -11,6 +11,16 @@ Minor release: agent-driven setup and non-interactive operations enable complete
 - `music-friend connect spotify` supports `--json` flag for structured output.
 - `music-friend doctor` remedies are now concrete, non-interactive command strings (e.g., `"music-friend setup --spotify-client-id example-client-id"`) instead of placeholder text.
 - Backward compatibility: all interactive workflows remain unchanged when flags are not provided.
+- Adaptive request pacing: each source's per-window request rate is now learned with an AIMD
+  policy (halved on a 429, grown back gradually after a streak of successes) and persisted per
+  source, so a large library's full refresh needs fewer runs and rarely hits a 429. Estimated
+  fallback backoff delays are now jittered within their ladder step.
+- A run started during a recorded cooldown waits or skips instead of contacting the provider;
+  `status --json` and the MCP `music_status` tool now report a `source_limits.spotify` block
+  (`ready`, `state`, `retry_at`) so a caller knows when the source will be ready again.
+- A `partial` refresh result (CLI text/JSON and the MCP `refresh_music` tool) now includes
+  `reason` (`rate_limited`, `quota_exhausted`, or `deadline`), `retry_after` (ISO-8601, when
+  known), and `remaining` (records skipped this run).
 
 ## 0.3.0
 

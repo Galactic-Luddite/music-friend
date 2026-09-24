@@ -98,6 +98,31 @@ A refresh reads Spotify (and Ticketmaster for `events`) and writes only to your 
 never changes a provider account. A refresh can end as `partial` when a provider limit interrupts
 it; a later refresh resumes where it stopped. See [provider limits](limits.md).
 
+### Adaptive request pacing
+
+Each source has a learned per-window request rate, stored locally and carried from run to run. A
+429 halves it; a streak of successful requests slowly grows it back, up to the built-in ceiling.
+This means a large library converges on the fastest rate Spotify will accept instead of retrying
+at a fixed pace every run. When a fallback delay is estimated (no exact `Retry-After` from the
+provider), it is jittered within its ladder step so multiple installs recovering at the same time
+do not retry in lockstep.
+
+A `partial` refresh result includes three extra fields when the cause is known:
+
+- `reason`: `rate_limited`, `quota_exhausted`, or `deadline`.
+- `retry_after`: an ISO-8601 timestamp for when the source is expected to be ready again (only for
+  `rate_limited`; omitted for `quota_exhausted`, which has no known reset time, and `deadline`).
+- `remaining`: how many records this run skipped rather than completing.
+
+The text (non-`--json`) output appends them to the summary line, for example:
+
+```text
+Refresh releases: partial. reason=rate_limited retry_after=2026-09-24T18:05:00+00:00 remaining=6
+```
+
+`status --json` and the MCP `music_status` tool both report a `source_limits.spotify` block so a
+caller can tell whether the source is ready now or when it will be, without starting a refresh.
+
 A `refresh events` run with no event area configured makes no Ticketmaster request and reports
 `{"status": "skipped", "reason": "event_area_not_configured"}` instead of `succeeded`, so a script
 reading `--json` output can tell "not checked" apart from "checked, nothing found". A `refresh all`

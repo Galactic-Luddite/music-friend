@@ -1,6 +1,8 @@
 """Provider-neutral Music Friend domain records."""
 
 from music_friend.domain.models import (
+    MAX_SOURCE_WINDOW_CALLS,
+    MIN_SOURCE_WINDOW_CALLS,
     AffinityEvidence,
     AffinityEvidenceKind,
     AffinityScore,
@@ -107,6 +109,8 @@ __all__ = [
     "SignalKind",
     "SourceCapability",
     "SourceCursor",
+    "MAX_SOURCE_WINDOW_CALLS",
+    "MIN_SOURCE_WINDOW_CALLS",
     "SourceLimitObservation",
     "SourceLimitState",
     "SourceReference",
