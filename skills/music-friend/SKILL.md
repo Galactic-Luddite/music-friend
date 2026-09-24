@@ -21,7 +21,11 @@ signature, status footer, or advice to retry unless the local result specificall
 
 - For a quick overview, call `music_status`.
 - To update local information, ask for confirmation and then call `refresh_music` with one of
-  `catalog`, `releases`, `events`, or `all`.
+  `catalog`, `releases`, `events`, or `all`. A `kind: "events"` call with no event area configured
+  returns `{"status": "skipped", "reason": "event_area_not_configured"}` and makes no provider
+  request; report that no event area is set rather than "no nearby events". A `kind: "all"` call
+  with the same missing configuration still runs catalog and release discovery and adds
+  `events_skipped_reason: "event_area_not_configured"` to its result.
 - To find a known artist, call `search_catalog` before changing a watchlist. Matching is
   case- and accent-insensitive, so a plain-ASCII spelling still finds a stylized or accented
   stored name.

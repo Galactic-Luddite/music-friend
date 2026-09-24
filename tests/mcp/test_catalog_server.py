@@ -29,6 +29,7 @@ from music_friend.domain import (
 from music_friend.mcp import create_music_server
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
+from music_friend.tools.refresh import RefreshInvocation
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
@@ -529,6 +530,26 @@ def test_catalog_server_accepts_each_bounded_refresh_kind(tmp_path: Path, kind: 
         "status": "succeeded",
     }
     assert calls == [kind]
+    application.close()
+
+
+def test_catalog_server_reports_events_only_refresh_skipped_for_unconfigured_area(
+    tmp_path: Path,
+) -> None:
+    """Catches an unconfigured event refresh reaching the MCP client as a misleading success."""
+    application = _application(tmp_path)
+    server = create_music_server(
+        application,
+        refresh=lambda _kind: RefreshInvocation(
+            None, False, skip_reason="event_area_not_configured"
+        ),
+        now=lambda: NOW,
+    )
+
+    assert _call(server, "refresh_music", {"kind": "events"}) == {
+        "status": "skipped",
+        "reason": "event_area_not_configured",
+    }
     application.close()
 
 

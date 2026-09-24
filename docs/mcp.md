@@ -37,7 +37,7 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
 | `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh | none | `status`, `inbox.has_unread`, `latest_refresh` | read-only, local |
-| `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all` | a refresh run summary, or `partial` when interrupted or already running | local write, provider contact |
+| `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all` | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
 | `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries | read-only, local |
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove` | the applied decision, or `not_found` | local write |
@@ -49,6 +49,14 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
 result when it cannot complete the request. Error messages are redacted and never include provider
 responses.
+
+`refresh_music` with `kind: "events"` and no event area configured makes no source requests; it
+returns `{"status": "skipped", "reason": "event_area_not_configured"}` instead of reporting
+`succeeded`, so a caller never tells the person "no nearby events" when nothing was actually
+checked. `refresh_music` with `kind: "all"` still runs catalog and release discovery normally and
+reports the run's real `status`; when the event area is unconfigured it adds
+`events_skipped_reason: "event_area_not_configured"` to the result so the events portion of the run
+is identifiable without failing the rest of the refresh.
 
 ### `search_catalog` matching rule
 

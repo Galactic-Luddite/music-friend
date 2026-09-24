@@ -314,7 +314,7 @@ def _run_local_command(
             now,
         )
     if argv == ["diagnostics"]:
-        diagnostics = _diagnostics(application, _load_config(config_store))
+        diagnostics = _diagnostics(application, _load_config(config_store), now)
         return _emit(diagnostics, structured, stdout, text=_diagnostics_text(diagnostics))
     if argv == ["connect", "spotify"]:
         return _connect(
@@ -838,6 +838,7 @@ def _refresh(
                 event_client=event_client,
                 checked_at=checked_at,
                 lock_path=lock_path,
+                now=lambda: _checked_at(now),
             )
         with _spotify_source(
             config,
@@ -854,6 +855,7 @@ def _refresh(
                 event_client=event_client,
                 checked_at=checked_at,
                 lock_path=lock_path,
+                now=lambda: _checked_at(now),
             )
 
 
@@ -984,7 +986,12 @@ def _schedule_platform() -> SchedulePlatform:
 def _emit_refresh(value: object, structured: bool, stdout: TextIO) -> int:
     payload = _refresh_payload(value)
     _emit(payload, structured, stdout)
-    return 3 if payload["status"] == "partial" else 0 if payload["status"] == "succeeded" else 1
+    status = payload["status"]
+    if status == "partial":
+        return 3
+    if status in {"succeeded", "skipped"}:
+        return 0
+    return 1
 
 
 def _refresh_payload(value: object) -> dict[str, object]:
@@ -997,8 +1004,13 @@ def _refresh_payload(value: object) -> dict[str, object]:
     if isinstance(value, RefreshInvocation):
         if value.already_running:
             return {"status": "partial"}
+        if value.run is None and value.skip_reason is not None:
+            return {"status": "skipped", "reason": value.skip_reason}
         if value.run is not None:
-            return _refresh_run(value.run)
+            payload = _refresh_run(value.run)
+            if value.skip_reason is not None:
+                payload["events_skipped_reason"] = value.skip_reason
+            return payload
     raise ValueError("refresh result is invalid")
 
 
@@ -1011,7 +1023,9 @@ def _catalog_status(application: MusicFriendApplication) -> dict[str, object]:
     }
 
 
-def _diagnostics(application: MusicFriendApplication, config: LocalConfig) -> dict[str, object]:
+def _diagnostics(
+    application: MusicFriendApplication, config: LocalConfig, now: Clock
+) -> dict[str, object]:
     return {
         "status": "ready",
         "spotify_configured": config.spotify_client_id is not None,
@@ -1025,13 +1039,22 @@ def _diagnostics(application: MusicFriendApplication, config: LocalConfig) -> di
             )
         ),
         "latest_refresh": _catalog_status(application)["latest_refresh"],
-        "source_limits": {"spotify": _source_limit_diagnostics(application, "spotify")},
+        "source_limits": {
+            "spotify": _source_limit_diagnostics(application, "spotify", _checked_at(now))
+        },
     }
 
 
 def _source_limit_diagnostics(
-    application: MusicFriendApplication, source: str
+    application: MusicFriendApplication, source: str, checked_at: datetime
 ) -> dict[str, object]:
+    """Report the source's live cooldown state as of ``checked_at``.
+
+    ``consecutive_limits`` is retained history: once ``retry_at`` has passed the reported
+    ``state`` flips back to ``available`` for display, but the stored observation (and its
+    ``consecutive_limits`` count) is left untouched. The next real limit response is still free
+    to build on that history, and the counter only resets when a request actually succeeds.
+    """
     observation = application.get_source_limit(source)
     requests = 0
     pauses = 0
@@ -1042,8 +1065,13 @@ def _source_limit_diagnostics(
         requests = metrics.get(RefreshMetricKind.SOURCE_REQUESTS, 0)
         pauses = metrics.get(RefreshMetricKind.LIMIT_PAUSES, 0)
         break
+    expired = (
+        observation is not None
+        and observation.retry_at is not None
+        and observation.retry_at <= checked_at
+    )
     return {
-        "state": "available" if observation is None else observation.state.value,
+        "state": ("available" if observation is None or expired else observation.state.value),
         "observed_at": None if observation is None else observation.observed_at.isoformat(),
         "retry_at": (
             None

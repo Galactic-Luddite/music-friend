@@ -73,6 +73,7 @@ class RefreshInvocation:
 
     run: RefreshRun | None
     already_running: bool
+    skip_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -88,6 +89,7 @@ class _RefreshCounts:
     source_requests: int = 0
     limit_pauses: int = 0
     partial: bool = False
+    events_skip_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +299,7 @@ def refresh_once(
     monotonic: Callable[[], float] | object | None = None,
     lock_clock: Callable[[], float] | object | None = None,
     sleeper: Callable[[float], None] | object | None = None,
+    now: Callable[[], datetime] | object | None = None,
 ) -> RefreshInvocation:
     """Run selected existing checks once, persist safe results, and always release the local lock."""
     if not isinstance(application, MusicFriendApplication):
@@ -324,6 +327,9 @@ def refresh_once(
     sleep = time.sleep if sleeper is None else sleeper
     if not callable(sleep):
         raise ValueError("sleeper must be callable")
+    wall_clock = (lambda: checked_at) if now is None else now
+    if not callable(wall_clock):
+        raise ValueError("now must be callable")
     lease = _acquire_lock(lock_path, lock_clock=acquisition_clock)
     if lease is None:
         return RefreshInvocation(None, True)
@@ -371,20 +377,36 @@ def refresh_once(
         if limited_source is not None:
             counts.source_requests = limited_source.requests
             counts.limit_pauses = limited_source.pauses
+        if (
+            selected_kind is RefreshKind.EVENTS
+            and counts.events_skip_reason is not None
+            and counts.successes == 0
+            and counts.failures == 0
+            and counts.signals_created == 0
+        ):
+            return RefreshInvocation(None, False, skip_reason=counts.events_skip_reason)
         status = _status(counts)
+        finished_at = max(checked_at, _wall_clock_now(wall_clock))
         run = RefreshRun(
             run_id,
             source_name,
             selected_kind,
             status,
             checked_at,
-            checked_at,
+            finished_at,
             _summary(counts),
         )
         application.put_refresh_run(run)
-        return RefreshInvocation(run, False)
+        return RefreshInvocation(run, False, skip_reason=counts.events_skip_reason)
     finally:
         _release_lock(lease)
+
+
+def _wall_clock_now(wall_clock: Callable[[], datetime]) -> datetime:
+    value = wall_clock()
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("now must return a timezone-aware datetime")
+    return value
 
 
 def update_inbox_state(
@@ -539,7 +561,15 @@ def _run_events(
     except Exception:
         counts.failures += 1
         return
+    if result.status is EventDiscoveryStatus.SKIPPED and not _event_area_configured(config):
+        counts.events_skip_reason = "event_area_not_configured"
+        counts.records_skipped += 1
+        return
     _count_events(application, result, checked_at, counts)
+
+
+def _event_area_configured(config: LocalConfig) -> bool:
+    return config.event_country_code is not None and config.event_postal_code is not None
 
 
 def _count_events(

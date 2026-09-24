@@ -20,6 +20,17 @@
   an impossible calendar date (e.g. `2026-02-30T00:00:00Z`), each with a message naming the
   specific problem. A zero-length range is treated as a caller error, not an empty summary. No
   caller-supplied value to `summarize_listening_history` can produce `internal_error`.
+- Fixes a refresh run's `finished_at` being copied from `started_at`, so every refresh reported
+  zero duration. `finished_at` is now read from the clock again when the run actually completes.
+- Fixes `diagnostics` reporting a source as `cooling_down` forever once a rate limit was observed,
+  even after its `retry_at` had passed. The reported `state` now reflects the live cooldown as of
+  the diagnostics call; the stored observation and its `consecutive_limits` history are unchanged.
+- Fixes `refresh events` (CLI and the `refresh_music` MCP tool) reporting `succeeded` with zero
+  source requests when no event area is configured. It now returns
+  `{"status": "skipped", "reason": "event_area_not_configured"}` and makes no provider request.
+  `refresh all` with the same missing configuration still refreshes catalog and releases normally
+  and adds `events_skipped_reason: "event_area_not_configured"` to its result instead of masking
+  the events portion as a plain success.
 
 ## 0.1.1
 

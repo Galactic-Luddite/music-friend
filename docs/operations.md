@@ -50,10 +50,26 @@ A refresh reads Spotify (and Ticketmaster for `events`) and writes only to your 
 never changes a provider account. A refresh can end as `partial` when a provider limit interrupts
 it; a later refresh resumes where it stopped. See [provider limits](limits.md).
 
+A `refresh events` run with no event area configured makes no Ticketmaster request and reports
+`{"status": "skipped", "reason": "event_area_not_configured"}` instead of `succeeded`, so a script
+reading `--json` output can tell "not checked" apart from "checked, nothing found". A `refresh all`
+run with the same missing configuration still refreshes catalog and releases normally; its result
+adds `events_skipped_reason: "event_area_not_configured"` alongside the run's own `status` so the
+events portion is identifiable without the whole run being reported as skipped or failed.
+
+### Refresh command exit codes
+
+`refresh catalog|releases|events|all` exits `0` for a `succeeded` or `skipped` outcome, `3` for
+`partial`, and `1` for `failed` or an already-running refresh (reported as `partial`). `diagnostics`
+and the other inspection commands exit `0` on success and `1` on an unexpected internal error;
+`doctor` uses its own `0`/`5` convention documented above.
+
 Diagnostics include a provider-neutral `source_limits` section with availability or cooldown
 state, observation and retry times, whether the retry time is exact, consecutive limit count, and
-the latest refresh request and pause counts. It does not include response bodies, headers, or
-credentials.
+the latest refresh request and pause counts. `state` reflects live cooldown status as of the
+diagnostics call: once `retry_at` has passed, `state` reports `available` again even though the
+underlying `consecutive_limits` history is preserved for the next limit observation to build on.
+It does not include response bodies, headers, or credentials.
 
 Use MCP to make watchlist and inbox state changes. The CLI deliberately exposes only list and show
 operations for those records.
