@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Minor release: agent-driven setup and non-interactive operations enable complete automation of Music Friend configuration and data lifecycle through CLI flags and MCP tools.
+
+- `music-friend setup` now accepts non-interactive flags: `--spotify-client-id`, `--event-country`, `--event-postal`, `--event-radius`, `--event-unit`, and `--clear-<field>` variants for each field. Omitted flags preserve existing configuration. Setup works without a TTY when flags are provided.
+- Ticketmaster API key can be supplied through `--ticketmaster-key-env VAR`, `--ticketmaster-key-file PATH` (enforces chmod 600), or `--ticketmaster-key-stdin`. The key never appears in stdout, stderr, JSON output, exception text, or logs.
+- New MCP tools: `get_setup` (reports configuration state and completion status) and `update_setup` (updates non-secret fields). Secret values are never returned from MCP tools; the `update_setup` response directs users to the CLI for Ticketmaster key changes.
+- `data delete` and `data restore` now accept `--yes` for automatic confirmation or `--confirm <token>` for token-based confirmation (expected tokens are "DELETE" and "RESTORE" respectively). These commands refuse to proceed without a TTY and without a confirmation flag.
+- `music-friend connect spotify` supports `--json` flag for structured output.
+- `music-friend doctor` remedies are now concrete, non-interactive command strings (e.g., `"music-friend setup --spotify-client-id example-client-id"`) instead of placeholder text.
+- Backward compatibility: all interactive workflows remain unchanged when flags are not provided.
+
 ## 0.3.0
 
 Minor release: new, more specific error messages and CLI failure handling, richer MCP tool

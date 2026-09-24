@@ -28,6 +28,7 @@ Music Friend is a power-user tool. Before it is useful you need:
   ([setup](docs/setup.md)). Ticketmaster event discovery is optional and needs its own free key.
 - **Comfort with a terminal** for one-time setup: install, `music-friend setup`,
   `music-friend connect spotify`, and `music-friend doctor` to confirm everything is ready.
+  Setup can be **fully automated** with command-line flags (see [agent-driven setup](docs/operations.md#agent-driven-setup)).
 
 After that, your assistant does the work. Refreshes run when the assistant (or you) asks, or once a
 day if you install the optional per-user schedule with `music-friend schedule install`.

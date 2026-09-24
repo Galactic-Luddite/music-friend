@@ -30,7 +30,7 @@ tools and their schemas from the local server; it does not need provider-specifi
 
 ## Tool surface
 
-Music Friend exposes exactly these nine tools. Every tool works with local identifiers and bounded
+Music Friend exposes exactly these eleven tools. Every tool works with local identifiers and bounded
 arguments, never raw provider identifiers. "Local write" means the tool changes only your local
 catalog; "provider contact" means it makes read-only network requests to Spotify or Ticketmaster.
 
@@ -45,6 +45,8 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 | `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry (including its `summary`), or `not_found` | local write |
 | `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry` (with `summary`), `record` (with `artist_names` alongside `artist_ids`), and `reasons` (why it was included) | read-only, local |
 | `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
+| `get_setup` | Query Music Friend configuration state and completion status | none | configured fields (Spotify ID, event area fields), which fields are missing, whether setup is complete for MCP readiness | read-only, local |
+| `update_setup` | Update Music Friend configuration fields (non-secrets only) | `spotify_client_id`, `event_country_code`, `event_postal_code`, `event_radius`, `event_radius_unit` (all optional; pass null to leave unchanged) | updated configuration state, or instructions to use CLI for secrets | local write |
 
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
 result when it cannot complete the request. Error messages are redacted and never include provider
