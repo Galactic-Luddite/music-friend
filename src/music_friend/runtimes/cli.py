@@ -23,6 +23,7 @@ from music_friend.agent_skill import SkillInstallError
 from music_friend.agent_skill import install_skill as install_agent_skill
 from music_friend.configuration import LocalConfig, LocalConfigStore, RadiusUnit
 from music_friend.domain import (
+    DAILY_REFRESH_MINUTES,
     InboxEntry,
     InboxState,
     RefreshMetricKind,
@@ -74,7 +75,10 @@ _USAGE = (
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
 )
-_DAILY_REFRESH_MINUTES = 1440
+#: Cadence of the scheduled full refresh. Shared with release_discovery.FRESHNESS_TTL via
+#: music_friend.domain.DAILY_REFRESH_MINUTES so the freshness TTL always stays well below
+#: this interval.
+_DAILY_REFRESH_MINUTES = DAILY_REFRESH_MINUTES
 
 
 class _ConnectionFailed(RuntimeError):

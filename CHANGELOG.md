@@ -21,9 +21,10 @@ Minor release: agent-driven setup and non-interactive operations enable complete
 - A `partial` refresh result (CLI text/JSON and the MCP `refresh_music` tool) now includes
   `reason` (`rate_limited`, `quota_exhausted`, or `deadline`), `retry_after` (ISO-8601, when
   known), and `remaining` (records skipped this run).
-- An artist whose releases were successfully checked within the last 24 hours is skipped on a
+- An artist whose releases were successfully checked within the last 20 hours is skipped on a
   later release refresh -- no source request at all -- cutting requests per artist on a repeated
-  full run.
+  full run. The 20-hour window stays below the 24-hour scheduled refresh cadence so a scheduled
+  run that starts slightly early is never mistaken for a repeat and does not skip a whole cycle.
 
 ## 0.3.0
 

@@ -108,8 +108,10 @@ provider), it is jittered within its ladder step so multiple installs recovering
 do not retry in lockstep.
 
 Release discovery also skips an artist entirely -- no source request -- when its releases were
-successfully checked within the last 24 hours, so a second full refresh soon after the first makes
-requests only for artists that are actually due for a check. The Spotify adapter has no batch
+successfully checked within the last 20 hours, so a second full refresh soon after the first makes
+requests only for artists that are actually due for a check. This freshness window is kept below
+the scheduled daily refresh's 24-hour cadence so a scheduled run that starts slightly early never
+mistakes every artist for fresh and silently skips a whole cycle. The Spotify adapter has no batch
 lookup endpoint today (it calls `/v1/artists/{id}/albums` per artist), so batching several artists
 into one call and conditional (`If-None-Match`) requests remain future work.
 

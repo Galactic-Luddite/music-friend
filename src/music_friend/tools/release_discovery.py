@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 
 from music_friend.domain import (
+    DAILY_REFRESH_MINUTES,
     Artist,
     ArtistReleaseDiscoveryResult,
     Release,
@@ -31,7 +32,10 @@ _FIRST_LOOKBACK = timedelta(days=30)
 _OVERLAP = timedelta(hours=48)
 #: An artist whose releases were successfully checked within this window makes zero source
 #: requests on a later full run, cutting requests per artist on a repeated refresh (AC5).
-FRESHNESS_TTL = timedelta(hours=24)
+#: Derived from the scheduled full-refresh cadence with a 4-hour margin so a scheduled run
+#: that starts slightly earlier than the previous interval still treats every artist as
+#: due, instead of silently skipping a whole cycle.
+FRESHNESS_TTL = timedelta(minutes=DAILY_REFRESH_MINUTES) - timedelta(hours=4)
 
 
 class _SourceCallStopped(RuntimeError):

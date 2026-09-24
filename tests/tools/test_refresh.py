@@ -1927,6 +1927,56 @@ def test_freshness_ttl_skip_makes_zero_requests_for_a_second_full_run(tmp_path: 
     assert ttl_total < baseline_total
 
 
+def test_freshness_ttl_stays_below_the_scheduled_refresh_interval(tmp_path: Path) -> None:
+    """A scheduled run that starts just under 24h after the previous one is not skipped.
+
+    Regression for a bug where FRESHNESS_TTL == 24h, the exact scheduled interval: a
+    scheduled run that starts slightly earlier than a full 24h later (as real timers do)
+    would see every artist as fresh and skip it, silently halving the effective check
+    cadence to every other day. With the TTL derived at a margin below the schedule
+    interval, a run at t0 + 23h59m must still check every artist.
+    """
+    artist_count = 5
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        for number in range(artist_count):
+            _watch(application, _artist(f"artist-{number}", f"Artist {number}"))
+        source = FakeMusicSource()
+        for number in range(artist_count):
+            source.releases[(f"artist-{number}", None)] = Page((), None)
+        first_clock = FakeClock()
+
+        first = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock-1",
+            checked_at=NOW,
+            monotonic=first_clock.monotonic,
+            sleeper=first_clock.sleep,
+        )
+        assert first.run is not None
+        assert first.run.status.value == "succeeded"
+        before_second = len(source.release_calls)
+
+        second_clock = FakeClock()
+        second = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock-2",
+            checked_at=NOW + timedelta(hours=23, minutes=59),
+            monotonic=second_clock.monotonic,
+            sleeper=second_clock.sleep,
+        )
+        assert second.run is not None
+        assert second.run.status.value == "succeeded"
+        second_requests = len(source.release_calls) - before_second
+
+        assert second_requests == artist_count
+        assert source.release_calls[before_second:] == [f"artist-{n}" for n in range(artist_count)]
+
+
 def test_acquire_lock_returns_none_on_an_unexpected_os_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -707,6 +707,11 @@ class SourceCursor:
 MAX_SOURCE_WINDOW_CALLS = 8
 MIN_SOURCE_WINDOW_CALLS = 1
 
+#: Cadence of the scheduled full refresh, in minutes. Shared by the CLI's schedule
+#: installer and the release-discovery freshness TTL so the TTL always stays well
+#: below the schedule interval, even when a scheduled run starts slightly early.
+DAILY_REFRESH_MINUTES = 1440
+
 
 @dataclass(frozen=True, slots=True)
 class SourceLimitObservation:
