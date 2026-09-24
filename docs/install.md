@@ -33,7 +33,7 @@ xcode-select --install
 brew install openssl@3 rust
 rustc --version
 OPENSSL_DIR="$(brew --prefix openssl@3)" \
-  python -m pip install --no-binary cryptography music_friend-0.3.0-py3-none-any.whl
+  python -m pip install --no-binary cryptography music_friend-0.4.0-py3-none-any.whl
 ```
 
 Confirm that `rustc --version` reports Rust 1.83 or newer. The command above dynamically links
@@ -41,7 +41,7 @@ the Homebrew OpenSSL. To build cryptography statically instead, use this install
 
 ```bash
 OPENSSL_STATIC=1 \
-  python -m pip install --no-binary cryptography music_friend-0.3.0-py3-none-any.whl
+  python -m pip install --no-binary cryptography music_friend-0.4.0-py3-none-any.whl
 ```
 
 On platforms with a supported cryptography wheel, use the regular release-file installation below.

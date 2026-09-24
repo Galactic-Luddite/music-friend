@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
-Minor release: agent-driven setup and non-interactive operations enable complete automation of Music Friend configuration and data lifecycle through CLI flags and MCP tools.
+Minor release: setup, data commands, and Spotify connection can be driven by an agent without a terminal, two MCP configuration tools are added, and refresh paces itself under Spotify rate limits.
 
 - `music-friend setup` now accepts non-interactive flags: `--spotify-client-id`, `--event-country`, `--event-postal`, `--event-radius`, `--event-unit`, and `--clear-<field>` variants for each field. Omitted flags preserve existing configuration. Setup works without a TTY when flags are provided.
 - Ticketmaster API key can be supplied through `--ticketmaster-key-env VAR`, `--ticketmaster-key-file PATH` (enforces chmod 600), or `--ticketmaster-key-stdin`. The key never appears in stdout, stderr, JSON output, exception text, or logs.
