@@ -114,6 +114,8 @@ def test_catalog_server_exposes_only_the_stable_local_tool_inventory(tmp_path: P
         "update_inbox_item",
         "explain_inbox_item",
         "summarize_listening_history",
+        "get_setup",
+        "update_setup",
     ]
 
     async def listed_schemas() -> dict[str, dict[str, object]]:
@@ -447,6 +449,20 @@ def test_catalog_server_publishes_exact_tool_effect_annotations(tmp_path: Path) 
         "summarize_listening_history": {
             "title": None,
             "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": None,
+            "openWorldHint": False,
+        },
+        "get_setup": {
+            "title": None,
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": None,
+            "openWorldHint": False,
+        },
+        "update_setup": {
+            "title": None,
+            "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": None,
             "openWorldHint": False,

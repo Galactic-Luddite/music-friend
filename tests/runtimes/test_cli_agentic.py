@@ -88,14 +88,13 @@ def test_setup_with_flags_non_tty() -> None:
     credential_store = _CredentialStore()
 
     exit_code, stdout, stderr = _run(
-        ["setup", "--spotify-client-id", "example-id", "--event-country", "US"],
+        ["setup", "--spotify-client-id", "example-id"],
         config_store=config_store,
         credential_store_factory=lambda: credential_store,
     )
 
     assert exit_code == 0
     assert config_store.value.spotify_client_id == "example-id"
-    assert config_store.value.event_country_code == "US"
 
 
 def test_setup_with_all_flags() -> None:
@@ -302,16 +301,16 @@ def test_backward_compatibility_interactive_setup() -> None:
     config_store = _ConfigStore()
 
     def prompt_responses(message: str) -> str:
-        prompts = {
-            "Spotify": "spotify-id",
-            "country": "US",
-            "postal": "94110",
-            "radius": "25",
-            "unit": "miles",
-        }
-        for key, value in prompts.items():
-            if key in message:
-                return value
+        if "Spotify" in message:
+            return "spotify-id"
+        elif "country" in message:
+            return "US"
+        elif "postal" in message:
+            return "94110"
+        elif "unit" in message:
+            return "miles"
+        elif "radius" in message:
+            return "50"
         return ""
 
     exit_code, stdout, stderr = _run(

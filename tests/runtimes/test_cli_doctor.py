@@ -123,7 +123,7 @@ def test_doctor_names_connect_remedy_when_spotify_is_not_connected(tmp_path: Pat
     assert result == 5
     assert checks["spotify_connection"] == {
         "state": "failed",
-        "remedy": "Run: music-friend connect spotify",
+        "remedy": "music-friend connect spotify",
     }
     for name in (
         "python",

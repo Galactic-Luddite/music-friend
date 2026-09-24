@@ -1233,7 +1233,7 @@ def _setup_command(
             if i + 1 >= len(argv):
                 print(_USAGE, end="", file=stderr)
                 return 2
-            flags[arg[2:]] = argv[i + 1]
+            flags[arg[2:].replace("-", "_")] = argv[i + 1]
             i += 2
         elif arg.startswith("--clear-"):
             field = arg[8:]
@@ -1250,7 +1250,7 @@ def _setup_command(
                 if i + 1 >= len(argv):
                     print(_USAGE, end="", file=stderr)
                     return 2
-                flags[arg[2:]] = argv[i + 1]
+                flags[arg[2:].replace("-", "_")] = argv[i + 1]
                 i += 2
         else:
             print(_USAGE, end="", file=stderr)

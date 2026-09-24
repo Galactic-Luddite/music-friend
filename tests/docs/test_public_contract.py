@@ -21,6 +21,8 @@ EXPECTED_TOOLS = {
     "update_inbox_item",
     "explain_inbox_item",
     "summarize_listening_history",
+    "get_setup",
+    "update_setup",
 }
 
 
@@ -29,7 +31,7 @@ def test_expected_tools_match_the_canonical_mcp_surface() -> None:
     from music_friend.mcp.catalog_server import _TOOL_SCHEMAS
 
     assert set(_TOOL_SCHEMAS) == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 9
+    assert len(EXPECTED_TOOLS) == 11
 
 
 def test_mcp_guide_covers_every_tool_with_purpose_inputs_result_and_behavior() -> None:
@@ -47,7 +49,7 @@ def test_mcp_guide_covers_every_tool_with_purpose_inputs_result_and_behavior() -
         assert all(cells), name
         assert re.search(r"read-only|local write", cells[4]), name
     assert re.search(r"provider contact", rows["refresh_music"])
-    assert "exactly these nine tools" in mcp
+    assert "exactly these eleven tools" in mcp
     for path in _public_markdown_files():
         text = path.read_text(encoding="utf-8").lower()
         assert "eight tools" not in text, path
@@ -340,6 +342,11 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend --help",
         "music-friend version",
         "music-friend setup",
+        "music-friend setup --ticketmaster-key-env TICKETMASTER_KEY",
+        "music-friend setup --ticketmaster-key-file /path/to/key",
+        "music-friend setup --spotify-client-id <id> --event-country US --event-postal 94110 --event-radius 50 --event-unit miles",
+        "music-friend setup --spotify-client-id <id> --json",
+        "music-friend setup --clear-spotify-client-id",
         "music-friend connect spotify",
         "music-friend disconnect spotify",
         "music-friend doctor",
@@ -359,7 +366,11 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend data import-spotify my_spotify_data.zip --dry-run --json",
         "music-friend data import-spotify my_spotify_data.zip --json",
         "music-friend data restore music-friend-backup.json",
+        "music-friend data restore backup.json --yes",
+        "music-friend data restore backup.json --confirm RESTORE",
         "music-friend data delete",
+        "music-friend data delete --yes",
+        "music-friend data delete --confirm DELETE",
         "music-friend schedule status --json",
         "music-friend schedule install",
         "music-friend schedule remove",

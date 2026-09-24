@@ -910,7 +910,8 @@ def test_cli_setup_rejects_invalid_event_input_without_persisting_partial_state(
 
     assert result == 1
     assert stdout.getvalue() == ""
-    assert stderr.getvalue() == "Music Friend could not complete the command.\n"
+    assert "Music Friend could not complete the command:" in stderr.getvalue()
+    assert "event_country_code must be a two-letter uppercase code" in stderr.getvalue()
     assert config.config == initial
     assert credentials.saves == credentials.deletes == []
     assert "ticketmaster-secret-canary" not in stdout.getvalue() + stderr.getvalue()
