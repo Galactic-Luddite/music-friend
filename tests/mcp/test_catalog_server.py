@@ -320,6 +320,59 @@ def test_listening_history_summary_rejects_reversed_zero_length_and_impossible_r
     application.close()
 
 
+def test_invalid_argument_messages_name_the_field_and_constraint_without_echoing_the_value(
+    tmp_path: Path,
+) -> None:
+    """Every `invalid_arguments` rejection must name the offending argument/constraint and
+    never echo the caller-supplied value back (a canary secret-shaped value must never
+    appear in the message)."""
+    application = _application(tmp_path)
+    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+    canary = "supersecretcanary-value-should-never-appear"
+
+    cases = [
+        ("refresh_music", {"kind": canary}, "kind"),
+        ("search_catalog", {"query": "", "limit": 5}, "query"),
+        ("list_watchlist", {"limit": 0}, "limit"),
+        ("update_watchlist", {"artist_id": canary, "action": "invalid-action"}, "action"),
+        ("update_inbox_item", {"inbox_id": "x", "state": canary}, "state"),
+        ("explain_inbox_item", {"inbox_id": ""}, "inbox_id"),
+    ]
+    for name, arguments, field in cases:
+        result = _call(server, name, arguments)
+        assert result["category"] == "invalid_arguments", name
+        message = str(result["message"])
+        assert message != "Invalid tool arguments.", name
+        assert field in message, name
+        assert canary not in message, name
+    application.close()
+
+
+def test_listening_history_summary_reports_internal_error_for_a_non_caller_valueerror(
+    tmp_path: Path,
+) -> None:
+    """A `ValueError` that is not `HistoryArgumentError` (e.g. decoding a corrupt stored
+    row) must not be misreported as the caller's mistake, and must not leak exception
+    text to the client."""
+    application = _application(tmp_path)
+    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+
+    def _raise_internal(**_kwargs: object) -> object:
+        raise ValueError("supersecretcanary: corrupt row at offset 42")
+
+    application.summarize_history = _raise_internal  # type: ignore[method-assign]
+
+    result = _call(
+        server,
+        "summarize_listening_history",
+        {"since": None, "until": None, "limit": 5},
+    )
+
+    assert result["category"] == "internal_error"
+    assert "supersecretcanary" not in json.dumps(result)
+    application.close()
+
+
 def test_catalog_server_publishes_exact_tool_effect_annotations(tmp_path: Path) -> None:
     """Catches tool metadata under-reporting provider access or destructive local mutations."""
     application = _application(tmp_path)
@@ -504,7 +557,8 @@ def test_catalog_server_redacts_invalid_or_failed_model_calls(tmp_path: Path) ->
     invalid = _call(server, "search_catalog", {"query": " secret-canary ", "limit": 0})
     failed = _call(server, "refresh_music", {"kind": "catalog"})
 
-    assert invalid == {"category": "invalid_arguments", "message": "Invalid tool arguments."}
+    assert invalid["category"] == "invalid_arguments"
+    assert invalid["message"] != "Invalid tool arguments."
     assert failed == {
         "category": "internal_error",
         "message": "Music Friend could not complete the request.",
@@ -650,7 +704,6 @@ def test_catalog_server_rejects_invalid_argument_shapes_before_application_work(
     server = create_music_server(
         application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
     )
-    invalid = {"category": "invalid_arguments", "message": "Invalid tool arguments."}
 
     cases = (
         ("refresh_music", {"kind": "unknown"}),
@@ -664,5 +717,6 @@ def test_catalog_server_rejects_invalid_argument_shapes_before_application_work(
         ("explain_inbox_item", {"inbox_id": "inbox-1", "unexpected": True}),
     )
     for tool, arguments in cases:
-        assert _call(server, tool, arguments) == invalid
+        result = _call(server, tool, arguments)
+        assert result["category"] == "invalid_arguments", tool
     application.close()

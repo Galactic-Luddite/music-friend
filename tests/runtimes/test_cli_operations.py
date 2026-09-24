@@ -147,6 +147,108 @@ def test_data_command_rejects_unknown_shapes_without_touching_local_data() -> No
     assert application.calls == []
 
 
+class _FailingDataApplication:
+    """Raises the given exception from whichever data-lifecycle method is exercised."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.calls: list[tuple[str, object]] = []
+
+    def export_data(self, path: Path) -> object:
+        raise self._error
+
+    def import_data(self, path: Path) -> object:
+        raise self._error
+
+    def import_spotify_history(self, path: Path, *, dry_run: bool = False) -> object:
+        raise self._error
+
+    def delete_data(self) -> None:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ["data", "export", "archive.json"],
+        ["data", "backup", "archive.json"],
+        ["data", "import", "archive.json"],
+        ["data", "import-spotify", "spotify.zip"],
+    ),
+)
+def test_data_command_reports_a_distinct_message_for_a_missing_file(argv: list[str]) -> None:
+    application = _FailingDataApplication(FileNotFoundError("supersecretcanary/private/path"))
+
+    result, stdout, stderr = _run(argv, application)
+
+    assert result == 1
+    assert stdout == ""
+    assert "could not find the file" in stderr
+    assert "supersecretcanary" not in stderr
+
+
+@pytest.mark.parametrize("argv", (["data", "export", "archive.json"], ["data", "backup", "b.json"]))
+def test_data_command_reports_a_distinct_message_for_an_existing_destination(
+    argv: list[str],
+) -> None:
+    application = _FailingDataApplication(FileExistsError("supersecretcanary/private/path"))
+
+    result, stdout, stderr = _run(argv, application)
+
+    assert result == 1
+    assert stdout == ""
+    assert "will not overwrite" in stderr
+    assert "supersecretcanary" not in stderr
+
+
+@pytest.mark.parametrize(
+    "argv", (["data", "import", "archive.json"], ["data", "import-spotify", "s.zip"])
+)
+def test_data_command_reports_a_distinct_message_for_an_invalid_archive(argv: list[str]) -> None:
+    application = _FailingDataApplication(ValueError("supersecretcanary: line 4 column 2"))
+
+    result, stdout, stderr = _run(argv, application)
+
+    assert result == 1
+    assert stdout == ""
+    assert "not a valid export" in stderr
+    assert "supersecretcanary" not in stderr
+
+
+@pytest.mark.parametrize("operation", ("restore", "delete"))
+def test_data_command_reports_a_distinct_message_when_stdin_is_not_interactive(
+    operation: str,
+) -> None:
+    application = _DataApplication()
+    argv = ["data", operation]
+    if operation == "restore":
+        argv.append("backup.json")
+
+    def _no_tty(_message: str) -> str:
+        raise EOFError
+
+    result, stdout, stderr = _run(argv, application, prompt=_no_tty)
+
+    assert result == 2
+    assert stdout == ""
+    assert "no terminal is attached" in stderr
+    assert application.calls == []
+
+
+def test_restore_and_delete_still_reject_inexact_confirmation_with_original_message() -> None:
+    """Existing exit code 2 / message contract for a rejected (but readable) confirmation
+    must be unchanged."""
+    application = _DataApplication()
+
+    result, stdout, stderr = _run(
+        ["data", "delete"], application, prompt=lambda _message: "definitely not"
+    )
+
+    assert result == 2
+    assert stderr == "Confirmation was not accepted.\n"
+    assert application.calls == []
+
+
 @pytest.mark.parametrize("dry_run", (False, True))
 def test_spotify_history_import_reports_bounded_counts(dry_run: bool) -> None:
     application = _DataApplication()

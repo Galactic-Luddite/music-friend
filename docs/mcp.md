@@ -48,7 +48,12 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
 result when it cannot complete the request. Error messages are redacted and never include provider
-responses.
+responses. An `invalid_arguments` message names the offending argument and the constraint it
+violated (for example, `"limit must be an integer from 1 through 50"` or `"action must be one of:
+add, pin, mute, remove"`) but never echoes the caller-supplied value back, so a malformed or
+sensitive-looking value never appears in the response. `internal_error` is reserved for failures
+that are not the caller's mistake (an unexpected local failure decoding stored data, for example);
+its message is always the same generic sentence and never includes exception text.
 
 Every `local_id`-shaped argument (`artist_id`, `inbox_id`) is a value returned by another tool, not
 something to invent: `artist_id` comes from `search_catalog` or a `list_watchlist` entry's
@@ -172,8 +177,10 @@ reversed range (`since` after `until`), a zero-length range (`since` equal to `u
 impossible calendar date (e.g. `2026-02-30T00:00:00Z`) are each rejected as `invalid_arguments`
 with a message naming the specific problem; a zero-length range is treated as a caller error rather
 than an empty summary, for the same reason a reversed range is: it almost certainly was not the
-caller's intent, and a loud error is more useful than a silent empty result. No caller-supplied
-value can produce `internal_error`. The result identifies its evidence boundary, covered dates,
+caller's intent, and a loud error is more useful than a silent empty result. Every caller-facing
+range/timestamp/limit problem is reported as `invalid_arguments`; an internal failure unrelated to
+the caller's arguments (for example, a corrupt stored row) is reported as `internal_error` instead
+of being misreported as the caller's mistake. The result identifies its evidence boundary, covered dates,
 play time, brief/skipped counts, and top artists and tracks. Imported plays remain separate from
 preferences and watchlist affinity.
 

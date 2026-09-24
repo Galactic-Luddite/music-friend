@@ -25,6 +25,16 @@ _MAX_RECORDS = 2_000_000
 _BRIEF_MILLISECONDS = 30_000
 
 
+class HistoryArgumentError(ValueError):
+    """Raised for caller-supplied ``since``/``until``/``limit`` problems.
+
+    A subclass of ``ValueError`` so existing ``except ValueError`` callers keep
+    working, but distinguishable from an internal ``ValueError`` (e.g. a
+    corrupt stored row) so a caller-facing MCP handler can report only this
+    type as ``invalid_arguments`` and everything else as ``internal_error``.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class SpotifyHistoryImportResult:
     imported: int
@@ -255,15 +265,19 @@ def _range_timestamp(value: object, field: str) -> datetime:
     impossible calendar date (e.g. 2026-02-30) is rejected as an invalid date-time,
     both surfaced by ``datetime.fromisoformat`` itself.
     """
-    text = _text(value, field)
-    assert text is not None
+    try:
+        text = _text(value, field)
+    except ValueError as error:
+        raise HistoryArgumentError(f"{field} must be a valid RFC 3339 date-time") from error
+    if text is None:  # pragma: no cover - `_text` is never called nullable here
+        raise HistoryArgumentError(f"{field} is required")
     candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
         parsed = datetime.fromisoformat(candidate)
     except ValueError as error:
-        raise ValueError(f"{field} must be a valid RFC 3339 date-time") from error
+        raise HistoryArgumentError(f"{field} must be a valid RFC 3339 date-time") from error
     if parsed.tzinfo is None:
-        raise ValueError(f"{field} must include a UTC offset or 'Z' suffix")
+        raise HistoryArgumentError(f"{field} must include a UTC offset or 'Z' suffix")
     return parsed.astimezone(timezone.utc)
 
 
@@ -278,14 +292,16 @@ def summarize_history(
     and a loud error is more useful than a silent empty result.
     """
     if type(limit) is not int or not 1 <= limit <= 50:
-        raise ValueError("limit must be from 1 through 50")
+        raise HistoryArgumentError("limit must be from 1 through 50")
     normalized_since = None if since is None else _range_timestamp(since, "since")
     normalized_until = None if until is None else _range_timestamp(until, "until")
     if normalized_since is not None and normalized_until is not None:
         if normalized_since > normalized_until:
-            raise ValueError("since must not be after until")
+            raise HistoryArgumentError("since must not be after until")
         if normalized_since == normalized_until:
-            raise ValueError("since and until must not be equal; the range would be empty")
+            raise HistoryArgumentError(
+                "since and until must not be equal; the range would be empty"
+            )
     since_text = (
         None if normalized_since is None else normalized_since.isoformat().replace("+00:00", "Z")
     )
@@ -342,6 +358,7 @@ def summarize_history(
 
 
 __all__ = [
+    "HistoryArgumentError",
     "HistoryRanking",
     "HistorySummary",
     "SpotifyHistoryImportResult",

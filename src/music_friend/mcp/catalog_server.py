@@ -24,6 +24,7 @@ from music_friend.domain import (
     WatchlistEntry,
 )
 from music_friend.domain.text import sanitize_display_name
+from music_friend.store.spotify_history import HistoryArgumentError
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import update_inbox_state
 
@@ -245,8 +246,10 @@ async def _enforce_tool_contract(
     context: ServerRequestContext[Any, Any], call_next: CallNext
 ) -> HandlerResult:
     """Publish and enforce the exact bounded tool schemas."""
-    if context.method == "tools/call" and not _has_valid_tool_arguments(context.params):
-        return _tool_result(dict(_INVALID_ARGUMENTS))
+    if context.method == "tools/call":
+        error = _invalid_tool_arguments(context.params)
+        if error is not None:
+            return _tool_result({"category": "invalid_arguments", "message": str(error)})
     result = await call_next(context)
     if context.method != "tools/list" or not isinstance(result, dict):
         return result
@@ -256,44 +259,49 @@ async def _enforce_tool_contract(
     return {**result, "tools": [_with_fixed_input_schema(tool) for tool in listed]}
 
 
-def _has_valid_tool_arguments(params: Mapping[str, Any] | None) -> bool:
+def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArguments | None:
+    """Return the specific violation for an invalid `tools/call`, or `None` if it is valid."""
     if not isinstance(params, Mapping):
-        return True
+        return None
     name = params.get("name")
     if not isinstance(name, str) or name not in _TOOL_SCHEMAS:
-        return True
+        return None
     arguments = params.get("arguments", {})
     if not isinstance(arguments, Mapping):
-        return False
+        return _InvalidArguments("arguments must be an object")
     schema = _TOOL_SCHEMAS[name]
     properties = schema["properties"]
     required = schema.get("required", [])
     if not isinstance(properties, Mapping) or not isinstance(required, list):
-        return False
-    if set(arguments) - set(properties) or not set(required).issubset(arguments):
-        return False
+        return _InvalidArguments()
+    extra = set(arguments) - set(properties)
+    if extra:
+        return _InvalidArguments(f"unexpected argument: {sorted(extra)[0]}")
+    missing = set(required) - set(arguments)
+    if missing:
+        return _InvalidArguments(f"{sorted(missing)[0]} is required")
     try:
         if name == "refresh_music":
             _refresh_kind(arguments["kind"])
         elif name == "search_catalog":
             _search_arguments(arguments["query"], arguments["limit"])
         elif name in {"list_watchlist", "list_inbox"}:
-            _limit(arguments["limit"], maximum=100)
+            _limit(arguments["limit"], maximum=100, field="limit")
             if name == "list_inbox":
                 _inbox_state(arguments.get("state"))
         elif name == "update_watchlist":
-            _local_id(arguments["artist_id"])
+            _local_id(arguments["artist_id"], field="artist_id")
             _watchlist_action(arguments["action"])
         elif name == "update_inbox_item":
-            _local_id(arguments["inbox_id"])
+            _local_id(arguments["inbox_id"], field="inbox_id")
             _inbox_state(arguments["state"], required=True)
         elif name == "explain_inbox_item":
-            _local_id(arguments["inbox_id"])
+            _local_id(arguments["inbox_id"], field="inbox_id")
         elif name == "summarize_listening_history":
             _history_arguments(arguments["since"], arguments["until"], arguments["limit"])
-    except _InvalidArguments:
-        return False
-    return True
+    except _InvalidArguments as error:
+        return error
+    return None
 
 
 def _with_fixed_input_schema(tool: object) -> object:
@@ -414,7 +422,9 @@ def create_music_server(
             lambda: {
                 "items": [
                     _watchlist(item)
-                    for item in application.list_watchlist(limit=_limit(limit, maximum=100))
+                    for item in application.list_watchlist(
+                        limit=_limit(limit, maximum=100, field="limit")
+                    )
                 ]
             }
         )
@@ -438,7 +448,7 @@ def create_music_server(
         artist_id: str, action: Literal["add", "pin", "mute", "remove"]
     ) -> CallToolResult:
         def action_result() -> dict[str, object]:
-            local_id = _local_id(artist_id)
+            local_id = _local_id(artist_id, field="artist_id")
             selected = _watchlist_action(action)
             if application.get_artist(local_id) is None:
                 return dict(_NOT_FOUND)
@@ -480,7 +490,7 @@ def create_music_server(
                 "items": [
                     _inbox(application, item)
                     for item in application.list_inbox_entries(
-                        parsed_state, limit=_limit(limit, maximum=100)
+                        parsed_state, limit=_limit(limit, maximum=100, field="limit")
                     )
                 ]
             }
@@ -505,7 +515,7 @@ def create_music_server(
         inbox_id: str, state: Literal["unread", "saved", "dismissed"]
     ) -> CallToolResult:
         def action() -> dict[str, object]:
-            local_id = _local_id(inbox_id)
+            local_id = _local_id(inbox_id, field="inbox_id")
             selected = _inbox_state(state, required=True)
             assert selected is not None
             try:
@@ -532,7 +542,9 @@ def create_music_server(
         annotations=_READ_ONLY,
     )
     async def explain_inbox_item(inbox_id: str) -> CallToolResult:
-        return _safe_call(lambda: _explain_inbox(application, _local_id(inbox_id)))
+        return _safe_call(
+            lambda: _explain_inbox(application, _local_id(inbox_id, field="inbox_id"))
+        )
 
     @server.tool(
         name="summarize_listening_history",
@@ -560,7 +572,7 @@ def create_music_server(
                 summary = application.summarize_history(
                     since=parsed_since, until=parsed_until, limit=parsed_limit
                 )
-            except ValueError as error:
+            except HistoryArgumentError as error:
                 raise _InvalidArguments(str(error)) from error
             return {
                 "evidence_boundary": "imported Spotify music history",
@@ -610,47 +622,53 @@ def _refresh_kind(value: object) -> Literal["catalog", "releases", "events", "al
         return "events"
     if value == "all":
         return "all"
-    raise _InvalidArguments()
+    raise _InvalidArguments("kind must be one of: catalog, releases, events, all")
 
 
 def _search_arguments(query: object, limit: object) -> tuple[str, int]:
     if type(query) is not str or not query.strip() or query != query.strip() or len(query) > 256:
-        raise _InvalidArguments()
-    return query, _limit(limit, maximum=50)
+        raise _InvalidArguments(
+            "query must be a non-empty string of at most 256 characters with no "
+            "leading or trailing whitespace"
+        )
+    return query, _limit(limit, maximum=50, field="limit")
 
 
-def _limit(value: object, *, maximum: int) -> int:
+def _limit(value: object, *, maximum: int, field: str = "limit") -> int:
     if type(value) is not int or not 1 <= value <= maximum:
-        raise _InvalidArguments()
+        raise _InvalidArguments(f"{field} must be an integer from 1 through {maximum}")
     return value
 
 
-def _local_id(value: object) -> str:
+def _local_id(value: object, *, field: str = "id") -> str:
     if type(value) is not str or not value.strip() or value != value.strip() or len(value) > 4096:
-        raise _InvalidArguments()
+        raise _InvalidArguments(
+            f"{field} must be a non-empty string of at most 4096 characters with no "
+            "leading or trailing whitespace"
+        )
     return value
 
 
 def _watchlist_action(value: object) -> WatchlistAction | Literal["remove"]:
     if type(value) is not str:
-        raise _InvalidArguments()
+        raise _InvalidArguments("action must be a string")
     if value == "remove":
         return "remove"
     try:
         return WatchlistAction(value)
     except ValueError as error:
-        raise _InvalidArguments() from error
+        raise _InvalidArguments("action must be one of: add, pin, mute, remove") from error
 
 
 def _inbox_state(value: object, *, required: bool = False) -> InboxState | None:
     if value is None and not required:
         return None
     if type(value) is not str:
-        raise _InvalidArguments()
+        raise _InvalidArguments("state must be a string")
     try:
         return InboxState(value)
     except ValueError as error:
-        raise _InvalidArguments() from error
+        raise _InvalidArguments("state must be one of: unread, saved, dismissed") from error
 
 
 def _history_arguments(
@@ -668,7 +686,7 @@ def _history_arguments(
     for value in (since, until):
         if value is not None and (type(value) is not str or not value.strip() or len(value) > 64):
             raise _InvalidArguments("since and until must be RFC 3339 date-time strings")
-    return since, until, _limit(limit, maximum=50)  # type: ignore[return-value]
+    return since, until, _limit(limit, maximum=50, field="limit")  # type: ignore[return-value]
 
 
 def _history_ranking(value: object) -> dict[str, object]:

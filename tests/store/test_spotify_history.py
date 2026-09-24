@@ -260,6 +260,16 @@ def test_summary_rejects_invalid_bounds(
             summarize_history(catalog, **arguments)  # type: ignore[arg-type]
 
 
+def test_summary_rejects_a_non_string_bound_as_a_caller_argument_error(tmp_path: Path) -> None:
+    """A non-string ``since``/``until`` bound must raise ``HistoryArgumentError`` (a
+    caller mistake), not the plain internal ``ValueError`` that `_text` raises."""
+    from music_friend.store.spotify_history import HistoryArgumentError
+
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        with pytest.raises(HistoryArgumentError, match="since must be a valid RFC 3339"):
+            summarize_history(catalog, since=12345)  # type: ignore[arg-type]
+
+
 def test_summary_accepts_rfc_3339_offsets_and_normalizes_to_utc(tmp_path: Path) -> None:
     source = _archive(tmp_path / "spotify.zip", [_track(ts="2026-03-01T09:00:00Z")])
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:

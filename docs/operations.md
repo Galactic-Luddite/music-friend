@@ -114,6 +114,33 @@ to remove the Spotify credential, then rerun setup with `-` at the Ticketmaster 
 the Ticketmaster credential. In other words, disconnect Spotify separately before discarding the
 local installation.
 
+### Data command failure messages
+
+`data export|backup|import|import-spotify|restore` distinguish these failure categories with a
+specific, actionable message on stderr (exit `1`) instead of one generic sentence:
+
+- the given file does not exist ("Music Friend could not find the file at ...");
+- an export/backup destination already exists ("Music Friend will not overwrite the existing file
+  at ...");
+- an import or Spotify archive is not a valid export ("Music Friend could not read the archive: it
+  is not a valid export.").
+
+`data restore` and `data delete` still exit `2` when the exact confirmation word is not given
+("Confirmation was not accepted."). When stdin is not an interactive terminal (so the confirmation
+prompt cannot be read at all), they report a distinct message instead of the generic failure
+("Confirmation was not accepted: no terminal is attached to read it.") and still exit `2`; nothing
+is written or deleted.
+
+No data-command message includes the raw exception text, a resolved absolute path beyond what was
+passed on the command line, or any secret or environment value.
+
+### Provider-not-configured
+
+`connect spotify`, `disconnect spotify`, and `refresh catalog|releases|all` report a dedicated
+message naming the missing provider and pointing at `music-friend doctor` for setup guidance
+("Spotify is not configured. Run `music-friend doctor` for setup guidance.") instead of the generic
+failure sentence, and exit `1` -- the existing meaning of exit `1` for these commands is unchanged.
+
 ## Daily schedule
 
 Package installation and `music-friend setup` never create a schedule. Explicitly installing one
