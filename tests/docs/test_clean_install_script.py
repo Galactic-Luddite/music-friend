@@ -235,6 +235,8 @@ def test_clean_install_subprocesses_run_in_the_temporary_workspace(
                     "update_inbox_item",
                     "explain_inbox_item",
                     "summarize_listening_history",
+                    "get_setup",
+                    "update_setup",
                 ]
                 self.stdout.messages.put(
                     json.dumps(
