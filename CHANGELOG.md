@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- `summarize_listening_history` no longer misreports an internal failure (for example, decoding a
+  corrupt stored row) as the caller's mistake: the history store now raises a dedicated
+  `HistoryArgumentError` (a `ValueError` subclass) for caller-supplied `since`/`until`/`limit`
+  problems, and the MCP handler translates only that type to `invalid_arguments`; every other
+  exception is reported as `internal_error` with no exception text echoed to the client.
+- MCP `invalid_arguments` messages now name the offending argument and the violated constraint
+  (for example, `"limit must be an integer from 1 through 50"`) instead of the generic "Invalid
+  tool arguments." sentence, and never echo the caller-supplied value.
+- CLI `data export|backup|import|import-spotify|restore` now distinguish file-not-found,
+  destination-already-exists, and invalid-archive failures with specific, actionable messages
+  instead of one generic sentence. `data restore`/`data delete` report a distinct message when
+  stdin is not an interactive terminal (so the confirmation prompt cannot be read at all), rather
+  than the generic failure. `connect spotify`, `disconnect spotify`, and `refresh` now name
+  "Spotify is not configured" and point at `music-friend doctor` instead of a generic failure.
+  Existing CLI exit codes and message contracts are unchanged for cases documented before this
+  release.
+
 ## 0.2.0
 
 Minor release: additive MCP result fields and a new `skipped` refresh outcome change what clients

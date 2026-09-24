@@ -26,12 +26,14 @@ from music_friend.mcp import catalog_server
     ),
 )
 def test_tool_contract_rejects_invalid_argument_shapes(params: object) -> None:
-    assert catalog_server._has_valid_tool_arguments(params) is False  # type: ignore[arg-type]
+    error = catalog_server._invalid_tool_arguments(params)  # type: ignore[arg-type]
+    assert error is not None
+    assert str(error) != "Invalid tool arguments."
 
 
 def test_tool_contract_ignores_unknown_protocol_messages_and_names() -> None:
-    assert catalog_server._has_valid_tool_arguments(None) is True
-    assert catalog_server._has_valid_tool_arguments({"name": "unknown"}) is True
+    assert catalog_server._invalid_tool_arguments(None) is None
+    assert catalog_server._invalid_tool_arguments({"name": "unknown"}) is None
     assert catalog_server._with_fixed_input_schema(1) == 1
     assert catalog_server._with_fixed_input_schema({"name": "unknown", "extra": 1}) == {
         "name": "unknown",
@@ -49,6 +51,27 @@ def test_inbox_state_rejects_required_or_invalid_values(value: object) -> None:
 def test_local_id_rejects_unbounded_or_noncanonical_values(value: object) -> None:
     with pytest.raises(catalog_server._InvalidArguments):
         catalog_server._local_id(value)
+
+
+def test_watchlist_action_and_inbox_state_reject_non_string_values() -> None:
+    with pytest.raises(catalog_server._InvalidArguments, match="action must be a string"):
+        catalog_server._watchlist_action(1)
+    with pytest.raises(catalog_server._InvalidArguments, match="state must be a string"):
+        catalog_server._inbox_state(1)
+
+
+def test_invalid_tool_arguments_reports_unexpected_and_missing_fields() -> None:
+    extra = catalog_server._invalid_tool_arguments(
+        {"name": "explain_inbox_item", "arguments": {"inbox_id": "x", "unexpected": 1}}
+    )
+    assert extra is not None
+    assert "unexpected" in str(extra)
+
+    missing = catalog_server._invalid_tool_arguments(
+        {"name": "explain_inbox_item", "arguments": {}}
+    )
+    assert missing is not None
+    assert "inbox_id" in str(missing)
 
 
 def test_clock_and_refresh_result_reject_invalid_callback_results() -> None:

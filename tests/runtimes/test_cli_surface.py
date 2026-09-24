@@ -551,6 +551,68 @@ def test_cli_connect_and_disconnect_delegate_through_the_published_grammar(
     application.close()
 
 
+def test_cli_connect_names_the_unconfigured_provider_with_a_doctor_hint(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    result = cli.run_cli(
+        ["connect", "spotify"],
+        stdout=stdout,
+        stderr=stderr,
+        application=application,
+        config_store=_ConfigStore(LocalConfig()),  # type: ignore[arg-type]
+        credential_store_factory=lambda: _EmptyCredentialStore(),
+    )
+
+    assert result == 1
+    assert stdout.getvalue() == ""
+    assert "Spotify is not configured" in stderr.getvalue()
+    assert "music-friend doctor" in stderr.getvalue()
+    application.close()
+
+
+def test_cli_disconnect_names_the_unconfigured_provider_with_a_doctor_hint(
+    tmp_path: Path,
+) -> None:
+    application = _application(tmp_path)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    result = cli.run_cli(
+        ["disconnect", "spotify"],
+        stdout=stdout,
+        stderr=stderr,
+        application=application,
+        config_store=_ConfigStore(LocalConfig()),  # type: ignore[arg-type]
+        credential_store_factory=lambda: _EmptyCredentialStore(),
+    )
+
+    assert result == 1
+    assert stdout.getvalue() == ""
+    assert "Spotify is not configured" in stderr.getvalue()
+    assert "music-friend doctor" in stderr.getvalue()
+    application.close()
+
+
+def test_cli_refresh_names_the_unconfigured_provider_with_a_doctor_hint(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    result = cli.run_cli(
+        ["refresh", "catalog"],
+        stdout=stdout,
+        stderr=stderr,
+        application=application,
+        config_store=_ConfigStore(LocalConfig()),  # type: ignore[arg-type]
+        credential_store_factory=lambda: _EmptyCredentialStore(),
+    )
+
+    assert result == 1
+    assert stdout.getvalue() == ""
+    assert "Spotify is not configured" in stderr.getvalue()
+    assert "music-friend doctor" in stderr.getvalue()
+    application.close()
+
+
 def test_cli_setup_is_interactive_and_unknown_or_sensitive_arguments_are_not_reflected(
     tmp_path: Path,
 ) -> None:
