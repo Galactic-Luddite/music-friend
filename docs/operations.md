@@ -107,6 +107,12 @@ at a fixed pace every run. When a fallback delay is estimated (no exact `Retry-A
 provider), it is jittered within its ladder step so multiple installs recovering at the same time
 do not retry in lockstep.
 
+Release discovery also skips an artist entirely -- no source request -- when its releases were
+successfully checked within the last 24 hours, so a second full refresh soon after the first makes
+requests only for artists that are actually due for a check. The Spotify adapter has no batch
+lookup endpoint today (it calls `/v1/artists/{id}/albums` per artist), so batching several artists
+into one call and conditional (`If-None-Match`) requests remain future work.
+
 A `partial` refresh result includes three extra fields when the cause is known:
 
 - `reason`: `rate_limited`, `quota_exhausted`, or `deadline`.

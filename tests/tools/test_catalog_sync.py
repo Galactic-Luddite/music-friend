@@ -385,3 +385,22 @@ def test_capability_transaction_rolls_back_inserted_artists_and_preserves_prior_
         assert catalog.get_artist(committed.local_id) == committed
         assert catalog.list_affinity_evidence(committed.local_id, limit=10)
         assert RAW_ERROR_CANARY not in repr(result)
+
+
+def test_synchronize_catalog_rejects_invalid_inputs(tmp_path: Path) -> None:
+    """Catches a malformed catalog, source name, or source reaching provider dispatch."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        with pytest.raises(ValueError, match="catalog"):
+            sync_module.synchronize_catalog(
+                object(),
+                "spotify",
+                FakeCatalogSource(),  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="source_name"):
+            sync_module.synchronize_catalog(catalog, "has spaces", FakeCatalogSource())
+        with pytest.raises(ValueError, match="source"):
+            sync_module.synchronize_catalog(
+                catalog,
+                "spotify",
+                object(),  # type: ignore[arg-type]
+            )

@@ -29,6 +29,9 @@ _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_RELEASES_PER_ARTIST = 100
 _FIRST_LOOKBACK = timedelta(days=30)
 _OVERLAP = timedelta(hours=48)
+#: An artist whose releases were successfully checked within this window makes zero source
+#: requests on a later full run, cutting requests per artist on a repeated refresh (AC5).
+FRESHNESS_TTL = timedelta(hours=24)
 
 
 class _SourceCallStopped(RuntimeError):
@@ -94,6 +97,15 @@ def _discover_artist(
         source_reference = _source_reference(artist, source_name)
         continuation = catalog.get_release_check_continuation(source_name, artist.local_id)
         cursor = catalog.get_release_check_cursor(source_name, artist.local_id)
+        if (
+            continuation is None
+            and cursor is not None
+            and checked_at - cursor.last_successful_at < FRESHNESS_TTL
+        ):
+            # Fresh within the TTL: skip the source entirely. No request, no state change.
+            return ArtistReleaseDiscoveryResult(
+                artist.local_id, ReleaseDiscoveryStatus.SUCCESS, 0, (), None
+            )
         if continuation is not None:
             since = continuation.since
             source_cursor = continuation.cursor

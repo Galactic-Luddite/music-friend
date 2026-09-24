@@ -42,6 +42,7 @@ from music_friend.tools.refresh import (
     RefreshInvocation,
     _acquire_lock,
     _jittered_delay,
+    _LockLease,
     _PacedSource,
     _read_lock,
     _release_lock,
@@ -337,7 +338,13 @@ def test_materially_changed_release_creates_a_new_unread_item_without_reopening_
             (_release("release-1", artist, title="Changed"),), None
         )
 
-        _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
+        _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW + timedelta(hours=25),
+        )
 
         entries = application.list_inbox_entries(None, limit=10)
         assert {entry.state for entry in entries} == {InboxState.UNREAD, InboxState.DISMISSED}
@@ -1432,14 +1439,14 @@ def test_refresh_recovers_a_changed_release_signal_when_an_earlier_version_exist
             source,
             kind="releases",
             lock_path=tmp_path / "lock",
-            checked_at=NOW + timedelta(hours=1),
+            checked_at=NOW + timedelta(hours=25),
         )
         recovered = _refresh(
             application,
             source,
             kind="releases",
             lock_path=tmp_path / "lock",
-            checked_at=NOW + timedelta(hours=2),
+            checked_at=NOW + timedelta(hours=26),
         )
 
         assert failed_update.run is not None
@@ -1853,3 +1860,99 @@ def test_resume_after_a_partial_run_makes_no_requests_for_completed_artists(
         total_requests = before_requests + after_requests
         assert total_requests == 11  # 5 + 6, vs. 20 for a naive from-scratch second pass
         assert total_requests < 2 * len(artists)
+
+
+def test_freshness_ttl_skip_makes_zero_requests_for_a_second_full_run(tmp_path: Path) -> None:
+    """Measures the request-count drop the freshness TTL skip gives (AC5).
+
+    Two back-to-back full runs over a ten-artist fixture, before and after the TTL skip:
+
+    - Before (baseline, second run more than 24h later so the TTL never applies): every artist
+      is re-requested on both runs -- 10 + 10 = 20 requests total.
+    - After (second run inside the 24h TTL): the second run makes zero requests for any of the
+      ten artists, since every one of them was successfully checked less than a day earlier --
+      10 + 0 = 10 requests total, a 50% reduction on this fixture.
+    """
+    artist_count = 10
+
+    def run_two_full_passes(*, second_run_gap: timedelta) -> tuple[int, int]:
+        with Catalog.open(tmp_path / f"catalog-{second_run_gap}.sqlite3") as catalog:
+            application = MusicFriendApplication(catalog)
+            for number in range(artist_count):
+                _watch(application, _artist(f"artist-{number}", f"Artist {number}"))
+            source = FakeMusicSource()
+            for number in range(artist_count):
+                source.releases[(f"artist-{number}", None)] = Page((), None)
+            first_clock = FakeClock()
+
+            first = _refresh(
+                application,
+                source,
+                kind="releases",
+                lock_path=tmp_path / f"lock-{second_run_gap}-1",
+                checked_at=NOW,
+                monotonic=first_clock.monotonic,
+                sleeper=first_clock.sleep,
+            )
+            before_second = len(source.release_calls)
+            second_clock = FakeClock()
+            second = _refresh(
+                application,
+                source,
+                kind="releases",
+                lock_path=tmp_path / f"lock-{second_run_gap}-2",
+                checked_at=NOW + second_run_gap,
+                monotonic=second_clock.monotonic,
+                sleeper=second_clock.sleep,
+            )
+            assert first.run is not None
+            assert first.run.status.value == "succeeded"
+            assert second.run is not None
+            assert second.run.status.value == "succeeded"
+            return before_second, len(source.release_calls) - before_second
+
+    baseline_first, baseline_second = run_two_full_passes(second_run_gap=timedelta(hours=25))
+    ttl_first, ttl_second = run_two_full_passes(second_run_gap=timedelta(hours=1))
+
+    assert baseline_first == artist_count
+    assert baseline_second == artist_count
+    baseline_total = baseline_first + baseline_second
+    assert baseline_total == 20
+
+    assert ttl_first == artist_count
+    assert ttl_second == 0
+    ttl_total = ttl_first + ttl_second
+    assert ttl_total == 10
+
+    assert ttl_total < baseline_total
+
+
+def test_acquire_lock_returns_none_on_an_unexpected_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an unexpected descriptor-open failure being treated as a successful lease."""
+    import music_friend.tools.refresh as refresh_module
+
+    def broken_open(*args: object, **kwargs: object) -> int:
+        raise OSError("synthetic descriptor failure")
+
+    monkeypatch.setattr(refresh_module.os, "open", broken_open)
+    assert _acquire_lock(tmp_path / "lock", lock_clock=lambda: 1.0) is None
+
+
+def test_release_lock_swallows_an_os_error_from_a_vanished_lock_directory() -> None:
+    """Catches a release racing a deleted lock directory from crashing the refresh finally block."""
+    vanished = _LockLease(Path("/nonexistent-music-friend-dir/lock"), "token", 1.0, 0, 0)
+    _release_lock(vanished)  # must not raise
+
+
+def test_acquire_lock_gives_up_when_a_stale_lock_reappears_after_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a stale lock removal race being treated as a successful new acquisition."""
+    import music_friend.tools.refresh as refresh_module
+
+    path = tmp_path / "lock"
+    _acquire_lock(path, lock_clock=lambda: 0.0)
+    monkeypatch.setattr(refresh_module, "_release_lock", lambda lease: None)
+    assert _acquire_lock(path, lock_clock=lambda: 10_000.0) is None
