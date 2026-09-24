@@ -311,6 +311,70 @@ def test_summary_reports_range_rankings_and_brief_skip_breakdown(tmp_path: Path)
     assert [item.name for item in summary.top_tracks] == ["Track One", "Track Two"]
 
 
+def test_history_import_strips_bidi_and_control_characters_from_display_names(
+    tmp_path: Path,
+) -> None:
+    """Issue #24: a bidi override in imported names must not survive ingestion."""
+    source = _archive(
+        tmp_path / "spotify.zip",
+        [
+            _track(
+                master_metadata_track_name="Example‮",
+                master_metadata_album_artist_name="Artist‎‭Two",
+                master_metadata_album_album_name="Album⁦Three⁩",
+            )
+        ],
+    )
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        import_spotify_history(catalog, source)
+        row = (
+            catalog._require_connection()
+            .execute("SELECT track_name, artist_name, album_name FROM listening_history")
+            .fetchone()
+        )
+
+    assert row == ("Example", "ArtistTwo", "AlbumThree")
+    for value in row:
+        for forbidden in ("‮", "‎", "‭", "⁦", "⁩"):
+            assert forbidden not in value
+
+
+def test_history_import_preserves_legitimate_scripts_and_emoji_sequences(tmp_path: Path) -> None:
+    """Issue #24: non-Latin scripts and multi-codepoint emoji must pass through unchanged."""
+    arabic_track = "موسيقى"  # "music" in Arabic
+    hebrew_artist = "מוסיקה"  # "music" in Hebrew
+    cjk_album = "音楽"  # "music" in Japanese/Chinese kanji
+    emoji_zwj_track = "Set \U0001f469‍\U0001f3a4"  # woman singer ZWJ sequence
+    persian_artist = "چهره‌شنبه"  # contains ZWNJ
+    source = _archive(
+        tmp_path / "spotify.zip",
+        [
+            _track(
+                master_metadata_track_name=arabic_track,
+                master_metadata_album_artist_name=hebrew_artist,
+                master_metadata_album_album_name=cjk_album,
+            ),
+            _track(
+                ts="2026-01-03T03:04:05Z",
+                spotify_track_uri="spotify:track:two",
+                master_metadata_track_name=emoji_zwj_track,
+                master_metadata_album_artist_name=persian_artist,
+                master_metadata_album_album_name=None,
+            ),
+        ],
+    )
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        import_spotify_history(catalog, source)
+        rows = (
+            catalog._require_connection()
+            .execute("SELECT track_name, artist_name, album_name FROM listening_history")
+            .fetchall()
+        )
+
+    assert (arabic_track, hebrew_artist, cjk_album) in rows
+    assert (emoji_zwj_track, persian_artist, None) in rows
+
+
 def test_history_round_trips_through_portable_export_and_source_purge(tmp_path: Path) -> None:
     source = _archive(tmp_path / "spotify.zip", [_track()])
     portable = tmp_path / "portable.json"

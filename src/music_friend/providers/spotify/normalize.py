@@ -15,7 +15,7 @@ from music_friend.domain import (
     ReleaseDatePrecision,
     SourceReference,
 )
-from music_friend.domain.text import sanitize_source_text
+from music_friend.domain.text import sanitize_display_name
 from music_friend.errors import InvalidSourceResponseError
 
 _SPOTIFY_ID = re.compile(r"[A-Za-z0-9]{1,64}\Z")
@@ -48,7 +48,7 @@ def _spotify_id(value: object, field: str) -> str:
 def _text(value: object, field: str) -> str:
     if type(value) is not str:
         raise _ParseFailure(f"{field} must be text")
-    normalized = sanitize_source_text(value, limit=_TEXT_LIMIT)
+    normalized = sanitize_display_name(value, limit=_TEXT_LIMIT)
     if not normalized.strip():
         raise _ParseFailure(f"{field} must not be empty")
     return normalized

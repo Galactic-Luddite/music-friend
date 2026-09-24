@@ -15,7 +15,7 @@ from music_friend.domain import (
     IdentityConfidence,
     ReleaseDatePrecision,
 )
-from music_friend.domain.text import sanitize_source_text
+from music_friend.domain.text import sanitize_display_name
 from music_friend.errors import InvalidSourceResponseError
 from music_friend.providers.spotify.normalize import (
     normalize_artist,
@@ -199,12 +199,12 @@ def test_every_adversarial_string_is_sanitized_in_every_retained_text_field(
         raw = case["input"]
         assert normalize_artist(
             _artist(raw), observed_at=observed_at
-        ).display_name == sanitize_source_text(raw, limit=96)
-        assert normalize_track(_track(raw), observed_at=observed_at).title == sanitize_source_text(
+        ).display_name == sanitize_display_name(raw, limit=96)
+        assert normalize_track(_track(raw), observed_at=observed_at).title == sanitize_display_name(
             raw, limit=96
         )
         release_payload = deepcopy(_release())
         release_payload["name"] = raw
         assert normalize_release(
             release_payload, observed_at=observed_at
-        ).title == sanitize_source_text(raw, limit=96)
+        ).title == sanitize_display_name(raw, limit=96)

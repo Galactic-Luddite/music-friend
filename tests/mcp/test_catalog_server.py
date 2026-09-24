@@ -125,15 +125,105 @@ def test_catalog_server_exposes_only_the_stable_local_tool_inventory(tmp_path: P
     for forbidden in ("spotify", "native_id", "source_refs", "credential", "path"):
         assert forbidden not in rendered
     assert schemas["search_catalog"]["properties"]["limit"] == {
+        "description": "Maximum number of matching artists to return (1-50).",
         "minimum": 1,
         "maximum": 50,
         "type": "integer",
     }
     assert schemas["list_inbox"]["properties"]["limit"] == {
+        "description": "Maximum number of inbox entries to return (1-100).",
         "minimum": 1,
         "maximum": 100,
         "type": "integer",
     }
+    application.close()
+
+
+def test_every_tool_description_is_rich_and_every_identifier_argument_names_its_source(
+    tmp_path: Path,
+) -> None:
+    """Issue #23 contract: descriptions carry enough for an agent to sequence tools correctly.
+
+    Every tool description must be substantially longer than the old one-liners
+    and must say whether the tool contacts a provider. Every local-identifier
+    argument (an `artist_id` or `inbox_id`-shaped property using the shared
+    local-id schema) must carry a `description` that names the tool that
+    produces the value it expects.
+    """
+    application = _application(tmp_path)
+    server = create_music_server(
+        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+    )
+    tools = asyncio.run(server.list_tools())
+
+    non_trivial_minimum_length = 120
+    for tool in tools:
+        description = tool.description
+        assert description is not None
+        assert len(description) >= non_trivial_minimum_length, tool.name
+        lowered = description.lower()
+        if tool.name == "refresh_music":
+            assert "contacts a provider" in lowered or "only tool" in lowered, tool.name
+        else:
+            assert "does not contact a provider" in lowered, tool.name
+
+    async def listed_schemas() -> dict[str, dict[str, object]]:
+        async with Client(server) as client:
+            return {tool.name: tool.input_schema for tool in (await client.list_tools()).tools}
+
+    schemas = asyncio.run(listed_schemas())
+    identifier_arguments = {
+        ("update_watchlist", "artist_id"): "search_catalog",
+        ("update_inbox_item", "inbox_id"): "list_inbox",
+        ("explain_inbox_item", "inbox_id"): "list_inbox",
+    }
+    for (tool_name, argument_name), source_tool in identifier_arguments.items():
+        argument_schema = schemas[tool_name]["properties"][argument_name]
+        assert isinstance(argument_schema, dict)
+        argument_description = argument_schema.get("description")
+        assert isinstance(argument_description, str)
+        assert source_tool in argument_description, (tool_name, argument_name)
+    application.close()
+
+
+def test_mcp_read_boundary_sanitizes_display_names_written_before_the_ingestion_fix(
+    tmp_path: Path,
+) -> None:
+    """Issue #24, read-time half of the fix: legacy rows written before ingestion
+
+    sanitization existed (see `music_friend.domain.text.sanitize_display_name` and
+    its call sites) must still come back clean from every MCP tool that surfaces a
+    display name, without a schema migration.
+    """
+    application = _application(tmp_path)
+    legacy_artist = Artist(
+        "artist-legacy",
+        "Legacy‮ Artist",
+        (SourceReference("synthetic", "provider-artist-legacy", None, NOW),),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+    application.put_artist(legacy_artist)
+    legacy_release = Release(
+        "release-legacy",
+        "Legacy⁦ Release⁩",
+        "album",
+        NOW.date(),
+        ReleaseDatePrecision.DAY,
+        (legacy_artist.local_id,),
+        (SourceReference("synthetic", "provider-release-legacy", None, NOW),),
+        NOW,
+    )
+    application.put_release(legacy_release)
+    server = create_music_server(
+        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+    )
+
+    search_result = _call(server, "search_catalog", {"query": "Legacy", "limit": 5})
+    assert isinstance(search_result, dict)
+    matched = next(item for item in search_result["items"] if item["local_id"] == "artist-legacy")
+    assert matched["display_name"] == "Legacy Artist"
+    assert "‮" not in matched["display_name"]
     application.close()
 
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Every MCP tool description now states its purpose, when to use it, what to call before and
+  after it, and whether it contacts a provider; every `artist_id`/`inbox_id` argument now says
+  which tool produces the value. Input schemas (types, required fields, enums) are unchanged.
+- Fixes a bug where bidirectional-override and other Unicode control/format characters (for
+  example `U+202E RIGHT-TO-LEFT OVERRIDE`) in imported history, catalog/provider refresh, release,
+  and event names survived into stored data and MCP results unchanged. They are now removed at
+  ingestion by a shared sanitizer (`music_friend.domain.text.sanitize_display_name`) that keeps
+  ZERO WIDTH JOINER and ZERO WIDTH NON-JOINER so emoji sequences and scripts that need them are
+  unaffected; see [display-name sanitization](docs/limits.md#display-name-sanitization). Names
+  written before this fix are sanitized lazily wherever MCP returns them, so no migration is
+  required.
+
 ## 0.2.0
 
 Minor release: additive MCP result fields and a new `skipped` refresh outcome change what clients

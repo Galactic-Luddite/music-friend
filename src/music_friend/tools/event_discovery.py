@@ -20,7 +20,7 @@ from music_friend.domain import (
     EventDiscoveryStatus,
     SourceReference,
 )
-from music_friend.domain.text import sanitize_source_text
+from music_friend.domain.text import sanitize_display_name
 from music_friend.providers.ticketmaster import (
     TicketmasterAttraction,
     TicketmasterClient,
@@ -219,7 +219,7 @@ def _canonical_event(item: TicketmasterEvent, artist: Artist, checked_at: dateti
     canonical_url = source_url if source_url is not None else purchase_url
     return Event(
         _local_id(item.native_id),
-        sanitize_source_text(item.title),
+        sanitize_display_name(item.title),
         (artist.local_id,),
         _safe_optional_text(item.venue_name),
         _safe_optional_text(item.locality),
@@ -267,7 +267,7 @@ def _normalized_text(value: str) -> str:
 
 
 def _safe_optional_text(value: str | None) -> str | None:
-    return None if value is None else sanitize_source_text(value, limit=256)
+    return None if value is None else sanitize_display_name(value, limit=256)
 
 
 def _require_aware(value: object, name: str) -> None:
