@@ -38,3 +38,16 @@ python scripts/scan_public_tree.py .
 ```
 
 Keep changes focused and describe the user-visible result.
+
+## Versioning
+
+Music Friend follows `0.MINOR.PATCH` until 1.0, using PEP 440 version strings.
+
+- **Patch** (`0.2.1`): bug fixes that leave MCP result shapes, CLI output, and exit codes unchanged.
+- **Minor** (`0.3.0`): anything a client can observe, including new result fields, new status
+  values, changed matching or defaults, and schema migrations.
+- **Release candidates** (`0.3.0rc1`) for trial installs; pip ignores them unless `--pre` is used.
+  Do not use suffixes such as `0.2.1a`, which PEP 440 sorts before `0.2.1`.
+
+Add user-visible changes under `## Unreleased` in `CHANGELOG.md`; a release PR renames that heading
+to the new version and bumps `pyproject.toml`.
