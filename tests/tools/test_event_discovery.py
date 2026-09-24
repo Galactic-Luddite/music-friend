@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+import pytest
 
 from music_friend.configuration import LocalConfig
 from music_friend.domain import (
@@ -530,3 +531,37 @@ def test_event_discovery_preserves_legitimate_scripts_and_emoji_in_names(tmp_pat
         assert event.title == japanese_title
         assert event.venue_name == emoji_venue
         assert event.locality == arabic_locality
+
+
+def test_discover_ticketmaster_events_rejects_invalid_inputs(tmp_path: Path) -> None:
+    """Catches a malformed catalog, config, or client reaching provider dispatch."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        client = FakeTicketmasterClient()
+        with pytest.raises(ValueError, match="catalog"):
+            discover_ticketmaster_events(
+                object(),
+                config=_config(),
+                client=client,
+                checked_at=NOW,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="config"):
+            discover_ticketmaster_events(
+                catalog,
+                config=object(),
+                client=client,
+                checked_at=NOW,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="client"):
+            discover_ticketmaster_events(
+                catalog,
+                config=_config(),
+                client=object(),
+                checked_at=NOW,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="timezone-aware"):
+            discover_ticketmaster_events(
+                catalog,
+                config=_config(),
+                client=client,
+                checked_at=NOW.replace(tzinfo=None),
+            )

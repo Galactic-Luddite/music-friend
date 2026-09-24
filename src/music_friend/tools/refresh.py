@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -16,6 +17,8 @@ from uuid import uuid4
 
 from music_friend.configuration import LocalConfig
 from music_friend.domain import (
+    MAX_SOURCE_WINDOW_CALLS,
+    MIN_SOURCE_WINDOW_CALLS,
     Artist,
     CatalogItemBatch,
     CatalogSyncResult,
@@ -63,8 +66,11 @@ from music_friend.tools.release_discovery import (
 _DEADLINE_SECONDS = 600
 _LOCK_STALE_AFTER = timedelta(seconds=_DEADLINE_SECONDS)
 _SOURCE_WINDOW_SECONDS = 30.0
-_SOURCE_WINDOW_CALLS = 8
 _MAX_LIMIT_PAUSES = 2
+#: AIMD recovery: this many consecutive successful requests earns back one call
+#: per window, up to MAX_SOURCE_WINDOW_CALLS.
+_RECOVERY_STREAK = 5
+_FALLBACK_LADDER = (60, 120, 240, 480, 900)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +80,12 @@ class RefreshInvocation:
     run: RefreshRun | None
     already_running: bool
     skip_reason: str | None = None
+    #: Set together on a partial outcome: why the run stopped short, an ISO-8601
+    #: timestamp of when the source is expected to be ready again, and how many
+    #: units of work (artists, pages) remained undone.
+    reason: str | None = None
+    retry_after: str | None = None
+    remaining: int | None = None
 
 
 @dataclass(slots=True)
@@ -123,6 +135,7 @@ class _PacedSource:
         monotonic: Callable[[], float],
         sleeper: Callable[[float], None],
         saved_limit: SourceLimitObservation | None,
+        rng: random.Random,
     ) -> None:
         self.source = source
         self.source_name = source_name
@@ -130,6 +143,7 @@ class _PacedSource:
         self.checked_at = checked_at
         self.monotonic = monotonic
         self.sleeper = sleeper
+        self.rng = rng
         self.requests = 0
         self.pauses = 0
         self._request_times: deque[float] = deque()
@@ -139,7 +153,12 @@ class _PacedSource:
             if saved_limit is not None and not saved_limit.retry_is_exact
             else 0
         )
+        self.window_calls = (
+            MAX_SOURCE_WINDOW_CALLS if saved_limit is None else saved_limit.window_calls
+        )
+        self._success_streak = 0
         self.limit_observation = saved_limit
+        self._fresh_limit = False
         self.stopped = bool(
             saved_limit is not None
             and saved_limit.state is SourceLimitState.COOLING_DOWN
@@ -184,7 +203,20 @@ class _PacedSource:
             None,
             False,
             0,
+            self.window_calls,
         )
+
+    def current_observation(self) -> SourceLimitObservation:
+        """The observation to persist for the next run: reflects the learned pacing rate.
+
+        Only a limit observed during *this* invocation, or an unexpired cooldown carried
+        in from a previous run (the constructor kept ``stopped`` true for it), is worth
+        keeping; a stale, already-expired saved cooldown is replaced with the current
+        learned rate instead of being persisted forever.
+        """
+        if self.limit_observation is not None and (self._fresh_limit or self.stopped):
+            return self.limit_observation
+        return self.available_observation()
 
     def _request(self, operation: Callable[[], _T]) -> _T:
         if self.stopped:
@@ -197,6 +229,7 @@ class _PacedSource:
             except QuotaExhaustedError:
                 observed_at = self._wall_now()
                 self._consecutive_limits += 1
+                self._on_limited()
                 self.limit_observation = SourceLimitObservation(
                     self.source_name,
                     SourceLimitState.QUOTA_EXHAUSTED,
@@ -204,18 +237,21 @@ class _PacedSource:
                     None,
                     False,
                     self._consecutive_limits,
+                    self.window_calls,
                 )
                 self.stopped = True
                 raise _SourceCallStopped() from None
             except RateLimitedError as error:
                 observed_at = self._wall_now()
                 self._consecutive_limits += 1
+                self._on_limited()
                 if error.retry_after_is_exact:
                     self._estimated_limits = 0
-                    delay = error.retry_after_seconds
+                    delay = float(error.retry_after_seconds)
                 else:
                     self._estimated_limits += 1
-                    delay = (60, 120, 240, 480, 900)[min(self._estimated_limits - 1, 4)]
+                    base = _FALLBACK_LADDER[min(self._estimated_limits - 1, 4)]
+                    delay = _jittered_delay(base, self.rng)
                 self.limit_observation = SourceLimitObservation(
                     self.source_name,
                     SourceLimitState.COOLING_DOWN,
@@ -223,6 +259,7 @@ class _PacedSource:
                     observed_at + timedelta(seconds=delay),
                     error.retry_after_is_exact,
                     self._consecutive_limits,
+                    self.window_calls,
                 )
                 remaining = _DEADLINE_SECONDS - (self.monotonic() - self.started_at)
                 if delay <= 60 and self.pauses < _MAX_LIMIT_PAUSES and delay < remaining:
@@ -233,7 +270,22 @@ class _PacedSource:
                 raise _SourceCallStopped() from None
             self._consecutive_limits = 0
             self._estimated_limits = 0
+            self._on_success()
             return result
+
+    def _on_limited(self) -> None:
+        """AIMD multiplicative decrease: halve the learned per-window call budget."""
+        self._success_streak = 0
+        self._fresh_limit = True
+        self.window_calls = max(MIN_SOURCE_WINDOW_CALLS, self.window_calls // 2)
+
+    def _on_success(self) -> None:
+        """AIMD additive increase: grow the budget by one call after a success streak."""
+        self._fresh_limit = False
+        self._success_streak += 1
+        if self._success_streak >= _RECOVERY_STREAK and self.window_calls < MAX_SOURCE_WINDOW_CALLS:
+            self._success_streak = 0
+            self.window_calls += 1
 
     def _pace(self) -> None:
         while True:
@@ -243,7 +295,7 @@ class _PacedSource:
                 raise _SourceCallStopped()
             while self._request_times and now - self._request_times[0] >= _SOURCE_WINDOW_SECONDS:
                 self._request_times.popleft()
-            if len(self._request_times) < _SOURCE_WINDOW_CALLS:
+            if len(self._request_times) < self.window_calls:
                 self._request_times.append(now)
                 return
             delay = self._request_times[0] + _SOURCE_WINDOW_SECONDS - now
@@ -255,6 +307,12 @@ class _PacedSource:
     def _wall_now(self) -> datetime:
         elapsed = max(0.0, self.monotonic() - self.started_at)
         return self.checked_at + timedelta(seconds=elapsed)
+
+
+def _jittered_delay(base_seconds: int, rng: random.Random) -> float:
+    """Full-range jitter bounded to [base/2, base], so Spotify never sees a thundering herd."""
+    floor = base_seconds / 2
+    return floor + rng.random() * (base_seconds - floor)
 
 
 @dataclass(slots=True)
@@ -300,6 +358,7 @@ def refresh_once(
     lock_clock: Callable[[], float] | object | None = None,
     sleeper: Callable[[float], None] | object | None = None,
     now: Callable[[], datetime] | object | None = None,
+    rng: random.Random | object | None = None,
 ) -> RefreshInvocation:
     """Run selected existing checks once, persist safe results, and always release the local lock."""
     if not isinstance(application, MusicFriendApplication):
@@ -330,6 +389,9 @@ def refresh_once(
     wall_clock = (lambda: checked_at) if now is None else now
     if not callable(wall_clock):
         raise ValueError("now must be callable")
+    entropy = random.Random() if rng is None else rng
+    if not isinstance(entropy, random.Random):
+        raise ValueError("rng must be a random.Random")
     lease = _acquire_lock(lock_path, lock_clock=acquisition_clock)
     if lease is None:
         return RefreshInvocation(None, True)
@@ -347,6 +409,7 @@ def refresh_once(
                 monotonic=clock,
                 sleeper=sleep,
                 saved_limit=application.get_source_limit(source_name),
+                rng=entropy,
             )
         )
         limited_event_client = (
@@ -358,9 +421,11 @@ def refresh_once(
         _repair_missing_signals(application, counts)
         _repair_inbox_entries(application, checked_at, counts)
         run_id = _run_id()
+        deadline_exceeded = False
         for component in components:
             if clock() - started_monotonic >= _DEADLINE_SECONDS:
                 counts.failures += 1
+                deadline_exceeded = True
                 break
             if component == "catalog":
                 if limited_source is None:
@@ -377,6 +442,9 @@ def refresh_once(
         if limited_source is not None:
             counts.source_requests = limited_source.requests
             counts.limit_pauses = limited_source.pauses
+            # Persist the learned pacing rate (and any cooldown) so the next invocation
+            # starts from where this one left off, whether it hit a limit or recovered.
+            application.put_source_limit(limited_source.current_observation())
         if (
             selected_kind is RefreshKind.EVENTS
             and counts.events_skip_reason is not None
@@ -397,9 +465,39 @@ def refresh_once(
             _summary(counts),
         )
         application.put_refresh_run(run)
-        return RefreshInvocation(run, False, skip_reason=counts.events_skip_reason)
+        reason, retry_after, remaining = _partial_details(
+            status, limited_source, deadline_exceeded, counts
+        )
+        return RefreshInvocation(
+            run,
+            False,
+            skip_reason=counts.events_skip_reason,
+            reason=reason,
+            retry_after=retry_after,
+            remaining=remaining,
+        )
     finally:
         _release_lock(lease)
+
+
+def _partial_details(
+    status: RefreshStatus,
+    limited_source: _PacedSource | None,
+    deadline_exceeded: bool,
+    counts: _RefreshCounts,
+) -> tuple[str | None, str | None, int | None]:
+    """The reason/retry_after/remaining triple surfaced on a partial refresh result."""
+    if status is not RefreshStatus.PARTIAL:
+        return None, None, None
+    observation = None if limited_source is None else limited_source.limit_observation
+    if observation is not None and observation.state is SourceLimitState.QUOTA_EXHAUSTED:
+        return "quota_exhausted", None, counts.records_skipped
+    if observation is not None and observation.state is SourceLimitState.COOLING_DOWN:
+        retry_after = None if observation.retry_at is None else observation.retry_at.isoformat()
+        return "rate_limited", retry_after, counts.records_skipped
+    if deadline_exceeded:
+        return "deadline", None, counts.records_skipped
+    return None, None, counts.records_skipped
 
 
 def _wall_clock_now(wall_clock: Callable[[], datetime]) -> datetime:

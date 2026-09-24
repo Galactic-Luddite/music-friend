@@ -21,6 +21,7 @@ from music_friend.domain import (
     Release,
     Signal,
     SignalKind,
+    SourceLimitState,
     WatchlistAction,
     WatchlistEntry,
 )
@@ -426,7 +427,7 @@ def create_music_server(
         annotations=_READ_ONLY,
     )
     async def music_status() -> CallToolResult:
-        return _safe_call(lambda: _status(application))
+        return _safe_call(lambda: _status(application, clock()))
 
     @server.tool(
         name="refresh_music",
@@ -885,13 +886,33 @@ def _now(clock: Clock) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _status(application: MusicFriendApplication) -> dict[str, object]:
+def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[str, object]:
     latest = application.list_refresh_runs(limit=1)
     unread = application.list_inbox_entries(InboxState.UNREAD, limit=1)
     return {
         "status": "ready",
         "inbox": {"has_unread": bool(unread)},
         "latest_refresh": None if not latest else _refresh_run(latest[0]),
+        "source_limits": {"spotify": _source_limit_status(application, "spotify", checked_at)},
+    }
+
+
+def _source_limit_status(
+    application: MusicFriendApplication, source: str, checked_at: datetime
+) -> dict[str, object]:
+    """Report whether ``source`` is ready now, or when it is expected to be ready again."""
+    observation = application.get_source_limit(source)
+    if observation is None or observation.state is SourceLimitState.AVAILABLE:
+        return {"ready": True, "state": "available", "retry_at": None}
+    if observation.state is SourceLimitState.QUOTA_EXHAUSTED:
+        return {"ready": False, "state": observation.state.value, "retry_at": None}
+    expired = observation.retry_at is not None and observation.retry_at <= checked_at
+    return {
+        "ready": expired,
+        "state": "available" if expired else observation.state.value,
+        "retry_at": None
+        if expired or observation.retry_at is None
+        else observation.retry_at.isoformat(),
     }
 
 
@@ -903,6 +924,9 @@ def _refresh_result(value: object) -> dict[str, object]:
     run = getattr(value, "run", None)
     already_running = getattr(value, "already_running", None)
     skip_reason = getattr(value, "skip_reason", None)
+    reason = getattr(value, "reason", None)
+    retry_after = getattr(value, "retry_after", None)
+    remaining = getattr(value, "remaining", None)
     if type(already_running) is bool:
         if already_running:
             return {"status": "partial"}
@@ -912,6 +936,12 @@ def _refresh_result(value: object) -> dict[str, object]:
             payload = _refresh_run(run)
             if skip_reason is not None:
                 payload["events_skipped_reason"] = skip_reason
+            if reason is not None:
+                payload["reason"] = reason
+            if retry_after is not None:
+                payload["retry_after"] = retry_after
+            if remaining is not None:
+                payload["remaining"] = remaining
             return payload
     raise ValueError("refresh callback returned an invalid result")
 

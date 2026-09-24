@@ -10,6 +10,12 @@ from music_friend.domain import (
     IdentityConfidence,
     LocalPreference,
     LocalPreferenceKey,
+    RefreshKind,
+    RefreshRun,
+    RefreshStatus,
+    RefreshSummary,
+    SourceCapability,
+    SourceCursor,
     SourceReference,
     WatchlistAction,
     WatchlistInclusionReason,
@@ -141,3 +147,32 @@ def test_application_delegates_preferences_evidence_overrides_and_transactions(
         application.remove_local_preference(preference.key)
         assert application.get_affinity_evidence(evidence.local_id) is None
         assert application.get_local_preference(preference.key) is None
+
+
+def test_application_delegates_refresh_run_and_source_cursor_lookups(tmp_path: Path) -> None:
+    """Catches the refresh-run and source-cursor delegation methods drifting from the catalog."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        run = RefreshRun(
+            "run-1",
+            "spotify",
+            RefreshKind.CATALOG,
+            RefreshStatus.SUCCEEDED,
+            NOW,
+            NOW,
+            RefreshSummary(()),
+        )
+        cursor = SourceCursor("spotify", SourceCapability.RECENT_RELEASES, "artist-1", NOW)
+        application.put_refresh_run(run)
+        application.put_source_cursor(cursor)
+
+        assert application.get_refresh_run("run-1") == run
+        assert application.list_source_cursors("spotify", limit=10) == (cursor,)
+
+
+def test_application_delegates_purge_source(tmp_path: Path) -> None:
+    """Catches the purge_source delegation drifting from the underlying portable helper."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        result = application.purge_source("spotify")
+        assert result is not None

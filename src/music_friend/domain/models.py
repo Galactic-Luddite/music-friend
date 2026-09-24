@@ -701,6 +701,18 @@ class SourceCursor:
         _require_aware_datetime(self.updated_at, "updated_at")
 
 
+#: Ceiling and floor for the learned request-pacing window, in calls per window.
+#: Persisted per source and adjusted with AIMD: halved on a 429, grown by one
+#: call after a streak of successes, never leaving this inclusive range.
+MAX_SOURCE_WINDOW_CALLS = 8
+MIN_SOURCE_WINDOW_CALLS = 1
+
+#: Cadence of the scheduled full refresh, in minutes. Shared by the CLI's schedule
+#: installer and the release-discovery freshness TTL so the TTL always stays well
+#: below the schedule interval, even when a scheduled run starts slightly early.
+DAILY_REFRESH_MINUTES = 1440
+
+
 @dataclass(frozen=True, slots=True)
 class SourceLimitObservation:
     source: str
@@ -709,6 +721,7 @@ class SourceLimitObservation:
     retry_at: datetime | None
     retry_is_exact: bool
     consecutive_limits: int
+    window_calls: int = MAX_SOURCE_WINDOW_CALLS
 
     def __post_init__(self) -> None:
         _require_text(self.source, "source")
@@ -719,6 +732,10 @@ class SourceLimitObservation:
         _require_nonnegative_int(self.consecutive_limits, "consecutive_limits")
         if self.consecutive_limits > 1_000_000:
             raise ValueError("consecutive_limits must be at most 1000000")
+        if type(self.window_calls) is not int or not (
+            MIN_SOURCE_WINDOW_CALLS <= self.window_calls <= MAX_SOURCE_WINDOW_CALLS
+        ):
+            raise ValueError("window_calls must be within the supported pacing range")
         if self.retry_at is not None:
             _require_aware_datetime(self.retry_at, "retry_at")
         if self.state is SourceLimitState.AVAILABLE:
@@ -1054,6 +1071,8 @@ __all__ = [
     "SignalKind",
     "SourceCapability",
     "SourceCursor",
+    "MAX_SOURCE_WINDOW_CALLS",
+    "MIN_SOURCE_WINDOW_CALLS",
     "SourceLimitObservation",
     "SourceLimitState",
     "SourceReference",

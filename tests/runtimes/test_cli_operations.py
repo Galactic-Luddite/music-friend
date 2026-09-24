@@ -387,6 +387,35 @@ def test_all_kind_run_carries_the_events_skip_reason_without_changing_overall_st
     assert payload["events_skipped_reason"] == "event_area_not_configured"
 
 
+def test_partial_refresh_payload_and_text_line_carry_reason_retry_after_and_remaining() -> None:
+    """Catches a partial refresh losing its reason/retry_after/remaining (AC6)."""
+    run = RefreshRun(
+        "run-1",
+        "spotify",
+        RefreshKind.RELEASES,
+        RefreshStatus.PARTIAL,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+    invocation = RefreshInvocation(
+        run,
+        already_running=False,
+        reason="rate_limited",
+        retry_after=NOW.isoformat(),
+        remaining=3,
+    )
+
+    payload = cli._refresh_payload(invocation)
+
+    assert payload["reason"] == "rate_limited"
+    assert payload["retry_after"] == NOW.isoformat()
+    assert payload["remaining"] == 3
+    assert cli._text(payload) == (
+        f"Refresh releases: partial. reason=rate_limited retry_after={NOW.isoformat()} remaining=3"
+    )
+
+
 def test_schedule_install_remove_status_and_failure_are_bounded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

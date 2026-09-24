@@ -28,7 +28,7 @@ def test_source_limit_migration_and_catalog_round_trip(tmp_path: Path) -> None:
         ).fetchall()
         catalog.put_source_limit(expected)
 
-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
         assert catalog.get_source_limit("spotify") == expected
 
 
@@ -60,6 +60,7 @@ def test_source_limit_portable_export_import_round_trip(tmp_path: Path) -> None:
         "retry_at": (NOW + timedelta(seconds=60)).isoformat(),
         "retry_is_exact": True,
         "consecutive_limits": 1,
+        "window_calls": 8,
     }
     with Catalog.open(tmp_path / "target.sqlite3") as target:
         import_catalog(target, portable)

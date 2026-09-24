@@ -36,7 +36,7 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
-| `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh | none | `status`, `inbox.has_unread`, `latest_refresh` | read-only, local |
+| `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `source_limits.spotify` (`ready`, `state`, `retry_at`) | read-only, local |
 | `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all` | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
 | `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries | read-only, local |
@@ -63,6 +63,12 @@ something to invent: `artist_id` comes from `search_catalog` or a `list_watchlis
 `explain_inbox_item`'s result. Every display name a tool returns -- artist, release, event, venue,
 and imported-history names -- has bidirectional-override and other control characters removed; see
 [display-name sanitization](limits.md#display-name-sanitization) for the allowlist and rationale.
+
+A `partial` `refresh_music` result adds `reason` (`rate_limited`, `quota_exhausted`, or
+`deadline`), `retry_after` (an ISO-8601 timestamp, only present for `rate_limited`), and
+`remaining` (how many records this run skipped) when the cause is known. Call `music_status`
+first, or read `retry_after` from a prior `partial` result, before starting another refresh during
+a cooldown -- see [adaptive request pacing](operations.md#adaptive-request-pacing).
 
 `refresh_music` with `kind: "events"` and no event area configured makes no source requests; it
 returns `{"status": "skipped", "reason": "event_area_not_configured"}` instead of reporting

@@ -1,6 +1,9 @@
 """Provider-neutral Music Friend domain records."""
 
 from music_friend.domain.models import (
+    DAILY_REFRESH_MINUTES,
+    MAX_SOURCE_WINDOW_CALLS,
+    MIN_SOURCE_WINDOW_CALLS,
     AffinityEvidence,
     AffinityEvidenceKind,
     AffinityScore,
@@ -64,6 +67,7 @@ __all__ = [
     "AffinityEvidenceKind",
     "AffinityScore",
     "Artist",
+    "DAILY_REFRESH_MINUTES",
     "ArtistEventDiscoveryResult",
     "ArtistReleaseDiscoveryResult",
     "CatalogSyncResult",
@@ -107,6 +111,8 @@ __all__ = [
     "SignalKind",
     "SourceCapability",
     "SourceCursor",
+    "MAX_SOURCE_WINDOW_CALLS",
+    "MIN_SOURCE_WINDOW_CALLS",
     "SourceLimitObservation",
     "SourceLimitState",
     "SourceReference",

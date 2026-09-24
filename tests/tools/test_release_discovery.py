@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from music_friend.domain import (
     AffinityEvidence,
     AffinityEvidenceKind,
@@ -311,3 +313,41 @@ def test_release_discovery_rejects_non_release_pages_without_persisting_partial_
         assert result.artists[0].records_seen == 0
         assert catalog.get_release_check_cursor("spotify", artist.local_id) is None
         assert RAW_ERROR_CANARY not in repr(result)
+
+
+def test_discover_releases_rejects_a_malformed_source_name(tmp_path: Path) -> None:
+    """Catches an unbounded or malformed source name reaching provider dispatch."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        with pytest.raises(ValueError, match="source_name"):
+            application.discover_releases("", FakeReleaseSource(), checked_at=NOW)
+        with pytest.raises(ValueError, match="source_name"):
+            application.discover_releases("has spaces", FakeReleaseSource(), checked_at=NOW)
+
+
+def test_discover_releases_rejects_a_source_missing_the_provider_contract(tmp_path: Path) -> None:
+    """Catches a non-conforming source object reaching provider dispatch."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        with pytest.raises(ValueError, match="source"):
+            application.discover_releases(
+                "spotify",
+                object(),
+                checked_at=NOW,  # type: ignore[arg-type]
+            )
+
+
+def test_discover_releases_treats_a_malformed_release_page_as_an_artist_failure(
+    tmp_path: Path,
+) -> None:
+    """Catches a source returning something other than a Page crashing the whole refresh."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeReleaseSource()
+        source.pages[("one", None)] = "not-a-page"  # type: ignore[assignment]
+
+        result = application.discover_releases("spotify", source, checked_at=NOW)
+
+        assert result.artists[0].status is ReleaseDiscoveryStatus.FAILED

@@ -23,6 +23,7 @@ from music_friend.agent_skill import SkillInstallError
 from music_friend.agent_skill import install_skill as install_agent_skill
 from music_friend.configuration import LocalConfig, LocalConfigStore, RadiusUnit
 from music_friend.domain import (
+    DAILY_REFRESH_MINUTES,
     InboxEntry,
     InboxState,
     RefreshMetricKind,
@@ -74,7 +75,10 @@ _USAGE = (
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
 )
-_DAILY_REFRESH_MINUTES = 1440
+#: Cadence of the scheduled full refresh. Shared with release_discovery.FRESHNESS_TTL via
+#: music_friend.domain.DAILY_REFRESH_MINUTES so the freshness TTL always stays well below
+#: this interval.
+_DAILY_REFRESH_MINUTES = DAILY_REFRESH_MINUTES
 
 
 class _ConnectionFailed(RuntimeError):
@@ -613,6 +617,9 @@ def _status_command(
                 "ready": _events_ready(config, connector_factory, credential_store_factory, now)
             },
             "mcp_ready": _probe(native_store_probe),
+            "source_limits": {
+                "spotify": _source_limit_diagnostics(application, "spotify", _checked_at(now))
+            },
         }
     )
     return _emit(payload, structured, stdout)
@@ -1083,6 +1090,12 @@ def _refresh_payload(value: object) -> dict[str, object]:
             payload = _refresh_run(value.run)
             if value.skip_reason is not None:
                 payload["events_skipped_reason"] = value.skip_reason
+            if value.reason is not None:
+                payload["reason"] = value.reason
+            if value.retry_after is not None:
+                payload["retry_after"] = value.retry_after
+            if value.remaining is not None:
+                payload["remaining"] = value.remaining
             return payload
     raise ValueError("refresh result is invalid")
 
@@ -1510,7 +1523,14 @@ def _text(payload: dict[str, object]) -> str:
     if type(payload.get("version")) is str:
         return f"Music Friend version {payload['version']}"
     if type(payload.get("kind")) is str and type(payload.get("status")) is str:
-        return f"Refresh {payload['kind']}: {payload['status']}."
+        line = f"Refresh {payload['kind']}: {payload['status']}."
+        if payload.get("status") == "partial" and type(payload.get("reason")) is str:
+            line = f"{line} reason={payload['reason']}"
+            if type(payload.get("retry_after")) is str:
+                line = f"{line} retry_after={payload['retry_after']}"
+            if type(payload.get("remaining")) is int:
+                line = f"{line} remaining={payload['remaining']}"
+        return line
     if type(payload.get("status")) is str:
         connection = payload.get("connection")
         suffix = f" (Spotify: {connection})" if type(connection) is str else ""

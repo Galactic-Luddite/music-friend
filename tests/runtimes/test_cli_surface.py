@@ -259,6 +259,17 @@ def test_cli_delegates_status_refresh_watchlist_and_inbox_as_deterministic_json(
         "mcp_ready": True,
         "latest_refresh": None,
         "status": "ready",
+        "source_limits": {
+            "spotify": {
+                "state": "available",
+                "observed_at": None,
+                "retry_at": None,
+                "retry_is_exact": False,
+                "consecutive_limits": 0,
+                "last_refresh_requests": 0,
+                "last_refresh_pauses": 0,
+            }
+        },
     }
     assert status_stderr == ""
     assert refresh_result == 3

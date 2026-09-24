@@ -417,7 +417,8 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
         )
     for row in connection.execute(
         """
-        SELECT source, state, observed_at, retry_at, retry_is_exact, consecutive_limits
+        SELECT source, state, observed_at, retry_at, retry_is_exact, consecutive_limits,
+               window_calls
         FROM source_limits
         """
     ):
@@ -431,6 +432,7 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
                 "retry_at": row[3],
                 "retry_is_exact": bool(row[4]),
                 "consecutive_limits": int(row[5]),
+                "window_calls": int(row[6]),
             }
         )
     for row in connection.execute(
@@ -1234,6 +1236,7 @@ def _replay(
                         "retry_at",
                         "retry_is_exact",
                         "consecutive_limits",
+                        "window_calls",
                     }
                 ),
             )
@@ -1245,6 +1248,7 @@ def _replay(
                     source=source,
                     state=SourceLimitState(_text(record["state"], "state", maximum=32)),
                     observed_at=_datetime(record["observed_at"], "observed_at"),
+                    window_calls=_integer(record["window_calls"], "window_calls"),
                     retry_at=(
                         None
                         if record["retry_at"] is None
