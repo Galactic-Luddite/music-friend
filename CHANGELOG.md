@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+Minor release: new, more specific error messages and CLI failure handling, richer MCP tool
+descriptions, and display-name sanitizing change what clients see.
+
 
 - Every MCP tool description now states its purpose, when to use it, what to call before and
   after it, and whether it contacts a provider; every `artist_id`/`inbox_id` argument now says
