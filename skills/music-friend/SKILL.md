@@ -22,13 +22,17 @@ signature, status footer, or advice to retry unless the local result specificall
 - For a quick overview, call `music_status`.
 - To update local information, ask for confirmation and then call `refresh_music` with one of
   `catalog`, `releases`, `events`, or `all`.
-- To find a known artist, call `search_catalog` before changing a watchlist.
+- To find a known artist, call `search_catalog` before changing a watchlist. Matching is
+  case- and accent-insensitive, so a plain-ASCII spelling still finds a stylized or accented
+  stored name.
 - To inspect monitored artists, call `list_watchlist`. Use `update_watchlist` only with a returned
   local artist identifier and an explicit add, pin, mute, or remove decision.
-- To inspect updates, call `list_inbox`. Explain an item with `explain_inbox_item`. Its local
-  states are `unread`, `saved`, or `dismissed`; change the state only through
-  `update_inbox_item` after the person says what they want. An explicit `save it` authorizes
-  setting the state to `saved` once the item identity is known and it has been explained.
+- To inspect updates, call `list_inbox`. Each item includes a compact `summary` (kind, title,
+  artist names, date), so answering "anything new?" usually needs no follow-up call. Explain one
+  item in more detail with `explain_inbox_item`. Its local states are `unread`, `saved`, or
+  `dismissed`; change the state only through `update_inbox_item` after the person says what they
+  want. An explicit `save it` authorizes setting the state to `saved` once the item identity is
+  known and it has been explained.
 - For historical listening questions, call `summarize_listening_history` with an explicit UTC
   range when the person names one. State the returned evidence boundary and do not reinterpret
   play counts as approved preferences.
