@@ -3,7 +3,7 @@
 Music Friend requires Python 3.10 or newer. It runs on your computer and creates no account,
 schedule, or network listener during installation.
 
-Music Friend v0.1 supports macOS and Linux. Windows is not a supported runtime in v0.1.
+Music Friend supports macOS and Linux. Windows is not a supported runtime.
 
 ## Before you start
 
@@ -33,7 +33,7 @@ xcode-select --install
 brew install openssl@3 rust
 rustc --version
 OPENSSL_DIR="$(brew --prefix openssl@3)" \
-  python -m pip install --no-binary cryptography music_friend-0.1.1-py3-none-any.whl
+  python -m pip install --no-binary cryptography music_friend-0.2.0-py3-none-any.whl
 ```
 
 Confirm that `rustc --version` reports Rust 1.83 or newer. The command above dynamically links
@@ -41,7 +41,7 @@ the Homebrew OpenSSL. To build cryptography statically instead, use this install
 
 ```bash
 OPENSSL_STATIC=1 \
-  python -m pip install --no-binary cryptography music_friend-0.1.1-py3-none-any.whl
+  python -m pip install --no-binary cryptography music_friend-0.2.0-py3-none-any.whl
 ```
 
 On platforms with a supported cryptography wheel, use the regular release-file installation below.

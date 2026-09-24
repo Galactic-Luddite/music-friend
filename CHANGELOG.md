@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+Minor release: additive MCP result fields and a new `skipped` refresh outcome change what clients
+see, so this is a minor rather than a patch version.
+
 
 - `search_catalog` now matches case- and accent/stylization-insensitively: the query and stored
   artist names are folded (Unicode NFKD, combining marks stripped, case-folded, `-`/`&` treated as
