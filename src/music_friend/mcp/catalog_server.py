@@ -509,11 +509,17 @@ def _refresh_result(value: object) -> dict[str, object]:
             return result
     run = getattr(value, "run", None)
     already_running = getattr(value, "already_running", None)
+    skip_reason = getattr(value, "skip_reason", None)
     if type(already_running) is bool:
         if already_running:
             return {"status": "partial"}
+        if run is None and skip_reason is not None:
+            return {"status": "skipped", "reason": skip_reason}
         if isinstance(run, RefreshRun):
-            return _refresh_run(run)
+            payload = _refresh_run(run)
+            if skip_reason is not None:
+                payload["events_skipped_reason"] = skip_reason
+            return payload
     raise ValueError("refresh callback returned an invalid result")
 
 

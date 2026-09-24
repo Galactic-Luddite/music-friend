@@ -179,6 +179,7 @@ def run_catalog_stdio_session(
                     event_client=event_client,
                     checked_at=_utc_now(),
                     lock_path=catalog_path.with_name("refresh.lock"),
+                    now=_utc_now,
                 )
             source_values = {
                 "SPOTIFY_CLIENT_ID": config.spotify_client_id,
@@ -198,6 +199,7 @@ def run_catalog_stdio_session(
                     event_client=event_client,
                     checked_at=_utc_now(),
                     lock_path=catalog_path.with_name("refresh.lock"),
+                    now=_utc_now,
                 )
 
         create_music_server(application, refresh=refresh).run("stdio")

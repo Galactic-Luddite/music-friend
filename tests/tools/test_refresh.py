@@ -184,6 +184,20 @@ class FakeEventClient:
         return response
 
 
+class _AdvancingClock:
+    """A callable clock that moves forward by ``step`` on every call, starting from ``start``."""
+
+    def __init__(self, start: datetime, step: timedelta) -> None:
+        self._next = start
+        self._step = step
+        self.calls = 0
+
+    def __call__(self) -> datetime:
+        self.calls += 1
+        self._next = self._next + self._step
+        return self._next
+
+
 def _watch(application: MusicFriendApplication, artist: Artist) -> None:
     application.put_artist(artist)
     application.put_affinity_evidence(
@@ -260,6 +274,37 @@ def test_release_refresh_creates_an_unread_item_then_preserves_saved_and_dismiss
 
         assert second.run is not None
         assert application.list_inbox_entries(None, limit=10) == (dismissed,)
+
+
+def test_finished_at_is_read_from_the_clock_when_the_run_completes_not_started_at(
+    tmp_path: Path,
+) -> None:
+    """Catches finished_at being copied from started_at so every run reports zero duration."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeMusicSource()
+        source.followed = Page((artist,), None)
+        source.releases[("one", None)] = Page((_release("release-1", artist),), None)
+        advancing_clock = _AdvancingClock(NOW, timedelta(seconds=30))
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            now=advancing_clock,
+        )
+
+        assert result.run is not None
+        assert result.run.started_at == NOW
+        assert result.run.finished_at == NOW + timedelta(seconds=30)
+        assert result.run.finished_at > result.run.started_at
 
 
 def test_materially_changed_release_creates_a_new_unread_item_without_reopening_dismissed_history(
@@ -378,6 +423,71 @@ def test_event_refresh_creates_an_unread_event_item_and_skips_unconfigured_event
         assert application.list_inbox_entries(InboxState.UNREAD, limit=10)
         assert skipped.run is not None
         assert skipped.run.status.value == "succeeded"
+
+
+def test_events_only_refresh_with_no_event_area_reports_a_distinct_skip_reason(
+    tmp_path: Path,
+) -> None:
+    """Catches an unconfigured event area being reported as a misleading succeeded refresh."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        events = FakeEventClient()
+
+        result = refresh_once(
+            application,
+            kind="events",
+            source_name="spotify",
+            source=None,  # type: ignore[arg-type]
+            config=LocalConfig(),
+            event_client=events,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+        )
+
+        assert result.run is None
+        assert result.already_running is False
+        assert result.skip_reason == "event_area_not_configured"
+        assert application.list_refresh_runs(limit=10) == ()
+        assert events.calls == []
+
+
+def test_all_refresh_reports_events_skip_reason_while_catalog_and_releases_still_run(
+    tmp_path: Path,
+) -> None:
+    """Catches `refresh all` losing the unconfigured-event-area signal for other passing sources."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeMusicSource()
+        source.followed = Page((artist,), None)
+        source.releases[("one", None)] = Page((_release("release-1", artist),), None)
+        events = FakeEventClient()
+
+        result = refresh_once(
+            application,
+            kind="all",
+            source_name="spotify",
+            source=source,
+            config=LocalConfig(),
+            event_client=events,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+        )
+
+        assert result.run is not None
+        # The synthetic source's saved_items capability always reports failed (see the other
+        # kind="all" tests in this file); the run still records catalog and release progress,
+        # so it is "partial" for that unrelated reason rather than "failed" or "skipped".
+        assert result.run.status.value == "partial"
+        assert result.skip_reason == "event_area_not_configured"
+        assert application.list_inbox_entries(InboxState.UNREAD, limit=10)
+        assert events.calls == []
+        metrics = {metric.kind.value: metric.count for metric in result.run.summary.metrics}
+        assert metrics["source_requests"] > 0
+        assert metrics["records_created"] == 1
 
 
 def test_event_refresh_does_not_require_a_music_source_when_a_watchlist_is_already_local(

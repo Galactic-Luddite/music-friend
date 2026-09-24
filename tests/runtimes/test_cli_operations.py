@@ -249,6 +249,42 @@ def test_refresh_invocations_report_running_completed_and_invalid_results() -> N
         cli._refresh_payload({"status": "succeeded", "unexpected": True})
 
 
+def test_events_only_skip_reports_a_distinct_status_and_exits_zero() -> None:
+    """Catches an unconfigured event refresh being reported as a misleading success."""
+    payload = cli._refresh_payload(
+        RefreshInvocation(None, already_running=False, skip_reason="event_area_not_configured")
+    )
+
+    assert payload == {"status": "skipped", "reason": "event_area_not_configured"}
+    stdout = io.StringIO()
+    invocation = RefreshInvocation(None, False, "event_area_not_configured")
+    assert cli._emit_refresh(invocation, True, stdout) == 0
+    assert json.loads(stdout.getvalue()) == {
+        "status": "skipped",
+        "reason": "event_area_not_configured",
+    }
+
+
+def test_all_kind_run_carries_the_events_skip_reason_without_changing_overall_status() -> None:
+    """Catches `refresh all` masking an unconfigured event area as a plain success."""
+    run = RefreshRun(
+        "run-1",
+        "spotify",
+        RefreshKind.ALL,
+        RefreshStatus.SUCCEEDED,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+
+    payload = cli._refresh_payload(
+        RefreshInvocation(run, already_running=False, skip_reason="event_area_not_configured")
+    )
+
+    assert payload["status"] == "succeeded"
+    assert payload["events_skipped_reason"] == "event_area_not_configured"
+
+
 def test_schedule_install_remove_status_and_failure_are_bounded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

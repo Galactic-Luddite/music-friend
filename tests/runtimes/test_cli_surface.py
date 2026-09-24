@@ -183,6 +183,7 @@ def _run(
     refresh: object = None,
     prompt: object = None,
     secret_prompt: object = None,
+    now: object = None,
 ) -> tuple[int, str, str]:
     stdout, stderr = io.StringIO(), io.StringIO()
     result = cli.run_cli(
@@ -194,7 +195,7 @@ def _run(
         refresh_runner=refresh,  # type: ignore[arg-type]
         prompt=prompt,  # type: ignore[arg-type]
         secret_prompt=(lambda _message: "") if secret_prompt is None else secret_prompt,  # type: ignore[arg-type]
-        now=lambda: NOW,
+        now=(lambda: NOW) if now is None else now,  # type: ignore[arg-type]
         credential_store_factory=_EmptyCredentialStore,
     )
     return result, stdout.getvalue(), stderr.getvalue()
@@ -357,6 +358,70 @@ def test_diagnostics_source_limit_is_an_explicit_safe_allowlist(tmp_path: Path) 
         "last_refresh_pauses",
     }
     application.close()
+
+
+def test_source_limit_cooldown_expires_once_retry_at_has_passed(tmp_path: Path) -> None:
+    """Catches diagnostics reporting cooling_down forever after retry_at has already passed."""
+    application = _application(tmp_path)
+    retry_at = NOW + timedelta(seconds=120)
+    application.put_source_limit(
+        SourceLimitObservation(
+            "spotify",
+            SourceLimitState.COOLING_DOWN,
+            NOW,
+            retry_at,
+            False,
+            2,
+        )
+    )
+
+    before_result, before_stdout, _ = _run(
+        ["diagnostics", "--json"], application, _ConfigStore(), now=lambda: retry_at
+    )
+    after_result, after_stdout, _ = _run(
+        ["diagnostics", "--json"],
+        application,
+        _ConfigStore(),
+        now=lambda: retry_at + timedelta(seconds=1),
+    )
+
+    assert before_result == after_result == 0
+    before_limit = json.loads(before_stdout)["source_limits"]["spotify"]
+    after_limit = json.loads(after_stdout)["source_limits"]["spotify"]
+    assert before_limit["state"] == "available"
+    assert after_limit["state"] == "available"
+    # The stored observation, including its consecutive_limits history, is left untouched.
+    assert before_limit["consecutive_limits"] == after_limit["consecutive_limits"] == 2
+    assert before_limit["retry_at"] == after_limit["retry_at"] == retry_at.isoformat()
+    application.close()
+
+
+def test_source_limit_cooldown_still_reports_cooling_down_before_retry_at(tmp_path: Path) -> None:
+    """Catches diagnostics reporting available while a cooldown is still genuinely in effect."""
+    application = _application(tmp_path)
+    retry_at = NOW + timedelta(seconds=120)
+    application.put_source_limit(
+        SourceLimitObservation(
+            "spotify",
+            SourceLimitState.COOLING_DOWN,
+            NOW,
+            retry_at,
+            False,
+            2,
+        )
+    )
+
+    result, stdout, _ = _run(
+        ["diagnostics", "--json"],
+        application,
+        _ConfigStore(),
+        now=lambda: retry_at - timedelta(seconds=1),
+    )
+
+    assert result == 0
+    source_limit = json.loads(stdout)["source_limits"]["spotify"]
+    assert source_limit["state"] == "cooling_down"
+    assert source_limit["consecutive_limits"] == 2
 
 
 def test_cli_status_reports_credential_access_failure_as_unavailable_json(
