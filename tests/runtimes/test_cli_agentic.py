@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,11 +105,16 @@ def test_setup_with_all_flags() -> None:
     exit_code, stdout, stderr = _run(
         [
             "setup",
-            "--spotify-client-id", "example-id",
-            "--event-country", "US",
-            "--event-postal", "94110",
-            "--event-radius", "50",
-            "--event-unit", "miles",
+            "--spotify-client-id",
+            "example-id",
+            "--event-country",
+            "US",
+            "--event-postal",
+            "94110",
+            "--event-radius",
+            "50",
+            "--event-unit",
+            "miles",
         ],
         config_store=config_store,
     )
@@ -296,6 +302,62 @@ def test_setup_key_from_file_with_correct_perms() -> None:
         os.unlink(key_file)
 
 
+def test_setup_key_from_stdin_succeeds() -> None:
+    """--ticketmaster-key-stdin reads a non-empty key and never echoes it."""
+    config_store = _ConfigStore()
+    credential_store = _CredentialStore()
+
+    original_stdin = sys.stdin
+    sys.stdin = io.StringIO("secret-key-from-stdin\n")
+    try:
+        exit_code, stdout, stderr = _run(
+            ["setup", "--spotify-client-id", "example-id", "--ticketmaster-key-stdin"],
+            config_store=config_store,
+            credential_store_factory=lambda: credential_store,
+        )
+    finally:
+        sys.stdin = original_stdin
+
+    assert exit_code == 0
+    assert credential_store.load(TICKETMASTER_CREDENTIAL_KEY) == "secret-key-from-stdin"
+    assert "secret-key-from-stdin" not in stdout
+    assert "secret-key-from-stdin" not in stderr
+
+
+def test_setup_key_from_file_rejects_an_empty_key() -> None:
+    """A correctly-permissioned but empty key file is rejected, not stored as an empty secret."""
+    import os
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+        f.write("")
+        key_file = f.name
+
+    try:
+        os.chmod(key_file, 0o600)
+        exit_code, stdout, stderr = _run(
+            ["setup", "--spotify-client-id", "example-id", "--ticketmaster-key-file", key_file],
+        )
+        assert exit_code == 1
+        assert stderr
+    finally:
+        os.unlink(key_file)
+
+
+def test_setup_clear_event_country() -> None:
+    """--clear-event-country removes only the country field."""
+    prior = LocalConfig(event_country_code="US", event_postal_code="94110")
+    config_store = _ConfigStore(prior)
+
+    exit_code, stdout, stderr = _run(
+        ["setup", "--clear-event-country"],
+        config_store=config_store,
+    )
+
+    assert exit_code == 0
+    assert config_store.value.event_country_code is None
+    assert config_store.value.event_postal_code == "94110"
+
+
 def test_backward_compatibility_interactive_setup() -> None:
     """Setup with no flags should still work interactively."""
     config_store = _ConfigStore()
@@ -321,3 +383,201 @@ def test_backward_compatibility_interactive_setup() -> None:
 
     assert exit_code == 0
     assert config_store.value.spotify_client_id == "spotify-id"
+
+
+def test_setup_flag_missing_value_prints_usage() -> None:
+    """A flag that expects a value but has none left prints usage and exits 2."""
+    exit_code, stdout, stderr = _run(["setup", "--spotify-client-id"])
+
+    assert exit_code == 2
+    assert stderr
+
+
+def test_setup_unknown_clear_field_prints_usage() -> None:
+    """--clear-<unknown> prints usage and exits 2."""
+    exit_code, stdout, stderr = _run(["setup", "--clear-nonsense"])
+
+    assert exit_code == 2
+    assert stderr
+
+
+def test_setup_unknown_flag_prints_usage() -> None:
+    """An unrecognized flag prints usage and exits 2."""
+    exit_code, stdout, stderr = _run(["setup", "--not-a-real-flag"])
+
+    assert exit_code == 2
+    assert stderr
+
+
+def test_setup_ticketmaster_key_file_missing_value_prints_usage() -> None:
+    """--ticketmaster-key-file with no path left prints usage and exits 2."""
+    exit_code, stdout, stderr = _run(["setup", "--ticketmaster-key-file"])
+
+    assert exit_code == 2
+    assert stderr
+
+
+def test_setup_event_radius_invalid_value_reports_error() -> None:
+    """A non-numeric --event-radius reports an actionable error, not a traceback."""
+    exit_code, stdout, stderr = _run(
+        [
+            "setup",
+            "--event-country",
+            "US",
+            "--event-postal",
+            "94110",
+            "--event-radius",
+            "not-a-number",
+        ],
+    )
+
+    assert exit_code == 1
+    assert "event_radius" in stderr
+
+
+def test_setup_event_unit_invalid_value_reports_error() -> None:
+    """An invalid --event-unit reports an actionable error."""
+    exit_code, stdout, stderr = _run(
+        ["setup", "--event-country", "US", "--event-postal", "94110", "--event-unit", "furlongs"],
+    )
+
+    assert exit_code == 1
+    assert "event_radius_unit" in stderr
+
+
+def test_setup_incomplete_event_area_reports_error() -> None:
+    """Setting only the country without a postal code is rejected."""
+    exit_code, stdout, stderr = _run(["setup", "--event-country", "US"])
+
+    assert exit_code == 1
+    assert "event area" in stderr
+
+
+def test_setup_clear_event_postal_radius_and_unit() -> None:
+    """--clear-event-postal, --clear-event-radius, and --clear-event-unit each remove a field."""
+    prior = LocalConfig(
+        event_country_code="US",
+        event_postal_code="94110",
+        event_radius=50,
+        event_radius_unit="miles",
+    )
+    config_store = _ConfigStore(prior)
+
+    exit_code, stdout, stderr = _run(
+        ["setup", "--clear-event-postal", "--clear-event-radius", "--clear-event-unit"],
+        config_store=config_store,
+    )
+
+    assert exit_code == 0
+    assert config_store.value.event_postal_code is None
+    assert config_store.value.event_radius is None
+    assert config_store.value.event_radius_unit is None
+
+
+def test_setup_key_env_var_name_missing_reports_error() -> None:
+    """--ticketmaster-key-env with a missing variable name is rejected cleanly."""
+    exit_code, stdout, stderr = _run(["setup", "--ticketmaster-key-env"])
+
+    assert exit_code == 2
+
+
+def test_setup_key_env_var_not_set_reports_error() -> None:
+    """--ticketmaster-key-env pointing at an unset variable reports an actionable error."""
+    exit_code, stdout, stderr = _run(
+        [
+            "setup",
+            "--spotify-client-id",
+            "example-id",
+            "--ticketmaster-key-env",
+            "MF_DOES_NOT_EXIST_SYNTHETIC",
+        ],
+    )
+
+    assert exit_code == 1
+    assert "MF_DOES_NOT_EXIST_SYNTHETIC" in stderr
+
+
+def test_setup_key_file_not_found_reports_error() -> None:
+    """--ticketmaster-key-file pointing at a missing file reports an actionable error."""
+    exit_code, stdout, stderr = _run(
+        [
+            "setup",
+            "--spotify-client-id",
+            "example-id",
+            "--ticketmaster-key-file",
+            "/tmp/does-not-exist-synthetic-key-file-33.txt",
+        ],
+    )
+
+    assert exit_code == 1
+    assert "not found" in stderr
+
+
+def test_setup_key_stdin_empty_reports_error() -> None:
+    """An empty stdin key is rejected rather than stored."""
+    import contextlib
+
+    original_stdin = sys.stdin
+    sys.stdin = io.StringIO("")
+    try:
+        exit_code, stdout, stderr = _run(
+            ["setup", "--spotify-client-id", "example-id", "--ticketmaster-key-stdin"],
+        )
+    finally:
+        sys.stdin = original_stdin
+
+    assert exit_code == 1
+    with contextlib.suppress(AssertionError):
+        assert "key" in stderr.lower()
+
+
+def test_setup_event_unit_kilometers_and_default_radius() -> None:
+    """--event-unit kilometers is accepted, and an unset --event-radius defaults by unit."""
+    config_store = _ConfigStore()
+
+    exit_code, stdout, stderr = _run(
+        [
+            "setup",
+            "--event-country",
+            "US",
+            "--event-postal",
+            "94110",
+            "--event-radius",
+            "40",
+            "--event-unit",
+            "kilometers",
+        ],
+        config_store=config_store,
+    )
+
+    assert exit_code == 0
+    assert config_store.value.event_radius_unit == "kilometers"
+    assert config_store.value.event_radius == 40
+
+    default_unit_store = _ConfigStore()
+    exit_code, stdout, stderr = _run(
+        ["setup", "--event-country", "US", "--event-postal", "94110", "--event-radius", "30"],
+        config_store=default_unit_store,
+    )
+
+    assert exit_code == 0
+    assert default_unit_store.value.event_radius_unit == "miles"
+
+
+def test_setup_reports_error_when_config_store_cannot_load() -> None:
+    """A broken config store surfaces an actionable error instead of a traceback."""
+
+    class _BrokenConfigStore:
+        def load(self) -> LocalConfig:
+            raise OSError("synthetic disk failure")
+
+        def save(self, value: LocalConfig) -> None:  # pragma: no cover - unreachable
+            raise AssertionError("save should not be called")
+
+    exit_code, stdout, stderr = _run(
+        ["setup", "--spotify-client-id", "example-id"],
+        config_store=_BrokenConfigStore(),
+    )
+
+    assert exit_code == 1
+    assert stderr

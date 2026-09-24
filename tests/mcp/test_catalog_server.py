@@ -735,4 +735,129 @@ def test_catalog_server_rejects_invalid_argument_shapes_before_application_work(
     for tool, arguments in cases:
         result = _call(server, tool, arguments)
         assert result["category"] == "invalid_arguments", tool
+
+
+def test_get_setup_reports_missing_fields_and_never_returns_the_client_id_value(
+    tmp_path: Path,
+) -> None:
+    from music_friend.configuration import LocalConfigStore
+
+    config_dir = tmp_path / "config"
+    application = _application(tmp_path)
+    server = create_music_server(
+        application,
+        refresh=lambda _kind: {"status": "succeeded"},
+        now=lambda: NOW,
+        config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
+    )
+
+    result = _call(server, "get_setup", {})
+
+    assert result["status"] == "incomplete"
+    assert result["client_id"] is False
+    assert result["event_country_code"] is None
+    assert "client_id" in result["missing_fields"]
+    assert "event_country_code" in result["missing_fields"]
+    application.close()
+
+
+def test_get_setup_reports_ready_once_every_nonsecret_field_is_set(tmp_path: Path) -> None:
+    from music_friend.configuration import LocalConfig, LocalConfigStore
+
+    config_dir = tmp_path / "config"
+    store = LocalConfigStore(config_dir=config_dir)
+    store.save(
+        LocalConfig(
+            spotify_client_id="example-client-id",
+            event_country_code="US",
+            event_postal_code="94110",
+            event_radius=25,
+            event_radius_unit="miles",
+        )
+    )
+    application = _application(tmp_path)
+    server = create_music_server(
+        application,
+        refresh=lambda _kind: {"status": "succeeded"},
+        now=lambda: NOW,
+        config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
+    )
+
+    result = _call(server, "get_setup", {})
+
+    assert result["status"] == "ready"
+    assert result["client_id"] is True
+    assert result["missing_fields"] == []
+    application.close()
+
+
+def test_update_setup_persists_nonsecret_fields_and_never_returns_the_client_id_value(
+    tmp_path: Path,
+) -> None:
+    from music_friend.configuration import LocalConfigStore
+
+    config_dir = tmp_path / "config"
+    application = _application(tmp_path)
+    server = create_music_server(
+        application,
+        refresh=lambda _kind: {"status": "succeeded"},
+        now=lambda: NOW,
+        config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
+    )
+
+    result = _call(
+        server,
+        "update_setup",
+        {
+            "client_id": "example-client-id",
+            "event_country_code": "US",
+            "event_postal_code": "94110",
+            "event_radius": 25,
+            "event_radius_unit": "miles",
+        },
+    )
+
+    assert result["status"] == "updated"
+    assert result["client_id"] is True
+    assert result["event_country_code"] == "US"
+    assert "example-client-id" not in json.dumps(result)
+    assert "music-friend setup --ticketmaster-key-env" in result["note"]
+
+    persisted = LocalConfigStore(config_dir=config_dir).load()
+    assert persisted.spotify_client_id == "example-client-id"
+    application.close()
+
+
+def test_update_setup_leaves_unspecified_fields_unchanged(tmp_path: Path) -> None:
+    from music_friend.configuration import LocalConfig, LocalConfigStore
+
+    config_dir = tmp_path / "config"
+    store = LocalConfigStore(config_dir=config_dir)
+    store.save(LocalConfig(spotify_client_id="already-set-id", event_country_code="US"))
+    application = _application(tmp_path)
+    server = create_music_server(
+        application,
+        refresh=lambda _kind: {"status": "succeeded"},
+        now=lambda: NOW,
+        config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
+    )
+
+    result = _call(server, "update_setup", {"event_postal_code": "94110"})
+
+    assert result["event_country_code"] == "US"
+    assert result["event_postal_code"] == "94110"
+    persisted = LocalConfigStore(config_dir=config_dir).load()
+    assert persisted.spotify_client_id == "already-set-id"
+    application.close()
+
+
+def test_create_music_server_rejects_a_non_callable_config_store_factory(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    with pytest.raises(ValueError, match="config_store_factory"):
+        create_music_server(
+            application,
+            refresh=lambda _kind: {"status": "succeeded"},
+            config_store_factory="not-callable",  # type: ignore[arg-type]
+        )
+    application.close()
     application.close()

@@ -11,6 +11,7 @@ from mcp.server.context import CallNext, HandlerResult, ServerMiddleware, Server
 from mcp.server.mcpserver import MCPServer
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 
+from music_friend.configuration import LocalConfig, LocalConfigStore
 from music_friend.domain import (
     Artist,
     Event,
@@ -228,10 +229,8 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     "update_setup": {
         "additionalProperties": False,
         "properties": {
-            "spotify_client_id": {
-                "description": (
-                    "Spotify developer application client ID, or null to leave unchanged."
-                ),
+            "client_id": {
+                "description": ("Developer application client ID, or null to leave unchanged."),
                 "maxLength": 256,
                 "minLength": 1,
                 "pattern": r"^\S(?:[\s\S]*\S)?$",
@@ -350,15 +349,19 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
 
 def _update_setup_arguments(arguments: Mapping[str, Any]) -> None:
     """Validate update_setup arguments."""
-    if "spotify_client_id" in arguments:
-        value = arguments["spotify_client_id"]
+    if "client_id" in arguments:
+        value = arguments["client_id"]
         if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise _InvalidArguments("spotify_client_id must be a non-empty string or null")
+            raise _InvalidArguments("client_id must be a non-empty string or null")
 
     if "event_country_code" in arguments:
         value = arguments["event_country_code"]
-        if value is not None and (not isinstance(value, str) or not value or len(value) != 2 or not value.isupper()):
-            raise _InvalidArguments("event_country_code must be a two-letter uppercase code or null")
+        if value is not None and (
+            not isinstance(value, str) or not value or len(value) != 2 or not value.isupper()
+        ):
+            raise _InvalidArguments(
+                "event_country_code must be a two-letter uppercase code or null"
+            )
 
     if "event_postal_code" in arguments:
         value = arguments["event_postal_code"]
@@ -390,6 +393,7 @@ def create_music_server(
     *,
     refresh: RefreshCallback,
     now: Clock | None = None,
+    config_store_factory: Callable[[], LocalConfigStore] | None = None,
 ) -> MCPServer[Any]:
     """Create the fixed provider-neutral local Music Friend MCP surface."""
     if not isinstance(application, MusicFriendApplication) or not callable(refresh):
@@ -397,6 +401,9 @@ def create_music_server(
     clock = _utc_now if now is None else now
     if not callable(clock):
         raise ValueError("now must be callable")
+    make_config_store = LocalConfigStore if config_store_factory is None else config_store_factory
+    if not callable(make_config_store):
+        raise ValueError("config_store_factory must be callable")
     server: MCPServer[Any] = MCPServer(
         name="music-friend",
         title="Music Friend",
@@ -677,10 +684,11 @@ def create_music_server(
     )
     async def get_setup() -> CallToolResult:
         def action() -> dict[str, object]:
-            store = LocalConfigStore()
+            store = make_config_store()
             config = store.load()
             return {
-                "status": "ready" if all(
+                "status": "ready"
+                if all(
                     value is not None
                     for value in (
                         config.spotify_client_id,
@@ -689,15 +697,17 @@ def create_music_server(
                         config.event_radius,
                         config.event_radius_unit,
                     )
-                ) else "incomplete",
-                "spotify_client_id": config.spotify_client_id is not None,
+                )
+                else "incomplete",
+                "client_id": config.spotify_client_id is not None,
                 "event_country_code": config.event_country_code,
                 "event_postal_code": config.event_postal_code,
                 "event_radius": config.event_radius,
                 "event_radius_unit": config.event_radius_unit,
                 "missing_fields": [
-                    name for name, value in [
-                        ("spotify_client_id", config.spotify_client_id),
+                    name
+                    for name, value in [
+                        ("client_id", config.spotify_client_id),
                         ("event_country_code", config.event_country_code),
                         ("event_postal_code", config.event_postal_code),
                         ("event_radius", config.event_radius),
@@ -723,29 +733,35 @@ def create_music_server(
         annotations=_MUTATING,
     )
     async def update_setup(
-        spotify_client_id: str | None = None,
+        client_id: str | None = None,
         event_country_code: str | None = None,
         event_postal_code: str | None = None,
         event_radius: float | None = None,
-        event_radius_unit: str | None = None,
+        event_radius_unit: Literal["miles", "kilometers"] | None = None,
     ) -> CallToolResult:
         def action() -> dict[str, object]:
-            store = LocalConfigStore()
+            store = make_config_store()
             config = store.load()
 
             # Build updated config, keeping unchanged fields
             updated_config = LocalConfig(
-                spotify_client_id=spotify_client_id if spotify_client_id is not None else config.spotify_client_id,
-                event_country_code=event_country_code if event_country_code is not None else config.event_country_code,
-                event_postal_code=event_postal_code if event_postal_code is not None else config.event_postal_code,
+                spotify_client_id=client_id if client_id is not None else config.spotify_client_id,
+                event_country_code=event_country_code
+                if event_country_code is not None
+                else config.event_country_code,
+                event_postal_code=event_postal_code
+                if event_postal_code is not None
+                else config.event_postal_code,
                 event_radius=event_radius if event_radius is not None else config.event_radius,
-                event_radius_unit=event_radius_unit if event_radius_unit is not None else config.event_radius_unit,
+                event_radius_unit=event_radius_unit
+                if event_radius_unit is not None
+                else config.event_radius_unit,
             )
             store.save(updated_config)
 
             return {
                 "status": "updated",
-                "spotify_client_id": updated_config.spotify_client_id is not None,
+                "client_id": updated_config.spotify_client_id is not None,
                 "event_country_code": updated_config.event_country_code,
                 "event_postal_code": updated_config.event_postal_code,
                 "event_radius": updated_config.event_radius,

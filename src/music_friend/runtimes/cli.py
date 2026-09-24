@@ -309,7 +309,16 @@ def _run_local_command(
             now,
         )
     if len(argv) >= 1 and argv[0] == "setup":
-        return _setup_command(argv[1:], config_store, prompt, secret_prompt, credential_store_factory, structured, stdout, stderr)
+        return _setup_command(
+            argv[1:],
+            config_store,
+            prompt,
+            secret_prompt,
+            credential_store_factory,
+            structured,
+            stdout,
+            stderr,
+        )
     if argv == ["version"]:
         return _emit({"version": __version__}, structured, stdout)
     if argv == ["status"]:
@@ -440,8 +449,6 @@ def _save_config(store: object, config: LocalConfig) -> None:
     getattr(store, "save")(config)
 
 
-
-
 class _Preserve:
     pass
 
@@ -550,8 +557,6 @@ def _setup_key_action(value: str) -> str | None | _Preserve:
     if not value.strip() or len(value) > 4096:
         raise ValueError("Ticketmaster key is invalid")
     return value
-
-
 
 
 def _disconnect(
@@ -1237,12 +1242,22 @@ def _setup_command(
             i += 2
         elif arg.startswith("--clear-"):
             field = arg[8:]
-            if field not in {"event-country", "event-postal", "event-radius", "event-unit", "spotify-client-id"}:
+            if field not in {
+                "event-country",
+                "event-postal",
+                "event-radius",
+                "event-unit",
+                "spotify-client-id",
+            }:
                 print(_USAGE, end="", file=stderr)
                 return 2
             flags[f"clear_{field.replace('-', '_')}"] = "true"
             i += 1
-        elif arg in {"--ticketmaster-key-env", "--ticketmaster-key-file", "--ticketmaster-key-stdin"}:
+        elif arg in {
+            "--ticketmaster-key-env",
+            "--ticketmaster-key-file",
+            "--ticketmaster-key-stdin",
+        }:
             if arg == "--ticketmaster-key-stdin":
                 flags["ticketmaster_key_stdin"] = "true"
                 i += 1
@@ -1296,7 +1311,7 @@ def _setup_command(
         print("Music Friend could not complete the command.", file=stderr)
         return 1
 
-    result = {
+    result: dict[str, object] = {
         "status": "setup_complete",
         "spotify_client_id": configured.spotify_client_id,
         "event_country_code": configured.event_country_code,
@@ -1335,7 +1350,12 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
             normalize=lambda value: value.strip(),
         )
 
-    if "event_country" in flags or "event_postal" in flags or "event_radius" in flags or "event_unit" in flags:
+    if (
+        "event_country" in flags
+        or "event_postal" in flags
+        or "event_radius" in flags
+        or "event_unit" in flags
+    ):
         country = event_country_code
         postal = event_postal_code
         radius = event_radius
@@ -1417,7 +1437,9 @@ def _setup_key_from_flags(flags: dict[str, str | None]) -> str | None | _Preserv
                 raise ValueError(f"File not found: {file_path}")
             stat_info = path.stat()
             if stat.S_IMODE(stat_info.st_mode) != 0o600:
-                raise ValueError(f"File must have permissions 0o600 (chmod 600), got {oct(stat.S_IMODE(stat_info.st_mode))}")
+                raise ValueError(
+                    f"File must have permissions 0o600 (chmod 600), got {oct(stat.S_IMODE(stat_info.st_mode))}"
+                )
             key = path.read_text(encoding="utf-8").strip()
             if not key or len(key) > 4096:
                 raise ValueError("Ticketmaster key is invalid")
@@ -1457,7 +1479,7 @@ def _connect_command(
             )
             if not result.authorized:
                 raise _ConnectionFailed()
-        payload = {"status": "connected"}
+        payload: dict[str, object] = {"status": "connected"}
         return _emit(payload, structured, stdout, text="Music Friend connected to Spotify.")
     except _ConnectionFailed:
         print("Music Friend could not connect to Spotify.", file=stderr)
