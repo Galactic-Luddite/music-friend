@@ -79,6 +79,15 @@ class _ConnectionFailed(RuntimeError):
     pass
 
 
+class _ProviderNotConfigured(RuntimeError):
+    """Raised when a provider-backed command needs configuration that is absent."""
+
+
+_PROVIDER_NOT_CONFIGURED_MESSAGE = (
+    "Spotify is not configured. Run `music-friend doctor` for setup guidance."
+)
+
+
 def _default_connector() -> httpx.BaseTransport:
     return httpx.HTTPTransport(trust_env=False)
 
@@ -121,7 +130,7 @@ def _spotify_tokens(
     credential_store_factory: CredentialStoreFactory,
 ) -> Iterator[tuple[SpotifySettings, SpotifyTokenManager]]:
     if config.spotify_client_id is None:
-        raise ValueError("Spotify is not configured")
+        raise _ProviderNotConfigured("Spotify is not configured")
     transport = SpotifyTransport(connector_factory())
     try:
         settings = SpotifySettings(config.spotify_client_id)
@@ -255,6 +264,9 @@ def run_cli(
                 authorizer_factory,
                 _native_store_available if native_store_probe is None else native_store_probe,
             )
+    except _ProviderNotConfigured:
+        print(_PROVIDER_NOT_CONFIGURED_MESSAGE, file=stderr)
+        return 1
     except Exception:
         print("Music Friend could not complete the command.", file=stderr)
         return 1
@@ -605,6 +617,9 @@ def _connect(
     except _ConnectionFailed:
         print("Music Friend could not connect to Spotify.", file=stderr)
         return 1
+    except _ProviderNotConfigured:
+        print(_PROVIDER_NOT_CONFIGURED_MESSAGE, file=stderr)
+        return 1
     except Exception:
         print("Music Friend could not complete the command.", file=stderr)
         return 1
@@ -626,6 +641,9 @@ def _disconnect(
             tokens.disconnect()
         print("Music Friend disconnected from Spotify.", file=stdout)
         return 0
+    except _ProviderNotConfigured:
+        print(_PROVIDER_NOT_CONFIGURED_MESSAGE, file=stderr)
+        return 1
     except Exception:
         print("Music Friend could not complete the command.", file=stderr)
         return 1
@@ -859,6 +877,43 @@ def _refresh(
             )
 
 
+def _data_file_not_found(argument: str, stderr: TextIO) -> int:
+    print(f"Music Friend could not find the file at {argument!r}.", file=stderr)
+    return 1
+
+
+def _data_destination_exists(argument: str, stderr: TextIO) -> int:
+    print(f"Music Friend will not overwrite the existing file at {argument!r}.", file=stderr)
+    return 1
+
+
+def _data_archive_invalid(stderr: TextIO) -> int:
+    print("Music Friend could not read the archive: it is not a valid export.", file=stderr)
+    return 1
+
+
+def _data_confirm(prompt: Prompt, message: str, expected: str, stderr: TextIO) -> int | None:
+    """Run a destructive-command confirmation prompt.
+
+    Returns ``None`` when the caller typed the exact confirmation word (the
+    command may proceed), or the exit code to return immediately when it did
+    not, including when the prompt could not be read at all because stdin is
+    not interactive (``EOFError`` from the default ``input``-backed prompt).
+    """
+    try:
+        answered = prompt(message)
+    except EOFError:
+        print(
+            "Confirmation was not accepted: no terminal is attached to read it.",
+            file=stderr,
+        )
+        return 2
+    if answered != expected:
+        print("Confirmation was not accepted.", file=stderr)
+        return 2
+    return None
+
+
 def _data_command(
     argv: list[str],
     application: MusicFriendApplication,
@@ -873,7 +928,12 @@ def _data_command(
         and (len(argv) == 2 or argv[2] == "--dry-run")
     ):
         dry_run = len(argv) == 3
-        result = application.import_spotify_history(Path(argv[1]), dry_run=dry_run)
+        try:
+            result = application.import_spotify_history(Path(argv[1]), dry_run=dry_run)
+        except FileNotFoundError:
+            return _data_file_not_found(argv[1], stderr)
+        except ValueError:
+            return _data_archive_invalid(stderr)
         return _emit(
             {
                 "duplicates": result.duplicates,
@@ -889,33 +949,51 @@ def _data_command(
             text="Spotify history validated." if dry_run else "Spotify history imported.",
         )
     if len(argv) == 2 and argv[0] in {"export", "backup"}:
+        try:
+            record_count = application.export_data(Path(argv[1])).record_count
+        except FileExistsError:
+            return _data_destination_exists(argv[1], stderr)
+        except FileNotFoundError:
+            return _data_file_not_found(argv[1], stderr)
         return _emit(
-            {"records": application.export_data(Path(argv[1])).record_count},
+            {"records": record_count},
             structured,
             stdout,
             text="Data export complete.",
         )
     if len(argv) == 2 and argv[0] == "import":
+        try:
+            record_count = application.import_data(Path(argv[1])).record_count
+        except FileNotFoundError:
+            return _data_file_not_found(argv[1], stderr)
+        except ValueError:
+            return _data_archive_invalid(stderr)
         return _emit(
-            {"records": application.import_data(Path(argv[1])).record_count},
+            {"records": record_count},
             structured,
             stdout,
             text="Data import complete.",
         )
     if len(argv) == 2 and argv[0] == "restore":
-        if prompt("Type RESTORE to continue: ") != "RESTORE":
-            print("Confirmation was not accepted.", file=stderr)
-            return 2
+        rejected = _data_confirm(prompt, "Type RESTORE to continue: ", "RESTORE", stderr)
+        if rejected is not None:
+            return rejected
+        try:
+            record_count = application.import_data(Path(argv[1])).record_count
+        except FileNotFoundError:
+            return _data_file_not_found(argv[1], stderr)
+        except ValueError:
+            return _data_archive_invalid(stderr)
         return _emit(
-            {"records": application.import_data(Path(argv[1])).record_count},
+            {"records": record_count},
             structured,
             stdout,
             text="Data restore complete.",
         )
     if argv == ["delete"]:
-        if prompt("Type DELETE to continue: ") != "DELETE":
-            print("Confirmation was not accepted.", file=stderr)
-            return 2
+        rejected = _data_confirm(prompt, "Type DELETE to continue: ", "DELETE", stderr)
+        if rejected is not None:
+            return rejected
         application.delete_data()
         return _emit({"status": "deleted"}, structured, stdout, text="Local data deleted.")
     print(_USAGE, end="", file=stderr)
