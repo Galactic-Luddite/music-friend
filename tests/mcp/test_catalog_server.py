@@ -362,10 +362,17 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
             "status": "partial",
         }
     assert calls == ["catalog", "releases", "events", "all"]
+    inbox_summary = {
+        "artist_names": ["Artist One"],
+        "date": NOW.date().isoformat(),
+        "kind": "release",
+        "title": "Release One",
+    }
     assert _call(server, "update_inbox_item", {"inbox_id": "inbox-1", "state": "saved"}) == {
         "created_at": NOW.isoformat(),
         "local_id": "inbox-1",
         "state": "saved",
+        "summary": inbox_summary,
         "updated_at": NOW.isoformat(),
     }
     explanation = _call(server, "explain_inbox_item", {"inbox_id": "inbox-1"})
@@ -374,10 +381,12 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
             "created_at": NOW.isoformat(),
             "local_id": "inbox-1",
             "state": "saved",
+            "summary": inbox_summary,
             "updated_at": NOW.isoformat(),
         },
         "record": {
             "artist_ids": ["artist-1"],
+            "artist_names": ["Artist One"],
             "date_precision": "day",
             "kind": "release",
             "local_id": "release-1",
@@ -473,6 +482,33 @@ def test_catalog_server_filters_inbox_and_reports_missing_updates_and_explanatio
     assert _call(server, "explain_inbox_item", {"inbox_id": "missing"}) == {
         "category": "not_found",
         "message": "Music Friend record was not found.",
+    }
+    application.close()
+
+
+def test_list_inbox_returns_a_compact_summary_without_a_follow_up_call(tmp_path: Path) -> None:
+    """AC #21: an agent must be able to summarize the inbox from list_inbox alone."""
+    application = _application(tmp_path)
+    server = create_music_server(
+        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+    )
+
+    result = _call(server, "list_inbox", {"state": "unread", "limit": 10})
+    assert result == {
+        "items": [
+            {
+                "local_id": "inbox-1",
+                "state": "unread",
+                "created_at": NOW.isoformat(),
+                "updated_at": NOW.isoformat(),
+                "summary": {
+                    "kind": "release",
+                    "title": "Release One",
+                    "artist_names": ["Artist One"],
+                    "date": NOW.date().isoformat(),
+                },
+            }
+        ]
     }
     application.close()
 

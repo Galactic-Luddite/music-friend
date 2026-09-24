@@ -315,7 +315,7 @@ def create_music_server(
             parsed_state = _inbox_state(state)
             return {
                 "items": [
-                    _inbox(item)
+                    _inbox(application, item)
                     for item in application.list_inbox_entries(
                         parsed_state, limit=_limit(limit, maximum=100)
                     )
@@ -340,7 +340,7 @@ def create_music_server(
                 entry = update_inbox_state(application, local_id, selected, updated_at=_now(clock))
             except ValueError:
                 return dict(_NOT_FOUND)
-            return _inbox(entry)
+            return _inbox(application, entry)
 
         return _safe_call(action)
 
@@ -542,13 +542,55 @@ def _watchlist(value: WatchlistEntry) -> dict[str, object]:
     }
 
 
-def _inbox(value: InboxEntry) -> dict[str, object]:
+def _inbox(application: MusicFriendApplication, value: InboxEntry) -> dict[str, object]:
     return {
         "local_id": value.local_id,
         "state": value.state.value,
         "created_at": value.created_at.isoformat(),
         "updated_at": value.updated_at.isoformat(),
+        "summary": _inbox_summary(application, value),
     }
+
+
+def _inbox_summary(
+    application: MusicFriendApplication, value: InboxEntry
+) -> dict[str, object] | None:
+    """Compact kind/title/artist-names/date preview, so listing an inbox needs no follow-up call.
+
+    Returns ``None`` when the entry's signal or underlying record is unexpectedly missing;
+    ``local_id``/``state``/timestamps remain populated either way.
+    """
+    signal = application.get_signal(value.signal_local_id)
+    if signal is None:
+        return None
+    if signal.kind is SignalKind.RELEASE:
+        release = application.get_release(signal.record_local_id)
+        if release is None:
+            return None
+        return {
+            "kind": "release",
+            "title": release.title,
+            "artist_names": _artist_names(application, release.artist_refs),
+            "date": release.release_date.isoformat(),
+        }
+    event = application.get_event(signal.record_local_id)
+    if event is None:
+        return None
+    return {
+        "kind": "event",
+        "title": event.title,
+        "artist_names": _artist_names(application, event.artist_refs),
+        "date": None if event.starts_at is None else event.starts_at.isoformat(),
+    }
+
+
+def _artist_names(application: MusicFriendApplication, artist_ids: tuple[str, ...]) -> list[str]:
+    names: list[str] = []
+    for artist_id in artist_ids:
+        artist = application.get_artist(artist_id)
+        if artist is not None:
+            names.append(artist.display_name)
+    return names
 
 
 def _refresh_run(value: RefreshRun) -> dict[str, object]:
@@ -574,7 +616,7 @@ def _explain_inbox(application: MusicFriendApplication, inbox_id: str) -> dict[s
     if record is None:
         return dict(_NOT_FOUND)
     return {
-        "entry": _inbox(entry),
+        "entry": _inbox(application, entry),
         "record": record,
         "reasons": [
             {"kind": reason.kind.value, "detail": reason.detail}
@@ -586,12 +628,12 @@ def _explain_inbox(application: MusicFriendApplication, inbox_id: str) -> dict[s
 def _signal_record(application: MusicFriendApplication, signal: Signal) -> dict[str, object] | None:
     if signal.kind is SignalKind.RELEASE:
         release = application.get_release(signal.record_local_id)
-        return None if release is None else _release(release)
+        return None if release is None else _release(application, release)
     event = application.get_event(signal.record_local_id)
-    return None if event is None else _event(event)
+    return None if event is None else _event(application, event)
 
 
-def _release(value: Release) -> dict[str, object]:
+def _release(application: MusicFriendApplication, value: Release) -> dict[str, object]:
     return {
         "kind": "release",
         "local_id": value.local_id,
@@ -600,15 +642,17 @@ def _release(value: Release) -> dict[str, object]:
         "release_date": value.release_date.isoformat(),
         "date_precision": value.date_precision.value,
         "artist_ids": list(value.artist_refs),
+        "artist_names": _artist_names(application, value.artist_refs),
     }
 
 
-def _event(value: Event) -> dict[str, object]:
+def _event(application: MusicFriendApplication, value: Event) -> dict[str, object]:
     return {
         "kind": "event",
         "local_id": value.local_id,
         "title": value.title,
         "artist_ids": list(value.artist_refs),
+        "artist_names": _artist_names(application, value.artist_refs),
         "venue_name": value.venue_name,
         "locality": value.locality,
         "starts_at": None if value.starts_at is None else value.starts_at.isoformat(),

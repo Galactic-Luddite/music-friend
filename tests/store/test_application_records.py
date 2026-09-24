@@ -506,3 +506,63 @@ def test_artist_search_requires_explicit_bound_and_has_stable_name_id_order(
         catalog.search_artists("sam", limit=0)
     with pytest.raises(ValueError, match="query"):
         catalog.search_artists("x" * 257, limit=10)
+
+
+def test_artist_search_is_accent_and_stylization_insensitive_but_returns_names_unchanged(
+    catalog: Catalog,
+) -> None:
+    for artist in (
+        _artist("artist-accent", "Élodie Café"),
+        _artist("artist-stylized", "Ÿvy"),
+        _artist("artist-hyphen", "Rock-N-Roll"),
+        _artist("artist-ampersand", "Salt & Pepper"),
+        _artist("artist-other", "Someone Else"),
+    ):
+        catalog.put_artist(artist)
+
+    # Plain ASCII query finds an accented stored name; the display name comes back unchanged.
+    accent_matches = catalog.search_artists("elodie cafe", limit=10)
+    assert tuple(artist.local_id for artist in accent_matches) == ("artist-accent",)
+    assert accent_matches[0].display_name == "Élodie Café"
+
+    # A plain "Y" finds a name stylized with "Y" (NFKD decomposes it to Y + combining diaeresis).
+    stylized_matches = catalog.search_artists("yvy", limit=10)
+    assert tuple(artist.local_id for artist in stylized_matches) == ("artist-stylized",)
+
+    # Case folding still applies alongside accent folding.
+    assert tuple(artist.local_id for artist in catalog.search_artists("ÉLODIE", limit=10)) == (
+        "artist-accent",
+    )
+
+    # Punctuation (- and &) does not block a reasonable match: it is treated as a separator.
+    assert tuple(artist.local_id for artist in catalog.search_artists("rock n roll", limit=10)) == (
+        "artist-hyphen",
+    )
+    assert tuple(artist.local_id for artist in catalog.search_artists("salt pepper", limit=10)) == (
+        "artist-ampersand",
+    )
+
+    assert catalog.search_artists("nonexistent stylized query", limit=10) == ()
+
+
+def test_artist_search_treats_percent_and_underscore_as_literal_characters(
+    catalog: Catalog,
+) -> None:
+    catalog.put_artist(_artist("artist-percent", "100% Wolf"))
+    catalog.put_artist(_artist("artist-underscore", "under_score"))
+    catalog.put_artist(_artist("artist-noise", "Other Artist"))
+
+    assert tuple(artist.local_id for artist in catalog.search_artists("100%", limit=10)) == (
+        "artist-percent",
+    )
+    assert tuple(artist.local_id for artist in catalog.search_artists("under_score", limit=10)) == (
+        "artist-underscore",
+    )
+    # A literal "%" or "_" must not act as a SQL LIKE wildcard matching every stored name; each
+    # matches only the one artist whose display name literally contains that character.
+    assert tuple(artist.local_id for artist in catalog.search_artists("%", limit=10)) == (
+        "artist-percent",
+    )
+    assert tuple(artist.local_id for artist in catalog.search_artists("_", limit=10)) == (
+        "artist-underscore",
+    )

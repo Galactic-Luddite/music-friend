@@ -41,9 +41,9 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
 | `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries | read-only, local |
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove` | the applied decision, or `not_found` | local write |
-| `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries | read-only, local |
-| `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry, or `not_found` | local write |
-| `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry`, `record`, and `reasons` (why it was included) | read-only, local |
+| `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries, each with a `summary` (`kind`, `title`, `artist_names`, `date`) so most requests need no follow-up call | read-only, local |
+| `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry (including its `summary`), or `not_found` | local write |
+| `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry` (with `summary`), `record` (with `artist_names` alongside `artist_ids`), and `reasons` (why it was included) | read-only, local |
 | `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
 
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
@@ -57,6 +57,15 @@ checked. `refresh_music` with `kind: "all"` still runs catalog and release disco
 reports the run's real `status`; when the event area is unconfigured it adds
 `events_skipped_reason: "event_area_not_configured"` to the result so the events portion of the run
 is identifiable without failing the rest of the refresh.
+
+### `search_catalog` matching rule
+
+Matching is case- and accent-insensitive: the query and every stored artist name are folded
+through a Unicode NFKD decomposition with combining marks stripped (so `elodie cafe` finds an
+artist stored as `Élodie Café`, and a plain `Y` finds a name stylized with `Ÿ`), then case-folded.
+`-` and `&` are treated as separators (collapsed to a space alongside surrounding whitespace) so
+punctuation does not block a reasonable match, e.g. `rock n roll` finds `Rock-N-Roll`. Only the
+comparison is folded; `display_name` in the result is always the stored name, unchanged.
 
 ### Follow an artist through the inbox
 
