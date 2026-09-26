@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- MusicBrainz's rate-limit pause budget is no longer shared with Spotify's two-pause cap: a
+  MusicBrainz `503` is transient load shedding by MusicBrainz's own documentation, so a releases
+  refresh now keeps pausing and retrying at the steady one request per second (honoring an exact
+  `Retry-After` when present) until either the whole watchlist finishes or the ten-minute refresh
+  deadline arrives, instead of giving up as `partial`/`rate_limited` after two pauses. Spotify's own
+  pause budget and adaptive per-window learning are unchanged. Mapping and release discovery for
+  MusicBrainz already shared one pacing state per run; a new test makes that explicit.
+- Fixed a soundtrack/compilation title mismatch that produced duplicate inbox items: a trailing
+  `(from ...)` or `[from ...]` attribution tag (for example `Song Z (from Some Film: The Album)`) is
+  now folded like the existing `- Single` suffix and `(feat. ...)` credit list, so the same release
+  reported with and without that tag by two different sources merges into one release with two
+  source references. A deluxe/anniversary edition, a live version, and an acoustic version are
+  deliberately left untouched and still stay distinct.
 - Fixed duplicate inbox items for the same real-world release: a release re-seen by the same
   source on a later refresh no longer creates a second signal/inbox item (the missing-signal
   repair pass could mis-detect an already-signalled, unchanged release as missing its signal and

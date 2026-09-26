@@ -837,6 +837,134 @@ def test_cross_source_variant_does_not_merge_original_with_a_deluxe_edition(
         assert len(deezer_release.source_refs) == 1
 
 
+def test_cross_source_soundtrack_from_tag_merges_with_the_plain_title(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #54): one source's "Song Z (from Some Film: The Album)" and
+    MusicBrainz's plain "Song Z", same artist and same day-precision date, fold to
+    one release with two source references."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-soundtrack", "deezer-soundtrack")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-soundtrack", None)] = Page(
+            (_cross_source_release("rg-soundtrack", "musicbrainz", artist, title="Song Z"),),
+            None,
+        )
+        first = application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+        assert len(first.artists[0].candidates) == 1
+        assert first.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-soundtrack", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-soundtrack",
+                    "deezer",
+                    artist,
+                    title="Song Z (from Some Film: The Album)",
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert second.artists[0].candidates == ()
+
+        stored_release = application.get_release("release:musicbrainz:rg-soundtrack")
+        assert stored_release is not None
+        assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
+        assert application.get_release("release:deezer:al-soundtrack") is None
+
+
+def test_cross_source_soundtrack_bracketed_from_tag_merges_with_the_plain_title(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #54): the bracketed form "[from ...]" folds the same way as the
+    parenthesized form."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-bracket", "deezer-bracket")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-bracket", None)] = Page(
+            (_cross_source_release("rg-bracket", "musicbrainz", artist, title="Song Z"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-bracket", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-bracket",
+                    "deezer",
+                    artist,
+                    title="Song Z [from Some Film: The Album]",
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert second.artists[0].candidates == ()
+
+        stored_release = application.get_release("release:musicbrainz:rg-bracket")
+        assert stored_release is not None
+        assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
+
+
+@pytest.mark.parametrize(
+    "decorated_title",
+    (
+        "Song Z (Deluxe)",
+        "Song Z (Live)",
+        "Song Z (Acoustic)",
+        "Song Z (20th Anniversary Edition)",
+    ),
+)
+def test_cross_source_variant_does_not_merge_a_from_tag_with_other_decorations(
+    tmp_path: Path, decorated_title: str
+) -> None:
+    """Negative tests (issue #54): a deluxe/anniversary edition, a live version, and an
+    acoustic version are never folded together with the plain title -- only a literal
+    "(from ...)"/"[from ...]" soundtrack attribution tag folds."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-fromneg", "deezer-fromneg")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-fromneg", None)] = Page(
+            (_cross_source_release("rg-fromneg", "musicbrainz", artist, title="Song Z"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-fromneg", None)] = Page(
+            (_cross_source_release("al-fromneg", "deezer", artist, title=decorated_title),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-fromneg")
+        deezer_release = application.get_release("release:deezer:al-fromneg")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
 def test_cross_source_variant_does_not_merge_two_different_named_remixers(
     tmp_path: Path,
 ) -> None:

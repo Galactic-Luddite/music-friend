@@ -121,8 +121,13 @@ class MusicBrainzServer:
     clock: FakeClock
     latency: float = 0.0
     fail_first_url_batch: bool = False
+    #: When set, every Nth ``/ws/2/release-group`` request (1-indexed) gets a 503
+    #: instead of a real response: MusicBrainz's own documented transient load
+    #: shedding, repeated across the run (issue #54).
+    fail_every_nth_release: int | None = None
     requests: list[tuple[float, str]] = field(default_factory=list)
     status_codes: list[int] = field(default_factory=list)
+    _release_calls: int = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         assert request.url.host == "musicbrainz.org"
@@ -146,6 +151,12 @@ class MusicBrainzServer:
             ]
             return httpx.Response(200, json={"url-count": len(urls), "url-offset": 0, "urls": urls})
         if path == "/ws/2/release-group":
+            self._release_calls += 1
+            if (
+                self.fail_every_nth_release is not None
+                and self._release_calls % self.fail_every_nth_release == 0
+            ):
+                return httpx.Response(503, headers={"retry-after": "2"})
             live = load_live_release_group_search()
             return httpx.Response(200, json={**live, "count": 0, "release-groups": []})
         if path.startswith("/ws/2/artist/"):
@@ -290,6 +301,81 @@ def test_releases_refresh_of_fifty_artists_with_a_mapping_503_finishes_at_one_re
         stored = catalog.get_source_limit("musicbrainz")
     assert stored is not None
     assert stored.window_calls == 1
+
+
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_releases_refresh_of_fifty_artists_survives_repeated_musicbrainz_503s(
+    entry: str, clock: FakeClock, tmp_path: Path
+) -> None:
+    """AC (issue #54): a fake MusicBrainz transport that 503s on every 7th release-group
+    request across a 50-artist watchlist still finishes every artist inside the refresh
+    deadline with ``status: succeeded``. ``limit_pauses`` reflects every pause (more than
+    Spotify's shared two-pause budget would ever allow), and no two MusicBrainz requests
+    land closer together than 1 second."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path)
+    server = MusicBrainzServer(clock, fail_every_nth_release=7)
+    started = clock.value
+
+    payload = _run_refresh(
+        entry, "releases", catalog_path, lambda: httpx.MockTransport(server.handle)
+    )
+
+    elapsed = clock.value - started
+    assert payload["status"] == "succeeded"
+    assert elapsed < DEADLINE
+    successful_discovery = [
+        at
+        for (at, path), status in zip(server.requests, server.status_codes)
+        if path == "/ws/2/release-group" and status == 200
+    ]
+    assert len(successful_discovery) == ARTIST_COUNT
+    pause_count = server.status_codes.count(503)
+    # 50 artists / every 7th call: more pauses than Spotify's shared _MAX_LIMIT_PAUSES (2)
+    # would ever tolerate, proving MusicBrainz's pause budget is no longer shared with it.
+    assert pause_count > 2
+    metrics = _metrics(payload)
+    assert metrics["limit_pauses"] == pause_count
+    times = [at for at, _path in server.requests]
+    assert all(gap >= 1.0 - 1e-6 for gap in _gaps(times))
+    with Catalog.open(catalog_path) as catalog:
+        for index in range(ARTIST_COUNT):
+            assert catalog.get_release_check_cursor("musicbrainz", f"artist-{index}") is not None
+
+
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_musicbrainz_mapping_and_discovery_share_one_pacing_state(
+    entry: str, clock: FakeClock, tmp_path: Path
+) -> None:
+    """AC (issue #54): mapping (the ``/ws/2/url`` batch) and discovery (per-artist
+    ``/ws/2/release-group`` calls) run through exactly one ``_PacedSource`` per refresh,
+    so their requests share one pacing state and clock. Inter-request spacing stays at
+    or above 1 s across both phases, and only one MusicBrainz ``_PacedSource`` is ever
+    constructed for the run."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path)
+    server = MusicBrainzServer(clock)
+    created: list[refresh_module._PacedSource] = []
+    real_init = refresh_module._PacedSource.__init__
+
+    def _tracking_init(self: refresh_module._PacedSource, *args: object, **kwargs: object) -> None:
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+        if kwargs.get("source_name") == "musicbrainz":
+            created.append(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(refresh_module._PacedSource, "__init__", _tracking_init)
+        payload = _run_refresh(
+            entry, "releases", catalog_path, lambda: httpx.MockTransport(server.handle)
+        )
+
+    assert payload["status"] == "succeeded"
+    assert len(created) == 1
+    mapping_calls = [at for at, path in server.requests if path == "/ws/2/url"]
+    discovery_calls = [at for at, path in server.requests if path == "/ws/2/release-group"]
+    assert mapping_calls and discovery_calls
+    times = [at for at, _path in server.requests]
+    assert all(gap >= 1.0 - 1e-6 for gap in _gaps(times))
 
 
 @pytest.mark.parametrize("entry", ENTRY_POINTS)
