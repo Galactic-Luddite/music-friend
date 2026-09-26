@@ -115,6 +115,61 @@ def _normalize_for_match(text: str) -> str:
     return _MATCH_WHITESPACE.sub(" ", despunctuated).strip()
 
 
+_SINGLE_SUFFIX = re.compile(r"^(?P<base>.+?)\s*-\s*single\Z")
+_FEAT_CREDIT = re.compile(r"^(?P<base>.+?)\s*\(feat\.?\s+[^()]*\)\Z")
+_REMIX_QUALIFIER = re.compile(r"^(?P<base>.+?)\s*\((?P<remixer>[^()]*?)\s*remix\)\Z")
+
+
+def _release_title_variant_key(normalized_title: str) -> tuple[str, str | None]:
+    """Fold decorations that never distinguish genuinely different releases (issue #50).
+
+    Returns ``(base_title, remixer)``. ``remixer`` is ``None`` when the title carries no
+    remix qualifier, the empty string when it carries a *bare* ``(Remix)`` qualifier (a
+    wildcard -- see ``_release_title_variants_compatible``), or the named remixer's text
+    otherwise. A trailing ``- Single`` suffix and a ``(feat. ...)`` credit list are folded
+    away entirely first since they never distinguish one release from another with the
+    same base title; deluxe/anniversary/edition tags are deliberately left untouched so a
+    deluxe edition's key stays distinct from the plain release's key.
+    """
+    folded = normalized_title
+    changed = True
+    while changed:
+        changed = False
+        for pattern in (_SINGLE_SUFFIX, _FEAT_CREDIT):
+            match = pattern.match(folded)
+            if match is not None:
+                folded = match.group("base").strip()
+                changed = True
+    remix_match = _REMIX_QUALIFIER.match(folded)
+    if remix_match is None:
+        return folded, None
+    return remix_match.group("base").strip(), remix_match.group("remixer").strip()
+
+
+def _release_title_variants_compatible(
+    incoming: tuple[str, str | None], stored: tuple[str, str | None]
+) -> bool:
+    """Decide whether two title-variant keys describe the same real-world release.
+
+    Conservative by construction (issue #50): a false merge hides a real release, which
+    is worse than an occasional duplicate. The base title must match exactly. A plain
+    title (no remix qualifier) never matches a remix of it -- an original and its remix
+    stay distinct. Two *named* remix qualifiers must name the same remixer -- different
+    remixers of the same song stay distinct. A bare, unnamed ``(Remix)`` qualifier is a
+    wildcard that matches any specific remixer, which is exactly the cross-source case
+    this exists for: one source names the remixer, the other just says "(Remix)".
+    """
+    incoming_base, incoming_remixer = incoming
+    stored_base, stored_remixer = stored
+    if incoming_base != stored_base:
+        return False
+    if incoming_remixer is None or stored_remixer is None:
+        return incoming_remixer is None and stored_remixer is None
+    if incoming_remixer == "" or stored_remixer == "":
+        return True
+    return incoming_remixer == stored_remixer
+
+
 def _datetime_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
@@ -1844,7 +1899,16 @@ class Catalog:
     def list_release_discoveries_without_current_signal(
         self, *, limit: int
     ) -> tuple[ReleaseDiscovery, ...]:
-        """List oldest releases whose latest discovered version lacks a signal."""
+        """List oldest releases whose latest discovered version lacks a signal.
+
+        Deliberately over-inclusive: ``last_seen_at`` advances on every refresh that
+        re-sees the release, including a no-op run where nothing changed, so this can
+        flag a release that already has a signal -- just not one recorded at this exact
+        ``last_seen_at``. Callers must not assume a listed release truly lacks a signal
+        for its current material; ``_repair_missing_signals`` (issue #50) checks that
+        before recording anything, since the content-only ``material_version`` (also
+        #50) is what makes that check reliable across repeated over-inclusive listings.
+        """
         selected_limit = _bounded_limit(limit)
         rows = (
             self._require_connection()
@@ -1872,18 +1936,45 @@ class Catalog:
     def find_release_discovery_variant(
         self,
         source: str,
-        artist_local_id: str,
+        artist_local_ids: str | tuple[str, ...],
         normalized_title: str,
         release_date: date,
         date_precision: ReleaseDatePrecision | None = None,
     ) -> ReleaseDiscovery | None:
-        """Find an obvious same-artist/title/date release variant without a new candidate.
+        """Find an obvious same-artist-set/title/date release variant without a new candidate.
 
         Source-agnostic (issue #42): a release discovered via one source and
         later discovered again via a different source (e.g. MusicBrainz then
         Deezer) is the same real-world release, so this no longer filters by
         ``discovery.source`` -- the ``source`` argument is accepted for call-site
         compatibility but unused for matching.
+
+        ``artist_local_ids`` accepts either one local id (legacy callers) or a
+        tuple of them. Matching is by set overlap (issue #50): any one shared
+        credited artist between the incoming candidate and the stored release is
+        enough, rather than requiring the exact same *primary* artist -- a
+        cross-source remix pair can arrive with a different lead-artist credit
+        (e.g. two artists on one source, one of them credited alone on the
+        other) while still being the same real-world release.
+
+        Title matching first tries an exact ``normalized_title`` match (fast
+        path, unchanged from #42). Failing that, it falls back to a conservative
+        title-variant key (issue #50) that folds decorations which never
+        distinguish genuinely different releases -- a trailing ``- Single``
+        suffix, a ``(feat. ...)`` credit list, and a *generic* ``(Remix)``
+        qualifier matched against a specific ``(<name> Remix)`` qualifier on the
+        other side -- while leaving deluxe/anniversary tags untouched (a deluxe
+        edition and the original stay distinct) and refusing to fold two
+        *different* named remixers into each other, or a plain title into any
+        remix of it. See ``_release_title_variant_key`` and
+        ``_release_title_variants_compatible``.
+
+        A bare ``(Remix)`` qualifier is a wildcard, so it can be compatible with more
+        than one already-stored, differently-named remix. Merging with an arbitrarily
+        chosen one of them would be exactly the false merge issue #50 exists to avoid,
+        so a variant-key match is only returned when it identifies exactly one
+        candidate real-world release; two or more distinct candidates is ambiguous and
+        returns no match at all (never an arbitrary pick).
 
         Also accepts a stored release date that differs by exactly one day
         (either direction) from ``release_date``, since a day-precision
@@ -1901,10 +1992,13 @@ class Catalog:
         at. The widening applies only when BOTH the incoming candidate and
         the stored release are ``DAY`` precision; when ``date_precision`` is
         omitted (legacy callers) or either side is not ``DAY``, only an exact
-        date match is considered. An exact match is always preferred and
-        returned first when both an exact and a one-day-off match exist.
+        date match is considered. An exact title-and-date match is always
+        preferred over a variant-key or one-day-off match.
         """
         _ = source  # unused: matching is source-agnostic, see docstring
+        artist_ids = (artist_local_ids,) if isinstance(artist_local_ids, str) else artist_local_ids
+        if not artist_ids:
+            return None
         one_day = timedelta(days=1)
         incoming_is_day = date_precision is ReleaseDatePrecision.DAY
         candidate_dates = (
@@ -1912,40 +2006,66 @@ class Catalog:
             if incoming_is_day
             else (release_date,)
         )
-        placeholders = ",".join("?" for _ in candidate_dates)
+        artist_placeholders = ",".join("?" for _ in artist_ids)
+        date_placeholders = ",".join("?" for _ in candidate_dates)
         rows = (
             self._require_connection()
             .execute(
                 f"""
-                SELECT discovery.release_local_id, discovery.source, discovery.provider_native_id,
-                       discovery.normalized_title, discovery.release_date, discovery.material_identity,
+                SELECT DISTINCT discovery.release_local_id, discovery.source,
+                       discovery.provider_native_id, discovery.normalized_title,
+                       discovery.release_date, discovery.material_identity,
                        discovery.first_seen_at, discovery.last_seen_at, release.date_precision
                 FROM release_discoveries AS discovery
                 JOIN release_artists AS artist ON artist.release_id = discovery.release_local_id
                 JOIN releases AS release ON release.local_id = discovery.release_local_id
-                WHERE artist.artist_id = ?
-                  AND discovery.normalized_title = ?
-                  AND discovery.release_date IN ({placeholders})
+                WHERE artist.artist_id IN ({artist_placeholders})
+                  AND discovery.release_date IN ({date_placeholders})
                 ORDER BY
                     CASE WHEN discovery.release_date = ? THEN 0 ELSE 1 END,
                     discovery.release_local_id
                 """,
                 (
-                    artist_local_id,
-                    normalized_title,
+                    *artist_ids,
                     *(candidate.isoformat() for candidate in candidate_dates),
                     release_date.isoformat(),
                 ),
             )
             .fetchall()
         )
+        exact_title_match: tuple[object, ...] | None = None
+        variant_matches: dict[str, tuple[object, ...]] = {}
+        incoming_variant_key = _release_title_variant_key(normalized_title)
         for row in rows:
             stored_date = date.fromisoformat(str(row[4]))
-            if stored_date == release_date:
-                return self._release_discovery_from_row(row[:8])
             stored_is_day = ReleaseDatePrecision(str(row[8])) is ReleaseDatePrecision.DAY
-            if incoming_is_day and stored_is_day:
-                return self._release_discovery_from_row(row[:8])
+            date_ok = stored_date == release_date or (incoming_is_day and stored_is_day)
+            if not date_ok:
+                continue
+            stored_title = str(row[3])
+            if stored_title == normalized_title:
+                if exact_title_match is None or stored_date == release_date:
+                    exact_title_match = row
+                if stored_date == release_date:
+                    break
+                continue
+            if _release_title_variants_compatible(
+                incoming_variant_key, _release_title_variant_key(stored_title)
+            ):
+                # Keyed by release_local_id (distinct real-world releases), not row
+                # identity, since the same release can appear once per (date,
+                # artist-id) pair matched by the WHERE clause above.
+                variant_matches[str(row[0])] = row
+        if exact_title_match is not None:
+            return self._release_discovery_from_row(exact_title_match[:8])
+        if len(variant_matches) == 1:
+            # Exactly one candidate real-world release matches the conservative
+            # title-variant key: safe to merge. Two or more is ambiguous -- e.g. a
+            # bare "(Remix)" that could equally be either of two differently-named,
+            # already-stored remixes -- and issue #50 requires staying conservative
+            # rather than guessing which one it is, so no match is returned at all.
+            (only_match,) = variant_matches.values()
+            return self._release_discovery_from_row(only_match[:8])
         return None
 
     @staticmethod
@@ -2076,7 +2196,12 @@ class Catalog:
     def list_event_discoveries_without_current_signal(
         self, *, limit: int
     ) -> tuple[EventDiscovery, ...]:
-        """List oldest events whose latest discovered version lacks a signal."""
+        """List oldest events whose latest discovered version lacks a signal.
+
+        See ``list_release_discoveries_without_current_signal`` (issue #50) for why this
+        is deliberately over-inclusive of already-signalled records and why callers must
+        re-check before recording anything.
+        """
         selected_limit = _bounded_limit(limit)
         rows = (
             self._require_connection()
@@ -2273,6 +2398,35 @@ class Catalog:
                 )
                 .fetchall()
             )
+        records: list[Signal] = []
+        for row in rows:
+            signal = self.get_signal(str(row[0]))
+            if signal is None:
+                raise sqlite3.IntegrityError("signal disappeared during list")
+            records.append(signal)
+        return tuple(records)
+
+    def list_signals_for_record(
+        self, kind: SignalKind, record_local_id: str, *, limit: int
+    ) -> tuple[Signal, ...]:
+        """List every signal already recorded for one canonical record (issue #50).
+
+        Used by repair to check whether a record already has a signal for its current
+        content under any historical ``material_version`` format, rather than only the
+        one this run's guessed reason would produce.
+        """
+        selected_limit = _bounded_limit(limit)
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT local_id FROM signals WHERE kind = ? AND record_local_id = ?
+                ORDER BY observed_at DESC, local_id LIMIT ?
+                """,
+                (kind.value, record_local_id, selected_limit),
+            )
+            .fetchall()
+        )
         records: list[Signal] = []
         for row in rows:
             signal = self.get_signal(str(row[0]))

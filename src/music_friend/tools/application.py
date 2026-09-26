@@ -296,6 +296,11 @@ class MusicFriendApplication:
     def list_signals(self, kind: SignalKind | None, *, limit: int) -> tuple[Signal, ...]:
         return self._catalog.list_signals(kind, limit=limit)
 
+    def list_signals_for_record(
+        self, kind: SignalKind, record_local_id: str, *, limit: int
+    ) -> tuple[Signal, ...]:
+        return self._catalog.list_signals_for_record(kind, record_local_id, limit=limit)
+
     def list_signals_without_inbox_entries(self, *, limit: int) -> tuple[Signal, ...]:
         return self._catalog.list_signals_without_inbox_entries(limit=limit)
 

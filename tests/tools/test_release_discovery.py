@@ -693,3 +693,399 @@ def test_cross_source_dedupe_different_titles_never_match_even_with_identical_da
         assert deezer_release is not None
         assert len(mb_release.source_refs) == 1
         assert len(deezer_release.source_refs) == 1
+
+
+def _single_source_artist(source: str, native_id: str, name: str | None = None) -> Artist:
+    return Artist(
+        f"artist:{native_id}",
+        name or native_id,
+        (SourceReference(source, native_id, None, NOW),),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+
+
+def test_cross_source_remix_variant_with_partial_artist_overlap_merges_to_one_release(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #50): a remix-suffix title variant plus partially overlapping artist
+    credits, same day-precision date, yields one release with two source references.
+
+    Spotify discovers "Song Y (Remix)" credited to Artist A (watched) and Artist B (a
+    known but unwatched credit -- not every collaborator on a release is monitored).
+    MusicBrainz later discovers the same real-world remix as "Song Y (Artist A Remix)"
+    credited to Artist A alone. The titles differ (bare "(Remix)" vs a named
+    "(Artist A Remix)") and the credited-artist sets only partially overlap (both
+    include A, only Spotify's also lists B), which the pre-#50 exact-title/single-artist
+    lookup could not match.
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist_a = Artist(
+            "artist:a",
+            "Artist A",
+            (
+                SourceReference("spotify", "artist-a", None, NOW),
+                SourceReference("musicbrainz", "artist-a-mb", None, NOW),
+            ),
+            IdentityConfidence.EXTERNAL_ID,
+            NOW,
+        )
+        artist_b = _single_source_artist("spotify", "artist-b", "Artist B")
+        _watch(application, artist_a)
+        application.put_artist(artist_b)
+
+        spotify_source = FakeReleaseSource()
+        spotify_source.pages[("artist-a", None)] = Page(
+            (
+                Release(
+                    "release:spotify:song-y-remix",
+                    "Song Y (Remix)",
+                    "single",
+                    date(2026, 8, 1),
+                    ReleaseDatePrecision.DAY,
+                    (artist_a.local_id, artist_b.local_id),
+                    (
+                        SourceReference(
+                            "spotify",
+                            "song-y-remix",
+                            "https://example.test/spotify/song-y-remix",
+                            NOW,
+                        ),
+                    ),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        first = application.discover_releases("spotify", spotify_source, checked_at=NOW)
+        assert len(first.artists[0].candidates) == 1
+        assert first.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("artist-a-mb", None)] = Page(
+            (
+                Release(
+                    "release:musicbrainz:song-y-remix",
+                    "Song Y (Artist A Remix)",
+                    "single",
+                    date(2026, 8, 1),
+                    ReleaseDatePrecision.DAY,
+                    (artist_a.local_id,),
+                    (
+                        SourceReference(
+                            "musicbrainz",
+                            "song-y-remix",
+                            "https://example.test/musicbrainz/song-y-remix",
+                            NOW,
+                        ),
+                    ),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "musicbrainz", mb_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert second.artists[0].candidates == ()
+
+        stored_release = application.get_release("release:spotify:song-y-remix")
+        assert stored_release is not None
+        assert {ref.source for ref in stored_release.source_refs} == {"spotify", "musicbrainz"}
+        assert application.get_release("release:musicbrainz:song-y-remix") is None
+
+
+def test_cross_source_variant_does_not_merge_original_with_a_deluxe_edition(
+    tmp_path: Path,
+) -> None:
+    """Negative test (issue #50): an original release and its deluxe edition stay
+    distinct even though they share credited artists and release date -- the deluxe
+    tag is deliberately never folded out of the title-variant key."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-deluxe", "deezer-deluxe")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-deluxe", None)] = Page(
+            (_cross_source_release("rg-deluxe", "musicbrainz", artist, title="Song X"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-deluxe", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-deluxe", "deezer", artist, title="Song X (Deluxe Edition)"
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-deluxe")
+        deezer_release = application.get_release("release:deezer:al-deluxe")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+def test_cross_source_variant_does_not_merge_two_different_named_remixers(
+    tmp_path: Path,
+) -> None:
+    """Negative test (issue #50): two differently-named remixes of the same song stay
+    distinct even though both credit the same shared artist and date."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-remixer", "deezer-remixer")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-remixer", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-remixer", "musicbrainz", artist, title="Song Y (Artist C Remix)"
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-remixer", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-remixer", "deezer", artist, title="Song Y (Artist D Remix)"
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-remixer")
+        deezer_release = application.get_release("release:deezer:al-remixer")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+def test_cross_source_variant_does_not_merge_same_title_from_unrelated_artists(
+    tmp_path: Path,
+) -> None:
+    """Negative test (issue #50): the same title from two unrelated (non-overlapping)
+    artist credits stays distinct even with the same release date."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist_one = _single_source_artist("musicbrainz", "mb-unrelated-one", "One")
+        artist_two = _single_source_artist("deezer", "deezer-unrelated-two", "Two")
+        _watch(application, artist_one)
+        _watch(application, artist_two)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-unrelated-one", None)] = Page(
+            (_cross_source_release("rg-unrelated", "musicbrainz", artist_one, title="Song X"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-unrelated-two", None)] = Page(
+            (_cross_source_release("al-unrelated", "deezer", artist_two, title="Song X"),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-unrelated")
+        deezer_release = application.get_release("release:deezer:al-unrelated")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+def _three_source_artist(
+    mb_id: str, deezer_id: str, spotify_id: str, name: str = "Artist"
+) -> Artist:
+    return Artist(
+        f"artist:{mb_id}",
+        name,
+        (
+            SourceReference("musicbrainz", mb_id, None, NOW),
+            SourceReference("deezer", deezer_id, None, NOW),
+            SourceReference("spotify", spotify_id, None, NOW),
+        ),
+        IdentityConfidence.EXTERNAL_ID,
+        NOW,
+    )
+
+
+def test_bare_remix_stays_separate_when_two_differently_named_remixes_already_exist(
+    tmp_path: Path,
+) -> None:
+    """Ambiguity regression (issue #50 round 2): a bare "(Remix)" qualifier is a
+    wildcard that could equally match either of two already-stored, differently-named
+    remixes of the same song, same artist set, same date. Picking either one
+    arbitrarily would be exactly the false merge issue #50 exists to avoid, so this
+    must stay a distinct, separate release rather than merging into whichever
+    candidate happened to sort first."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _three_source_artist("mb-ambiguous", "deezer-ambiguous", "spotify-ambiguous")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-ambiguous", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-ambiguous-a", "musicbrainz", artist, title="Song Y (Artist A Remix)"
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-ambiguous", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-ambiguous-b", "deezer", artist, title="Song Y (Artist B Remix)"
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("deezer", deezer_source, checked_at=NOW + timedelta(hours=1))
+
+        spotify_source = FakeReleaseSource()
+        spotify_source.pages[("spotify-ambiguous", None)] = Page(
+            (
+                Release(
+                    "release:spotify:song-y-bare-ambiguous",
+                    "Song Y (Remix)",
+                    "single",
+                    date(2026, 8, 1),
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (
+                        SourceReference(
+                            "spotify",
+                            "song-y-bare-ambiguous",
+                            "https://example.test/spotify/song-y-bare-ambiguous",
+                            NOW,
+                        ),
+                    ),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        third = application.discover_releases(
+            "spotify", spotify_source, checked_at=NOW + timedelta(hours=2)
+        )
+
+        # Ambiguous: stays its own, separate NEW candidate rather than merging with
+        # either of the two differently-named remixes.
+        assert len(third.artists[0].candidates) == 1
+        assert third.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-ambiguous-a")
+        deezer_release = application.get_release("release:deezer:al-ambiguous-b")
+        spotify_release = application.get_release("release:spotify:song-y-bare-ambiguous")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert spotify_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+        assert len(spotify_release.source_refs) == 1
+
+
+def test_bare_remix_merges_when_exactly_one_named_remix_candidate_exists(
+    tmp_path: Path,
+) -> None:
+    """Regression companion (issue #50 round 2): with only ONE already-stored named
+    remix (not two), a bare "(Remix)" is unambiguous and still merges -- the
+    ambiguity fix must not turn the ordinary single-candidate case into a false
+    negative."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-unambiguous", "deezer-unambiguous")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-unambiguous", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-unambiguous", "musicbrainz", artist, title="Song Y (Artist A Remix)"
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-unambiguous", None)] = Page(
+            (_cross_source_release("al-unambiguous", "deezer", artist, title="Song Y (Remix)"),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+
+        assert second.artists[0].candidates == ()
+        stored_release = application.get_release("release:musicbrainz:rg-unambiguous")
+        assert stored_release is not None
+        assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
+        assert application.get_release("release:deezer:al-unambiguous") is None
+
+
+def test_bare_remix_never_matches_the_plain_original_title(tmp_path: Path) -> None:
+    """Negative test (issue #50 round 2): a bare "(Remix)" must never match the plain
+    original (no qualifier at all), even with the same artist set and date, and even
+    when it is the only candidate present -- the ambiguity fix's "exactly one
+    candidate" rule must not accidentally start matching the plain original once it is
+    the sole match."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-plain-original", "deezer-plain-original")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-plain-original", None)] = Page(
+            (_cross_source_release("rg-plain-original", "musicbrainz", artist, title="Song Y"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-plain-original", None)] = Page(
+            (_cross_source_release("al-plain-original", "deezer", artist, title="Song Y (Remix)"),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-plain-original")
+        deezer_release = application.get_release("release:deezer:al-plain-original")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1

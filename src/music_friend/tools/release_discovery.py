@@ -242,7 +242,7 @@ def _persist_artist_releases(
             if existing is None:
                 existing = catalog.find_release_discovery_variant(
                     source_name,
-                    artist_local_id,
+                    _candidate_artist_local_ids(release, artist_local_id),
                     normalized_title,
                     release.release_date,
                     release.date_precision,
@@ -369,6 +369,20 @@ def _for_persistence(catalog: Catalog, release: Release, artist_local_id: str) -
         release.source_refs,
         release.observed_at,
     )
+
+
+def _candidate_artist_local_ids(release: Release, artist_local_id: str) -> tuple[str, ...]:
+    """Any artist credited on the incoming release, for set-overlap variant matching (#50).
+
+    Always includes the currently-monitored ``artist_local_id`` (the artist this discovery
+    pass is running for) plus every other artist already resolved to a local id on the
+    release itself, deduplicated and order-stable. An id that is not yet a known artist is
+    harmless to include: it simply matches no row in ``release_artists``.
+    """
+    seen: dict[str, None] = {artist_local_id: None}
+    for artist_id in release.artist_refs:
+        seen.setdefault(artist_id, None)
+    return tuple(seen)
 
 
 def _normalized_title(title: str) -> str:

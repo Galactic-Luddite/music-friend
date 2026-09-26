@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- Fixed duplicate inbox items for the same real-world release: a release re-seen by the same
+  source on a later refresh no longer creates a second signal/inbox item (the missing-signal
+  repair pass could mis-detect an already-signalled, unchanged release as missing its signal and
+  re-record it under a different explanation, defeating dedup). Cross-source release matching now
+  compares the full set of credited artists (any shared artist is enough, not only an exact
+  primary-artist match) and folds conservative title decorations -- a trailing `- Single` suffix,
+  a `(feat. ...)` credit list, and a generic `(Remix)` qualifier matched against a specific named
+  `(<artist> Remix)` on the other side -- so a remix pair with a slightly different title and
+  partially overlapping credits merges into one release with two source references. A deluxe or
+  anniversary edition, two differently-named remixes, and the same title from unrelated artists
+  still stay distinct. A generic `(Remix)` qualifier that could equally match two or more already-
+  stored, differently-named remixes is ambiguous and is never merged with an arbitrarily chosen
+  one; it stays its own separate release instead. Upgrading a real catalog's existing signals
+  (written before this fix, in the older `material_version` format) is safe: the repair pass
+  recognizes those older signals as already covering a release's current content and does not
+  re-record them as duplicates, and never touches their existing inbox state.
 - MusicBrainz release refreshes run at MusicBrainz's documented steady one request per second
   instead of the Spotify-tuned adaptive window: a `503` during identity mapping no longer ratchets
   the run down to one request per 30 seconds, and a limit stored by an earlier version no longer
