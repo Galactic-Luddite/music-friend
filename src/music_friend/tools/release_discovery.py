@@ -231,6 +231,7 @@ def _persist_artist_releases(
                     artist_local_id,
                     normalized_title,
                     release.release_date,
+                    release.date_precision,
                 )
                 if existing is not None:
                     # Cross-source match (issue #42): attach this source's

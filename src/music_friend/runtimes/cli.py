@@ -37,6 +37,8 @@ from music_friend.domain import (
 )
 from music_friend.providers import Capability, MusicSource
 from music_friend.providers.credentials import CredentialStore
+from music_friend.providers.deezer.source import DeezerSource
+from music_friend.providers.deezer.transport import DeezerTransport
 from music_friend.providers.keyring_store import KeyringCredentialStore
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
@@ -188,6 +190,21 @@ def _musicbrainz_source(
         yield source
     finally:
         source.close()
+
+
+@contextmanager
+def _deezer_source(*, connector_factory: ConnectorFactory, now: Clock) -> Iterator[MusicSource]:
+    """Deezer is keyless like MusicBrainz: same injectable connector, no credential store.
+
+    Deezer artist ids come only from the MusicBrainz url-rels batch (issue #42);
+    this source never resolves an artist by name.
+    """
+    transport = DeezerTransport(connector=connector_factory())
+    source = DeezerSource(transport=transport, clock=now)
+    try:
+        yield source
+    finally:
+        transport.close()
 
 
 @contextmanager
@@ -875,10 +892,11 @@ def _refresh(
         return refresh_runner(kind)
     checked_at = _checked_at(now)
     lock_path = Path(user_data_path("music-friend", appauthor=False)) / "refresh.lock"
-    release_source_name = config.release_source or "musicbrainz"
+    release_sources = config.release_sources or DEFAULT_RELEASE_SOURCES
+    release_source_name = release_sources[0]
     needs_catalog = kind in ("catalog", "all")
     needs_releases = kind in ("releases", "all")
-    needs_spotify_source = needs_catalog or (needs_releases and release_source_name == "spotify")
+    needs_spotify_source = needs_catalog or (needs_releases and "spotify" in release_sources)
     with _ticketmaster_client(
         connector_factory=connector_factory,
         credential_store_factory=credential_store_factory,
@@ -909,18 +927,36 @@ def _refresh(
                     )
                 )
             release_source: MusicSource | None = None
+            additional_release_sources: list[tuple[str, MusicSource]] = []
             if needs_releases:
-                if release_source_name == "spotify":
-                    # Same source, same name: refresh_once shares one paced wrapper.
-                    release_source = source
-                else:
-                    # A musicbrainz-only or "all" refresh never needs a Spotify
-                    # token session just for release discovery: identity mapping
-                    # reads Spotify URLs already stored in the local catalog, it
-                    # never calls Spotify live.
-                    release_source = stack.enter_context(
-                        _musicbrainz_source(connector_factory=connector_factory, now=now)
-                    )
+                for index, name in enumerate(release_sources):
+                    if name == "spotify":
+                        # Same source, same name: refresh_once shares one paced wrapper
+                        # when spotify is the primary; when spotify is an *additional*
+                        # source it still reuses the one open session (opened above
+                        # because needs_spotify_source is true whenever "spotify" is in
+                        # release_sources), never a second live connection.
+                        built: MusicSource | None = source
+                    elif name == "musicbrainz":
+                        # A musicbrainz-only or "all" refresh never needs a Spotify
+                        # token session just for release discovery: identity mapping
+                        # reads Spotify URLs already stored in the local catalog, it
+                        # never calls Spotify live.
+                        built = stack.enter_context(
+                            _musicbrainz_source(connector_factory=connector_factory, now=now)
+                        )
+                    else:
+                        # Deezer (issue #42): keyless, like MusicBrainz -- artist ids
+                        # come only from the MusicBrainz url-rels batch, never a live
+                        # name search, so no credential store is needed here either.
+                        built = stack.enter_context(
+                            _deezer_source(connector_factory=connector_factory, now=now)
+                        )
+                    if index == 0:
+                        release_source = built
+                    else:
+                        assert built is not None  # spotify's session is opened above
+                        additional_release_sources.append((name, built))
             return refresh_once(
                 application,
                 kind=kind,
@@ -928,6 +964,7 @@ def _refresh(
                 source=source,
                 release_source=release_source,
                 release_source_name=release_source_name if needs_releases else None,
+                additional_release_sources=additional_release_sources if needs_releases else None,
                 config=config,
                 event_client=event_client,
                 checked_at=checked_at,

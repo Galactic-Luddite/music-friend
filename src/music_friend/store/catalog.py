@@ -1875,6 +1875,7 @@ class Catalog:
         artist_local_id: str,
         normalized_title: str,
         release_date: date,
+        date_precision: ReleaseDatePrecision | None = None,
     ) -> ReleaseDiscovery | None:
         """Find an obvious same-artist/title/date release variant without a new candidate.
 
@@ -1882,31 +1883,49 @@ class Catalog:
         later discovered again via a different source (e.g. MusicBrainz then
         Deezer) is the same real-world release, so this no longer filters by
         ``discovery.source`` -- the ``source`` argument is accepted for call-site
-        compatibility but unused for matching. Also accepts a release date that
-        differs by exactly one day (either direction) from ``release_date``,
-        since a day-precision discrepancy between two independently-edited
-        catalogs is exactly the kind of variant this lookup exists to catch;
-        an exact match is preferred and returned first when both exist.
+        compatibility but unused for matching.
+
+        Also accepts a stored release date that differs by exactly one day
+        (either direction) from ``release_date``, since a day-precision
+        discrepancy between two independently-edited catalogs is exactly the
+        kind of variant this lookup exists to catch -- but per the design doc,
+        only "when either side has day precision": a year- or month-precision
+        date is normalized to that period's first day, so a naive one-day
+        widening against it would spuriously match an unrelated day-precision
+        release landing on the 2nd of the same period. ``date_precision`` is
+        the incoming candidate's precision; the stored side's precision is
+        read from the ``releases`` table it points at. The widening applies
+        only when at least one of the two is ``DAY``; when ``date_precision``
+        is omitted (legacy callers), the exact-date-only behavior from before
+        this widening was added is preserved. An exact match is always
+        preferred and returned first when both an exact and a one-day-off
+        match exist.
         """
         _ = source  # unused: matching is source-agnostic, see docstring
         one_day = timedelta(days=1)
-        candidate_dates = (release_date, release_date - one_day, release_date + one_day)
-        row = (
+        incoming_is_day = date_precision is ReleaseDatePrecision.DAY
+        candidate_dates = (
+            (release_date, release_date - one_day, release_date + one_day)
+            if date_precision is None or incoming_is_day
+            else (release_date,)
+        )
+        placeholders = ",".join("?" for _ in candidate_dates)
+        rows = (
             self._require_connection()
             .execute(
-                """
+                f"""
                 SELECT discovery.release_local_id, discovery.source, discovery.provider_native_id,
                        discovery.normalized_title, discovery.release_date, discovery.material_identity,
-                       discovery.first_seen_at, discovery.last_seen_at
+                       discovery.first_seen_at, discovery.last_seen_at, release.date_precision
                 FROM release_discoveries AS discovery
                 JOIN release_artists AS artist ON artist.release_id = discovery.release_local_id
+                JOIN releases AS release ON release.local_id = discovery.release_local_id
                 WHERE artist.artist_id = ?
                   AND discovery.normalized_title = ?
-                  AND discovery.release_date IN (?, ?, ?)
+                  AND discovery.release_date IN ({placeholders})
                 ORDER BY
                     CASE WHEN discovery.release_date = ? THEN 0 ELSE 1 END,
                     discovery.release_local_id
-                LIMIT 1
                 """,
                 (
                     artist_local_id,
@@ -1915,9 +1934,16 @@ class Catalog:
                     release_date.isoformat(),
                 ),
             )
-            .fetchone()
+            .fetchall()
         )
-        return None if row is None else self._release_discovery_from_row(row)
+        for row in rows:
+            stored_date = date.fromisoformat(str(row[4]))
+            if stored_date == release_date:
+                return self._release_discovery_from_row(row[:8])
+            stored_is_day = ReleaseDatePrecision(str(row[8])) is ReleaseDatePrecision.DAY
+            if date_precision is None or incoming_is_day or stored_is_day:
+                return self._release_discovery_from_row(row[:8])
+        return None
 
     @staticmethod
     def _release_discovery_from_row(row: tuple[object, ...]) -> ReleaseDiscovery:

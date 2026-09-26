@@ -48,6 +48,13 @@ def test_http_429_maps_to_rate_limited() -> None:
     transport.close()
 
 
+def test_http_503_maps_to_rate_limited() -> None:
+    transport = DeezerTransport(connector=_handler({}, status_code=503))
+    with pytest.raises(RateLimitedError):
+        transport.get("artist/27/albums")
+    transport.close()
+
+
 def test_http_500_maps_to_source_unavailable() -> None:
     transport = DeezerTransport(connector=_handler({}, status_code=500))
     with pytest.raises(SourceUnavailableError):

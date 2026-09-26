@@ -465,6 +465,115 @@ def test_mcp_refresh_releases_uses_musicbrainz_and_never_opens_a_spotify_source(
     assert musicbrainz_calls
 
 
+def test_mcp_refresh_releases_calls_musicbrainz_and_deezer_but_never_spotify(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AC (issue #42): the MCP refresh_music path actually reaches BOTH
+    musicbrainz and deezer hosts when release_sources=("musicbrainz", "deezer"),
+    and never opens a Spotify token session, driven through
+    mcp_stdio.run_catalog_stdio_session's own refresh() closure."""
+    import httpx
+
+    from music_friend.domain import (
+        Artist,
+        IdentityConfidence,
+        SourceReference,
+        WatchlistAction,
+        WatchlistOverride,
+    )
+    from music_friend.store import Catalog
+    from music_friend.tools import MusicFriendApplication
+
+    NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    synthetic_mbid = "22222222-2222-2222-2222-222222222222"
+    synthetic_deezer_artist_id = "424242"
+    seed_application = MusicFriendApplication(Catalog.open(catalog_path))
+    seed_application.put_artist(
+        Artist(
+            "artist-1",
+            "Artist One",
+            (
+                SourceReference("spotify", "artist-native", None, NOW),
+                SourceReference("musicbrainz", synthetic_mbid, None, NOW),
+            ),
+            IdentityConfidence.SOURCE_ONLY,
+            NOW,
+        )
+    )
+    seed_application.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.ADD, NOW))
+    seed_application.close()
+
+    musicbrainz_calls: list[httpx.Request] = []
+    deezer_calls: list[httpx.Request] = []
+
+    def _dispatch(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "musicbrainz.org":
+            musicbrainz_calls.append(request)
+            if request.url.path == "/ws/2/release-group":
+                return httpx.Response(200, json={"release-groups": []})
+            return httpx.Response(
+                200,
+                json={
+                    "relations": [
+                        {
+                            "type": "free streaming",
+                            "url": {
+                                "resource": (
+                                    f"https://www.deezer.com/artist/{synthetic_deezer_artist_id}"
+                                )
+                            },
+                        }
+                    ]
+                },
+            )
+        if request.url.host == "api.deezer.com":
+            deezer_calls.append(request)
+            return httpx.Response(200, json={"data": [], "total": 0})
+        raise AssertionError(f"unexpected host: {request.url.host}")
+
+    def connector_factory() -> httpx.BaseTransport:
+        return httpx.MockTransport(_dispatch)
+
+    @contextmanager
+    def _refuse_spotify_source(**kwargs: object):  # type: ignore[no-untyped-def]
+        raise AssertionError("spotify must not be opened when it is not a configured source")
+        yield  # pragma: no cover
+
+    refresh_results: list[object] = []
+
+    def create_server(actual_application: object, *, refresh: Callable[[str], object]) -> _Server:
+        refresh_results.append(refresh("releases"))
+        return _Server()
+
+    class _EventStore:
+        def save(self, _key: object, _value: str) -> None:
+            raise AssertionError("unused")
+
+        def load(self, _key: object) -> str | None:
+            return None
+
+        def delete(self, _key: object) -> None:
+            raise AssertionError("unused")
+
+    monkeypatch.setattr(mcp_stdio, "spotify_source", _refuse_spotify_source)
+    monkeypatch.setattr(mcp_stdio, "create_music_server", create_server)
+
+    mcp_stdio.run_catalog_stdio_session(
+        config=mcp_stdio.LocalConfig(release_sources=("musicbrainz", "deezer")),
+        catalog_path=catalog_path,
+        connector_factory=connector_factory,
+        credential_store_factory=lambda: _EventStore(),  # type: ignore[arg-type]
+    )
+
+    assert len(refresh_results) == 1
+    result = refresh_results[0]
+    assert result.run is not None  # type: ignore[union-attr]
+    assert result.run.status.value == "succeeded"  # type: ignore[union-attr]
+    assert musicbrainz_calls
+    assert deezer_calls
+
+
 def test_catalog_stdio_session_starts_without_an_available_native_credential_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

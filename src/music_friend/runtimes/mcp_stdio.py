@@ -14,11 +14,13 @@ from mcp.server.mcpserver import MCPServer
 from platformdirs import user_data_path
 
 from music_friend import __version__
-from music_friend.configuration import LocalConfig, LocalConfigStore
+from music_friend.configuration import DEFAULT_RELEASE_SOURCES, LocalConfig, LocalConfigStore
 from music_friend.mcp import create_music_server
 from music_friend.mcp.read_server import create_read_server
 from music_friend.providers import MusicSource
 from music_friend.providers.credentials import CredentialKey, CredentialStore, CredentialStoreError
+from music_friend.providers.deezer.source import DeezerSource
+from music_friend.providers.deezer.transport import DeezerTransport
 from music_friend.providers.keyring_store import KeyringCredentialStore
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
@@ -185,11 +187,12 @@ def run_catalog_stdio_session(
                     force=force,
                     now=_utc_now,
                 )
-            release_source_name = config.release_source or "musicbrainz"
+            release_sources = config.release_sources or DEFAULT_RELEASE_SOURCES
+            release_source_name = release_sources[0]
             needs_catalog = kind in ("catalog", "all")
             needs_releases = kind in ("releases", "all")
             needs_spotify_source = needs_catalog or (
-                needs_releases and release_source_name == "spotify"
+                needs_releases and "spotify" in release_sources
             )
             with ExitStack() as stack:
                 source: MusicSource | None = None
@@ -206,24 +209,37 @@ def run_catalog_stdio_session(
                         )
                     )
                 release_source: MusicSource | None = None
+                additional_release_sources: list[tuple[str, MusicSource]] = []
                 if needs_releases:
-                    if release_source_name == "spotify":
-                        release_source = source
-                    else:
-                        # A musicbrainz-only or "all" refresh never needs a Spotify
-                        # token session just for release discovery: identity
-                        # mapping reads Spotify URLs already stored in the local
-                        # catalog, it never calls Spotify live.
-                        mb_transport = MusicBrainzTransport(
-                            user_agent=(
-                                f"music-friend/{__version__} "
-                                "(https://github.com/Galactic-Luddite/music-friend)"
-                            ),
-                            connector=connector_factory(),
-                        )
-                        mb_source = MusicBrainzSource(transport=mb_transport, clock=_utc_now)
-                        stack.callback(mb_source.close)
-                        release_source = mb_source
+                    for index, name in enumerate(release_sources):
+                        if name == "spotify":
+                            built: MusicSource | None = source
+                        elif name == "musicbrainz":
+                            # A musicbrainz-only or "all" refresh never needs a Spotify
+                            # token session just for release discovery: identity
+                            # mapping reads Spotify URLs already stored in the local
+                            # catalog, it never calls Spotify live.
+                            mb_transport = MusicBrainzTransport(
+                                user_agent=(
+                                    f"music-friend/{__version__} "
+                                    "(https://github.com/Galactic-Luddite/music-friend)"
+                                ),
+                                connector=connector_factory(),
+                            )
+                            mb_source = MusicBrainzSource(transport=mb_transport, clock=_utc_now)
+                            stack.callback(mb_source.close)
+                            built = mb_source
+                        else:
+                            # Deezer (issue #42): keyless, artist ids come only from
+                            # the MusicBrainz url-rels batch, never a live name search.
+                            dz_transport = DeezerTransport(connector=connector_factory())
+                            stack.callback(dz_transport.close)
+                            built = DeezerSource(transport=dz_transport, clock=_utc_now)
+                        if index == 0:
+                            release_source = built
+                        else:
+                            assert built is not None  # spotify's session is opened above
+                            additional_release_sources.append((name, built))
                 return refresh_once(
                     application,
                     kind=kind,
@@ -231,6 +247,9 @@ def run_catalog_stdio_session(
                     source=source,
                     release_source=release_source,
                     release_source_name=release_source_name if needs_releases else None,
+                    additional_release_sources=(
+                        additional_release_sources if needs_releases else None
+                    ),
                     config=config,
                     event_client=event_client,
                     checked_at=_utc_now(),

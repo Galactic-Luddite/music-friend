@@ -19,6 +19,11 @@ error body shaped ``{"error": {"type": "...", "message": "...", "code": N}}`` wi
 ``type`` containing ``quota_exceeded`` mapping to ``RateLimitedError``) follows the
 design doc's documented Deezer error contract rather than an independently observed
 live error response; treat this one mapping as design-doc-sourced, not recon-verified.
+HTTP 429 and 503 both map to ``RateLimitedError``. Neither status was actually
+triggered live in the recon above (60 rapid concurrent requests never produced a
+rate limit); both mappings are defensive/design-doc-sourced, following the
+convention that a rate-limited or momentarily overloaded public API may signal
+exhaustion via either status.
 """
 
 from __future__ import annotations
@@ -90,7 +95,7 @@ class DeezerTransport:
         finally:
             self._request_times.append(self._clock())
 
-        if response.status_code == 429:
+        if response.status_code in (429, 503):
             raise RateLimitedError(retry_after_seconds=_parse_retry_after(response.headers))
 
         if response.status_code != 200:
