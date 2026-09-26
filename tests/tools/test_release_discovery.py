@@ -337,6 +337,35 @@ def test_discover_releases_rejects_a_source_missing_the_provider_contract(tmp_pa
             )
 
 
+def test_discover_releases_counts_watchlisted_artists_unmapped_to_the_source(
+    tmp_path: Path,
+) -> None:
+    """Issue #48: an artist with only a Spotify SourceReference contributes no source
+    request and no ArtistReleaseDiscoveryResult to a musicbrainz release run, but is
+    still counted in ``unmapped`` so a run that mapped nobody is distinguishable from
+    one where every mapped artist genuinely had nothing new."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        unmapped_artist = _artist("unmapped-1")
+        _watch(application, unmapped_artist)
+        mapped_artist = Artist(
+            "artist:mapped-1",
+            "Mapped Artist",
+            (SourceReference("musicbrainz", "mapped-1", None, NOW),),
+            IdentityConfidence.SOURCE_ONLY,
+            NOW,
+        )
+        _watch(application, mapped_artist)
+        source = FakeReleaseSource()
+        source.pages[("mapped-1", None)] = Page((), None)
+
+        result = application.discover_releases("musicbrainz", source, checked_at=NOW)
+
+        assert result.unmapped == 1
+        assert [artist.artist_local_id for artist in result.artists] == [mapped_artist.local_id]
+        assert source.calls == [("mapped-1", NOW - timedelta(days=30), None)]
+
+
 def test_discover_releases_treats_a_malformed_release_page_as_an_artist_failure(
     tmp_path: Path,
 ) -> None:

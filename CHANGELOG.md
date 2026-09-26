@@ -20,6 +20,10 @@
   MusicBrainz identity-mapping requests, additional release sources, and Ticketmaster; signals
   repaired for an earlier interrupted run are reported as `signals_repaired` instead of being
   folded into `signals_created`.
+- Added a `release_source_unmapped` metric: the count of watchlisted artists a release refresh
+  skipped this run for lack of a `SourceReference` on the release source being run. Surfaced in
+  the `refresh_music` result and in `music_status.latest_refresh.metrics`, so a run that mapped
+  nobody no longer reports a silent `succeeded` with no signal.
 
 - Added MusicBrainz as the default release source; use `--release-sources` to configure it.
 - `release_source` is now `release_sources`, an ordered tuple of `spotify`, `musicbrainz`, and/or

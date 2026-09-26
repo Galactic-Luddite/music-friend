@@ -10,7 +10,8 @@ import pytest
 
 from music_friend.configuration import LocalConfig
 from music_friend.domain.models import RefreshKind, RefreshStatus
-from music_friend.tools import refresh
+from music_friend.store import Catalog
+from music_friend.tools import MusicFriendApplication, refresh
 
 NOW = datetime(2026, 9, 2, tzinfo=timezone.utc)
 
@@ -119,3 +120,26 @@ def test_refresh_lock_release_ignores_wrong_type_missing_and_changed_token(tmp_p
     path.write_text('{"created_at":1,"token":"changed"}', encoding="utf-8")
     refresh._release_lock(lease)
     assert path.exists()
+
+
+@pytest.mark.parametrize("kind", ("catalog", "all"))
+def test_refresh_once_rejects_a_missing_source_for_catalog_and_all(
+    kind: str, tmp_path: Path
+) -> None:
+    """Issue #48: ``source=None`` must be rejected for every kind that runs the catalog
+    component before the lock is acquired or any provider is touched, not only for
+    ``releases`` (already covered elsewhere)."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        with pytest.raises(ValueError, match="source is required for catalog refresh"):
+            refresh.refresh_once(
+                application,
+                kind=kind,
+                source_name="spotify",
+                source=None,
+                config=LocalConfig(),
+                event_client=None,
+                checked_at=NOW,
+                lock_path=tmp_path / "lock",
+            )
+        assert not (tmp_path / "lock").exists()

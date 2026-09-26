@@ -90,6 +90,7 @@ class RefreshMetricKind(str, Enum):
     CATALOG_SKIPPED_FRESH = "catalog_skipped_fresh"
     LIMIT_PAUSES = "limit_pauses"
     SOURCE_REQUESTS = "source_requests"
+    RELEASE_SOURCE_UNMAPPED = "release_source_unmapped"
 
 
 class SyncCapabilityStatus(str, Enum):
@@ -874,6 +875,12 @@ class ArtistReleaseDiscoveryResult:
 @dataclass(frozen=True, slots=True)
 class ReleaseDiscoveryResult:
     artists: tuple[ArtistReleaseDiscoveryResult, ...]
+    #: Watchlisted artists skipped this run because they carry no SourceReference for
+    #: the release source being run (identity mapping has not resolved them yet, or
+    #: never will for a source-neutral watchlist entry). Not counted in ``artists``:
+    #: they contribute no ``ArtistReleaseDiscoveryResult`` because no source request
+    #: was made for them.
+    unmapped: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.artists, tuple) or not all(
@@ -883,6 +890,7 @@ class ReleaseDiscoveryResult:
         artist_ids = tuple(result.artist_local_id for result in self.artists)
         if len(set(artist_ids)) != len(artist_ids):
             raise ValueError("artist discovery results must be unique")
+        _require_nonnegative_int(self.unmapped, "unmapped")
 
 
 @dataclass(frozen=True, slots=True)

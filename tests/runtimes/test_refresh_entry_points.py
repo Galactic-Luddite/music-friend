@@ -41,7 +41,10 @@ from music_friend.runtimes import cli, mcp_stdio
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools import refresh as refresh_module
-from tests.providers.musicbrainz.live_fixtures import load_live_release_group_search
+from tests.providers.musicbrainz.live_fixtures import (
+    LIVE_SEARCH_ARTIST_MBID,
+    load_live_release_group_search,
+)
 
 NOW = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
 ARTIST_COUNT = 50
@@ -438,3 +441,135 @@ def test_events_refresh_counts_every_ticketmaster_request_and_reports_repairs_se
     assert metrics["source_requests"] == artist_count
     assert metrics["signals_repaired"] == 1
     assert "signals_created" not in metrics
+
+
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_map_then_discover_within_one_refresh_adds_the_reference_and_one_inbox_item(
+    entry: str, clock: FakeClock, tmp_path: Path
+) -> None:
+    """Issue #48 AC1: starting from a watchlisted artist with only a Spotify
+    SourceReference, a single releases refresh maps it to musicbrainz via /ws/2/url
+    and then discovers its releases via /ws/2/release-group, in that order, adding the
+    musicbrainz reference and creating exactly one inbox item."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    live = load_live_release_group_search()
+    one_release_group = live["release-groups"][:1]
+    request_log: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "musicbrainz.org"
+        path = request.url.path
+        request_log.append(path)
+        if path == "/ws/2/url":
+            resources = request.url.params.get_list("resource")
+            assert resources == [_spotify_url(0)]
+            # The recorded release-group fixture's artist-credit is the "Various
+            # Artists" MBID it was actually queried for, so the mapping must resolve
+            # this artist to that same MBID for normalize_release_group to attach it.
+            urls = [
+                {
+                    "resource": resources[0],
+                    "relations": [{"artist": {"id": LIVE_SEARCH_ARTIST_MBID}}],
+                }
+            ]
+            return httpx.Response(200, json={"url-count": 1, "url-offset": 0, "urls": urls})
+        if path == "/ws/2/release-group":
+            return httpx.Response(
+                200,
+                json={
+                    **live,
+                    "count": len(one_release_group),
+                    "release-groups": one_release_group,
+                },
+            )
+        raise AssertionError(f"unexpected MusicBrainz path: {path}")
+
+    payload = _run_refresh(entry, "releases", catalog_path, lambda: httpx.MockTransport(handle))
+
+    assert payload["status"] == "succeeded"
+    assert request_log == ["/ws/2/url", "/ws/2/release-group"]
+    assert _metrics(payload)["signals_created"] == 1
+    with Catalog.open(catalog_path) as catalog:
+        artist = catalog.get_artist("artist-0")
+    assert artist is not None
+    assert any(
+        reference.source == "musicbrainz" and reference.native_id == LIVE_SEARCH_ARTIST_MBID
+        for reference in artist.source_refs
+    )
+
+
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+def test_release_source_unmapped_metric_surfaces_when_mapping_finds_nobody(
+    entry: str, clock: FakeClock, tmp_path: Path
+) -> None:
+    """Issue #48 AC2: a releases refresh in which identity mapping resolved nobody
+    must report a non-zero release_source_unmapped metric -- in the refresh result and
+    in music_status -- rather than a signal-free 'succeeded'."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=2)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "musicbrainz.org"
+        if request.url.path == "/ws/2/url":
+            return httpx.Response(200, json={"url-count": 0, "url-offset": 0, "urls": []})
+        if request.url.path == "/ws/2/artist":
+            # The url-rel batch resolved nobody, so mapping falls back to a name
+            # search per artist; no hits either, so every artist stays unmapped.
+            return httpx.Response(200, json={"artists": []})
+        raise AssertionError(f"unexpected MusicBrainz path: {request.url.path}")
+
+    payload = _run_refresh(entry, "releases", catalog_path, lambda: httpx.MockTransport(handle))
+
+    assert payload["status"] == "succeeded"
+    assert _metrics(payload)["release_source_unmapped"] == 2
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        latest = application.list_refresh_runs(limit=1)
+    finally:
+        application.close()
+    assert len(latest) == 1
+    status_metrics = {metric.kind.value: metric.count for metric in latest[0].summary.metrics}
+    assert status_metrics["release_source_unmapped"] == 2
+
+
+def test_refresh_all_through_cli_still_opens_the_catalog_source(
+    clock: FakeClock, tmp_path: Path
+) -> None:
+    """Issue #48 AC2 regression: a 'refresh all' through cli.run_cli must still build
+    and pass a real catalog source into refresh_once -- not silently fall back to
+    ``source=None``, which refresh_once now rejects for any kind that runs the
+    catalog component."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    connector_calls = 0
+
+    def factory() -> httpx.BaseTransport:
+        nonlocal connector_calls
+        connector_calls += 1
+        return httpx.MockTransport(lambda _request: httpx.Response(401, json={}))
+
+    config = LocalConfig(spotify_client_id="synthetic-client-id")
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        cli.run_cli(
+            ["refresh", "all", "--json"],
+            stdout=stdout,
+            stderr=stderr,
+            application=application,
+            config_store=_ConfigStore(config),
+            secret_prompt=lambda _message: "",
+            now=lambda: NOW,
+            connector_factory=factory,
+            credential_store_factory=lambda: _NoTicketmasterKey(),
+        )
+    finally:
+        application.close()
+
+    payload = json.loads(stdout.getvalue())
+    assert payload["kind"] == "all"
+    # The connector factory was actually invoked to build the catalog source's
+    # transport; refresh_once would have raised "source is required for catalog
+    # refresh" before any of this if the CLI had passed source=None instead.
+    assert connector_calls >= 1

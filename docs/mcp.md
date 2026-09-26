@@ -75,6 +75,13 @@ counts signals rebuilt for an earlier interrupted run, separately from `signals_
 first, or read `retry_after` from a prior `partial` result, before starting another refresh during
 a cooldown -- see [adaptive request pacing](operations.md#adaptive-request-pacing).
 
+`refresh_music` with `kind: "releases"` or `"all"` skips a watchlisted artist entirely, making no
+source request for it, when that artist carries no `SourceReference` yet for the release source
+being run (for example, an artist added from Spotify before MusicBrainz identity mapping resolved
+it). The result's metrics include `release_source_unmapped`, the count of artists skipped this run
+for that reason, so a run that mapped nobody still reports a signal instead of a silent
+`succeeded` with nothing to show; `music_status` reports the same count from the latest run.
+
 `refresh_music` with `kind: "catalog"` or `"all"` skips a catalog capability (followed artists,
 saved items, each top-items time range) that completed successfully within the freshness window --
 see [catalog freshness](operations.md#inspect-and-refresh) -- making zero source requests for it

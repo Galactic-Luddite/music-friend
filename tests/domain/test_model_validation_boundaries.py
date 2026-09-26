@@ -244,6 +244,7 @@ def test_release_discovery_records_enforce_relationships_and_partial_cursor() ->
             )
             * 2
         ),
+        lambda: ReleaseDiscoveryResult((), -1),
     )
     for action in actions:
         with pytest.raises(ValueError):

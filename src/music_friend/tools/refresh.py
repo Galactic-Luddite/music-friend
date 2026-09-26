@@ -154,6 +154,10 @@ class _RefreshCounts:
     catalog_skipped_fresh: int = 0
     source_requests: int = 0
     limit_pauses: int = 0
+    #: Watchlisted artists skipped this run for lack of a SourceReference for the
+    #: release source being run (issue #48); a run that mapped nobody still reports
+    #: this instead of a silent, signal-free "succeeded".
+    release_source_unmapped: int = 0
     partial: bool = False
     events_skip_reason: str | None = None
     #: Names of additional release sources (see ``additional_release_sources``)
@@ -852,6 +856,7 @@ def _run_releases(
             checked_at,
             counts,
         )
+        counts.release_source_unmapped += interrupted.unmapped
         observed_at = (
             checked_at if source.limit_observation is None else source.limit_observation.observed_at
         )
@@ -870,6 +875,7 @@ def _run_releases(
     except Exception:
         counts.failures += 1
         return
+    counts.release_source_unmapped += result.unmapped
     _count_releases(application, result, checked_at, counts)
     if any(artist.status is ReleaseDiscoveryStatus.FAILED for artist in result.artists):
         return
@@ -1284,6 +1290,7 @@ def _summary(counts: _RefreshCounts) -> RefreshSummary:
         RefreshMetricKind.CATALOG_SKIPPED_FRESH: counts.catalog_skipped_fresh,
         RefreshMetricKind.LIMIT_PAUSES: counts.limit_pauses,
         RefreshMetricKind.SOURCE_REQUESTS: counts.source_requests,
+        RefreshMetricKind.RELEASE_SOURCE_UNMAPPED: counts.release_source_unmapped,
     }
     return RefreshSummary(
         tuple(
