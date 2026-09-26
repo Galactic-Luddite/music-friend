@@ -198,6 +198,23 @@ class _PacedSource:
     ) -> Page[Release]:
         return self._request(lambda: self.source.recent_releases(artist_refs, since, cursor))
 
+    def lookup_artists_by_spotify_urls(self, spotify_urls: Sequence[str]) -> dict[str, str | None]:
+        """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases.
+
+        Identity mapping is not part of the ``MusicSource`` protocol, but the design
+        requires its requests to count toward the same MusicBrainz pacing/cooldown
+        budget as release discovery, so this goes through ``_request`` too.
+        """
+        return self._request(
+            lambda: self.source.lookup_artists_by_spotify_urls(spotify_urls)  # type: ignore[attr-defined]
+        )
+
+    def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
+        """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases."""
+        return self._request(
+            lambda: self.source.search_artist_by_name(name, limit)  # type: ignore[attr-defined]
+        )
+
     def available_observation(self) -> SourceLimitObservation:
         return SourceLimitObservation(
             self.source_name,
@@ -639,22 +656,32 @@ def _run_releases(
     checked_at: datetime,
     counts: _RefreshCounts,
 ) -> None:
-    # Run identity mapping before release discovery if using MusicBrainz. Per-artist
-    # network failures are handled inside run_identity_mapping itself (that artist is
-    # recorded unmapped and the pass continues); only RateLimitedError propagates here,
-    # so pacing/cooldown accounting for this source stays correct.
+    # Run identity mapping before release discovery if using MusicBrainz, through the
+    # same paced wrapper as recent_releases so mapping requests count toward the same
+    # pacing/cooldown budget. Per-artist network failures are handled inside
+    # run_identity_mapping itself (that artist is recorded unmapped and the pass
+    # continues); a rate limit that exhausts _PacedSource's own retry/pause budget
+    # surfaces as _SourceCallStopped (not RateLimitedError -- _request() retries a
+    # RateLimitedError internally up to its pause budget before giving up), and by
+    # then _request() has already built and stored a proper COOLING_DOWN
+    # limit_observation for it.
     if source_name == "musicbrainz" and isinstance(source.source, MusicBrainzSource):
         try:
             run_identity_mapping(
                 application._catalog,
-                source.source,
+                source,
                 source_name,
                 checked_at,
             )
-        except RateLimitedError:
+        except _SourceCallStopped:
+            # A rate limit is recoverable next run, not a hard failure: mark the run
+            # partial, matching how the same error is classified when it happens
+            # during release discovery itself (see the design doc's error-handling
+            # section: "marks the run partial with reason=rate_limited").
             counts.failures += 1
+            counts.partial = True
             if source.limit_observation is not None:
-                application.put_source_limit(source.available_observation())
+                application.put_source_limit(source.limit_observation)
             return
 
     checkpoint = application.get_source_cursor(source_name, SourceCapability.RECENT_RELEASES)

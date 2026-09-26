@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import pytest
+
 from music_friend.domain import ReleaseDatePrecision
 from music_friend.providers.musicbrainz.normalize import normalize_release_group
 
@@ -90,6 +92,88 @@ def test_non_album_single_ep_type_still_normalizes_but_lowercases() -> None:
     )
     assert release is not None
     assert release.release_type == "broadcast"
+
+
+def test_missing_id_is_rejected() -> None:
+    group = _release_group()
+    del group["id"]
+    assert (
+        normalize_release_group(group, artist_id_map={MBID: "local-artist"}, now=FIXED_NOW) is None
+    )
+
+
+def test_missing_title_is_rejected() -> None:
+    group = _release_group()
+    del group["title"]
+    assert (
+        normalize_release_group(group, artist_id_map={MBID: "local-artist"}, now=FIXED_NOW) is None
+    )
+
+
+def test_missing_primary_type_is_rejected() -> None:
+    group = _release_group()
+    del group["primary-type"]
+    assert (
+        normalize_release_group(group, artist_id_map={MBID: "local-artist"}, now=FIXED_NOW) is None
+    )
+
+
+def test_non_string_primary_type_is_rejected() -> None:
+    release = normalize_release_group(
+        _release_group(**{"primary-type": 42}),
+        artist_id_map={MBID: "local-artist"},
+        now=FIXED_NOW,
+    )
+    assert release is None
+
+
+@pytest.mark.parametrize("malformed_date", ["not-a-date", "2026-13", "2026-02-30", "abcd"])
+def test_unparseable_dates_are_rejected(malformed_date: str) -> None:
+    release = normalize_release_group(
+        _release_group(**{"first-release-date": malformed_date}),
+        artist_id_map={MBID: "local-artist"},
+        now=FIXED_NOW,
+    )
+    assert release is None
+
+
+def test_non_list_artist_credit_is_rejected() -> None:
+    release = normalize_release_group(
+        _release_group(**{"artist-credit": "not-a-list"}),
+        artist_id_map={MBID: "local-artist"},
+        now=FIXED_NOW,
+    )
+    assert release is None
+
+
+def test_artist_credit_entries_that_are_not_mappings_are_skipped() -> None:
+    release = normalize_release_group(
+        _release_group(**{"artist-credit": ["not-a-mapping", {"artist": {"id": MBID}}]}),
+        artist_id_map={MBID: "local-artist"},
+        now=FIXED_NOW,
+    )
+    assert release is not None
+    assert release.artist_refs == ("local-artist",)
+
+
+def test_artist_credit_missing_artist_object_is_skipped() -> None:
+    release = normalize_release_group(
+        _release_group(**{"artist-credit": [{"no-artist-key": True}, {"artist": {"id": MBID}}]}),
+        artist_id_map={MBID: "local-artist"},
+        now=FIXED_NOW,
+    )
+    assert release is not None
+    assert release.artist_refs == ("local-artist",)
+
+
+def test_artist_credit_with_non_string_mbid_is_skipped() -> None:
+    release = normalize_release_group(
+        _release_group(**{"artist-credit": [{"artist": {"id": 42}}, {"artist": {"id": MBID}}]}),
+        artist_id_map={MBID: "local-artist"},
+        now=FIXED_NOW,
+    )
+    assert release is not None
+    assert release.artist_refs == ("local-artist",)
 
 
 def test_local_id_is_stable_for_the_same_release_group_id() -> None:

@@ -10,11 +10,12 @@ only after ``MAPPING_RETRY_INTERVAL`` has elapsed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from music_friend.domain import DAILY_REFRESH_MINUTES, Artist, IdentityConfidence, SourceReference
 from music_friend.errors import InvalidSourceResponseError, SourceUnavailableError
-from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.store import Catalog
 
 #: Unmapped artists are retried no more often than once per this interval.
@@ -26,9 +27,22 @@ MIN_NAME_SEARCH_SCORE = 90
 _SPOTIFY_ARTIST_URL = "https://open.spotify.com/artist/{spotify_id}"
 
 
+class IdentityMappingSource(Protocol):
+    """The two MusicBrainz-specific mapping calls, satisfied by either a bare
+    MusicBrainzSource or a _PacedSource wrapping one (the caller decides which,
+    and the paced wrapper is preferred so mapping requests count toward the same
+    pacing/cooldown budget as release discovery)."""
+
+    def lookup_artists_by_spotify_urls(
+        self, spotify_urls: Sequence[str]
+    ) -> dict[str, str | None]: ...
+
+    def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]: ...
+
+
 def run_identity_mapping(
     catalog: Catalog,
-    source: MusicBrainzSource,
+    source: IdentityMappingSource,
     source_name: str,
     checked_at: datetime,
 ) -> None:

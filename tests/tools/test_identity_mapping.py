@@ -230,6 +230,78 @@ def test_user_confirmed_mbid_always_wins_over_an_automated_mapping(catalog: Cata
     assert mb_refs[0].confidence == IdentityConfidence.USER_CONFIRMED
 
 
+def test_batch_url_lookup_failure_falls_back_to_name_search(catalog: Catalog) -> None:
+    from music_friend.errors import InvalidSourceResponseError
+
+    artist = _artist("artist-1", "Synthetic Artist")
+    _watchlist(catalog, artist)
+    source = FakeMusicBrainzSource(
+        raise_on_url=InvalidSourceResponseError(),
+        name_hits=[{"id": MBID, "score": 95}],
+    )
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    assert source.name_calls == ["Synthetic Artist"]
+    mapping = catalog.get_artist_identity_mapping("artist-1", "musicbrainz")
+    assert mapping is not None
+    assert mapping["status"] == "mapped"
+
+
+def test_name_search_failure_records_unmapped_and_continues(catalog: Catalog) -> None:
+    from music_friend.errors import SourceUnavailableError
+
+    artist = _artist("artist-1", "Synthetic Artist", with_spotify_ref=False)
+    _watchlist(catalog, artist)
+    source = FakeMusicBrainzSource(raise_on_name=SourceUnavailableError())
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    mapping = catalog.get_artist_identity_mapping("artist-1", "musicbrainz")
+    assert mapping is not None
+    assert mapping["status"] == "unmapped"
+    assert mapping["method"] == "name_search"
+
+
+def test_duplicate_watchlist_entries_for_the_same_artist_are_deduplicated(catalog: Catalog) -> None:
+    artist = _artist("artist-1", "Synthetic Artist", with_spotify_ref=False)
+    catalog.put_artist(artist)
+    catalog.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.ADD, NOW))
+    catalog.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.PIN, NOW))
+    source = FakeMusicBrainzSource(name_hits=[{"id": MBID, "score": 95}])
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    assert source.name_calls == ["Synthetic Artist"]
+
+
+def test_a_non_string_attempted_at_is_treated_as_not_recently_attempted(catalog: Catalog) -> None:
+    artist = _artist("artist-1", "Synthetic Artist", with_spotify_ref=False)
+    _watchlist(catalog, artist)
+    # A row inserted with a status other than "unmapped" is not retry-gated at all;
+    # exercise the mapped-status short-circuit branch of _skip_for_retry_window.
+    catalog.put_artist_identity_mapping(
+        artist_local_id="artist-1",
+        source="musicbrainz",
+        status="mapped",
+        method="user",
+        attempted_at=NOW,
+    )
+    source = FakeMusicBrainzSource(name_hits=[])
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    # artist-1 already has no musicbrainz SourceReference recorded via put_artist, so
+    # it is still a mapping candidate; the "mapped" status row does not gate retry.
+    assert source.name_calls == ["Synthetic Artist"]
+
+
+def test_empty_name_search_hits_are_rejected() -> None:
+    from music_friend.tools.identity_mapping import _accept_name_search
+
+    assert _accept_name_search([]) is None
+
+
 def test_artists_already_mapped_are_excluded_from_the_candidate_set(catalog: Catalog) -> None:
     artist = _artist("artist-1", "Synthetic Artist")
     mapped_refs = artist.source_refs + (

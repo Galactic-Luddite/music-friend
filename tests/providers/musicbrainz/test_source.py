@@ -248,6 +248,204 @@ def test_search_artist_by_name_rejects_a_malformed_response() -> None:
         source.search_artist_by_name("Synthetic Artist")
 
 
+def test_search_artist_by_name_rejects_a_non_mapping_response() -> None:
+    transport = FakeTransport()
+    transport.queue(["not", "a", "mapping"])
+    source = _source(transport)
+    with pytest.raises(InvalidSourceResponseError):
+        source.search_artist_by_name("Synthetic Artist")
+
+
+def test_recent_releases_rejects_a_non_mapping_response() -> None:
+    transport = FakeTransport()
+    transport.queue(["not", "a", "mapping"])
+    source = _source(transport)
+    with pytest.raises(InvalidSourceResponseError):
+        source.recent_releases((_mb_ref("mbid"),), FIXED_NOW)
+
+
+def test_recent_releases_skips_non_mapping_release_group_entries() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue({"release-groups": ["not-a-mapping"]})
+    source = _source(transport)
+    page = source.recent_releases((_mb_ref(mbid),), FIXED_NOW)
+    assert page.items == ()
+
+
+def test_recent_releases_rejects_more_or_fewer_than_one_artist_ref() -> None:
+    source = _source(FakeTransport())
+    with pytest.raises(ValueError):
+        source.recent_releases((), FIXED_NOW)
+
+
+def test_recent_releases_rejects_a_non_musicbrainz_artist_ref() -> None:
+    source = _source(FakeTransport())
+    spotify_ref = SourceReference(
+        source="spotify",
+        native_id="spotify-id",
+        canonical_url=None,
+        observed_at=FIXED_NOW,
+    )
+    with pytest.raises(ValueError):
+        source.recent_releases((spotify_ref,), FIXED_NOW)
+
+
+def test_recent_releases_falls_back_to_offset_zero_for_a_malformed_cursor() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue({"release-groups": []})
+    source = _source(transport)
+    source.recent_releases((_mb_ref(mbid),), FIXED_NOW, cursor="not-an-int")
+    assert transport.calls[0][1]["offset"] == "0"
+
+
+def test_recent_releases_emits_a_next_cursor_when_more_results_remain() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue(
+        {
+            "release-groups": [
+                {
+                    "id": "rg-1",
+                    "title": "Album One",
+                    "primary-type": "Album",
+                    "first-release-date": "2026-05-01",
+                    "score": 100,
+                    "artist-credit": [{"artist": {"id": mbid}}],
+                }
+            ],
+            "release-group-count": 5,
+        }
+    )
+    source = _source(transport)
+    page = source.recent_releases((_mb_ref(mbid),), FIXED_NOW)
+    assert page.next_cursor == "1"
+
+
+def test_recent_releases_rejects_a_non_list_release_groups_field() -> None:
+    transport = FakeTransport()
+    transport.queue({"release-groups": "not-a-list"})
+    source = _source(transport)
+    with pytest.raises(InvalidSourceResponseError):
+        source.recent_releases((_mb_ref("mbid"),), FIXED_NOW)
+
+
+def test_lookup_artists_by_spotify_urls_rejects_a_non_sequence() -> None:
+    source = _source(FakeTransport())
+    with pytest.raises(ValueError):
+        source.lookup_artists_by_spotify_urls(123)  # type: ignore[arg-type]
+
+
+def test_lookup_artists_by_spotify_urls_batch_response_not_a_mapping_returns_none() -> None:
+    transport = FakeTransport()
+    urls = tuple(f"https://open.spotify.com/artist/{index}" for index in range(2))
+    transport.queue("not-a-mapping")
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls(urls)
+    assert result == {url: None for url in urls}
+
+
+def test_lookup_artists_by_spotify_urls_batch_missing_url_list_returns_none() -> None:
+    transport = FakeTransport()
+    urls = tuple(f"https://open.spotify.com/artist/{index}" for index in range(2))
+    transport.queue({"unexpected": "shape"})
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls(urls)
+    assert result == {url: None for url in urls}
+
+
+def test_lookup_artists_by_spotify_urls_batch_unmatched_resource_returns_none() -> None:
+    transport = FakeTransport()
+    urls = ("https://open.spotify.com/artist/a", "https://open.spotify.com/artist/b")
+    transport.queue({"url-list": [{"resource": "https://open.spotify.com/artist/a"}]})
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls(urls)
+    assert result["https://open.spotify.com/artist/b"] is None
+
+
+def test_lookup_artists_by_spotify_urls_non_list_relations_returns_none() -> None:
+    transport = FakeTransport()
+    url = "https://open.spotify.com/artist/spotify123"
+    transport.queue({"relations": "not-a-list"})
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls((url,))
+    assert result == {url: None}
+
+
+def test_lookup_artists_by_spotify_urls_ignores_non_artist_relations() -> None:
+    transport = FakeTransport()
+    url = "https://open.spotify.com/artist/spotify123"
+    transport.queue(
+        {
+            "relations": [
+                {"target-type": "release-group", "artist": {"id": "irrelevant"}},
+                "not-a-mapping",
+            ]
+        }
+    )
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls((url,))
+    assert result == {url: None}
+
+
+def test_lookup_artists_by_spotify_urls_deduplicates_repeated_urls() -> None:
+    transport = FakeTransport()
+    url = "https://open.spotify.com/artist/spotify123"
+    transport.queue({"relations": []})
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls((url, url, url))
+    assert len(transport.calls[0][1]["resource"]) == 1  # type: ignore[arg-type]
+    assert result == {url: None}
+
+
+def test_search_artist_by_name_returns_empty_for_blank_name() -> None:
+    transport = FakeTransport()
+    source = _source(transport)
+    assert source.search_artist_by_name("   ") == []
+    assert transport.calls == []
+
+
+def test_search_artist_by_name_rejects_a_non_list_artists_field() -> None:
+    transport = FakeTransport()
+    transport.queue({"artists": "not-a-list"})
+    source = _source(transport)
+    with pytest.raises(InvalidSourceResponseError):
+        source.search_artist_by_name("Synthetic Artist")
+
+
+def test_search_artist_by_name_skips_malformed_entries_and_respects_limit() -> None:
+    transport = FakeTransport()
+    transport.queue(
+        {
+            "artists": [
+                "not-a-mapping",
+                {"id": "no-score"},
+                {"id": "a", "score": 80},
+                {"id": "b", "score": 95},
+                {"id": "c", "score": 60},
+            ]
+        }
+    )
+    source = _source(transport)
+    hits = source.search_artist_by_name("Synthetic Artist", limit=2)
+    assert [hit["id"] for hit in hits] == ["b", "a"]
+
+
+def test_close_and_context_manager_close_the_injected_transport() -> None:
+    transport = FakeTransport()
+    source = _source(transport)
+    source.close()
+    with _source(FakeTransport()):
+        pass
+
+
+def test_now_rejects_a_naive_clock_result() -> None:
+    source = MusicBrainzSource(transport=FakeTransport(), clock=lambda: datetime(2026, 1, 1))
+    with pytest.raises(ValueError):
+        source._now()
+
+
 def test_search_artist_by_name_propagates_rate_limited_error() -> None:
     transport = FakeTransport()
     transport.raise_next(RateLimitedError(retry_after_seconds=5))

@@ -2241,3 +2241,53 @@ def test_musicbrainz_cooldown_leaves_spotify_limit_state_untouched(tmp_path: Pat
             False,
             0,
         )
+
+
+def test_musicbrainz_identity_mapping_rate_limit_records_cooldown_and_stops(
+    tmp_path: Path,
+) -> None:
+    """AC: a RateLimitedError during the identity-mapping step (not just release
+    discovery) also records the musicbrainz cooldown and does not fail the run
+    with an unhandled exception."""
+    from music_friend.providers.musicbrainz.source import MusicBrainzSource
+
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        watched_artist = _artist("spotify-artist", "Watched")
+        _watch(application, watched_artist)
+
+        class _RaisingTransport:
+            def get(self, path: str, query: object = None) -> object:
+                raise RateLimitedError(30)
+
+            def close(self) -> None:
+                pass
+
+        real_musicbrainz_source = MusicBrainzSource(
+            transport=_RaisingTransport(),  # type: ignore[arg-type]
+            clock=lambda: NOW,
+        )
+        spotify = _AssertNoCallsSource()
+        clock = FakeClock()
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=spotify,
+            release_source_name="musicbrainz",
+            release_source=real_musicbrainz_source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "partial"
+        musicbrainz_limit = application.get_source_limit("musicbrainz")
+        assert musicbrainz_limit is not None
+        assert musicbrainz_limit.state == SourceLimitState.COOLING_DOWN

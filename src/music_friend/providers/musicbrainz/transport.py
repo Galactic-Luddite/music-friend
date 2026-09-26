@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -14,7 +14,6 @@ from music_friend.errors import InvalidSourceResponseError, RateLimitedError, So
 
 _BASE_URL = "https://musicbrainz.org/ws/2/"
 _MAX_BODY_BYTES = 1024 * 1024
-_MAX_JSON_DEPTH = 64
 _MAX_CALL_SECONDS = 45.0
 _MIN_REQUEST_INTERVAL = 1.0  # 1 request per second
 
@@ -31,12 +30,25 @@ class _PacingState:
 class MusicBrainzTransport:
     """Keyless, rate-limited HTTP transport for MusicBrainz Web Service."""
 
-    def __init__(self, *, user_agent: str) -> None:
+    def __init__(
+        self,
+        *,
+        user_agent: str,
+        connector: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
         if type(user_agent) is not str or not user_agent.strip():
             raise ValueError("user_agent must be a non-empty string")
         self._user_agent = user_agent.strip()
         self._pacing: _PacingState | None = None
-        self._client = httpx.Client(timeout=_MAX_CALL_SECONDS)
+        self._clock = clock
+        self._sleep = sleeper
+        self._client = (
+            httpx.Client(timeout=_MAX_CALL_SECONDS)
+            if connector is None
+            else httpx.Client(transport=connector, timeout=_MAX_CALL_SECONDS)
+        )
 
     def get(
         self,
@@ -62,9 +74,9 @@ class MusicBrainzTransport:
 
         # Enforce local 1 req/s pacing
         if self._pacing is not None:
-            elapsed = time.monotonic() - self._pacing.last_request_time
+            elapsed = self._clock() - self._pacing.last_request_time
             if elapsed < _MIN_REQUEST_INTERVAL:
-                time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+                self._sleep(_MIN_REQUEST_INTERVAL - elapsed)
 
         url = _BASE_URL.rstrip("/") + "/" + path.lstrip("/")
         params = dict(query) if query else {}
@@ -80,7 +92,7 @@ class MusicBrainzTransport:
             raise SourceUnavailableError() from error
         finally:
             # Record timing for next pacing calculation
-            self._pacing = _PacingState(time.monotonic())
+            self._pacing = _PacingState(self._clock())
 
         if response.status_code == 429:
             retry_after = _parse_retry_after(response.headers)
