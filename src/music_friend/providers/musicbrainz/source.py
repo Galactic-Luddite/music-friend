@@ -51,6 +51,101 @@ class MusicBrainzSource:
         """Not supported."""
         raise CapabilityUnsupportedError()
 
+    def lookup_artist_by_spotify_url(self, spotify_url: str) -> str | None:
+        """Look up MusicBrainz artist ID from a Spotify artist URL.
+
+        Uses the MusicBrainz URL lookup endpoint to find artist relations.
+
+        Args:
+            spotify_url: Spotify artist URL (e.g., https://open.spotify.com/artist/...)
+
+        Returns:
+            MusicBrainz artist ID (MBID) if found, None otherwise.
+        """
+        if not isinstance(spotify_url, str):
+            return None
+
+        try:
+            response = self._transport.get(
+                "url",
+                query={
+                    "resource": spotify_url,
+                    "inc": "artist-rels",
+                },
+            )
+
+            if not isinstance(response, Mapping):
+                return None
+
+            # Check if URL has artist relations
+            rels = response.get("relations")
+            if not isinstance(rels, list):
+                return None
+
+            # Find the artist relation
+            for rel in rels:
+                if not isinstance(rel, Mapping):
+                    continue
+                if rel.get("type") != "artist":
+                    continue
+
+                # Extract artist ID from relation
+                artist = rel.get("artist")
+                if isinstance(artist, Mapping):
+                    artist_id = artist.get("id")
+                    if isinstance(artist_id, str):
+                        return artist_id
+
+            return None
+        except Exception:
+            return None
+
+    def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
+        """Search for artists by name in MusicBrainz.
+
+        Args:
+            name: Artist name to search for
+            limit: Maximum number of results to return
+
+        Returns:
+            List of dicts with 'id' and 'score' keys, sorted by score descending.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return []
+
+        try:
+            response = self._transport.get(
+                "artist",
+                query={
+                    "query": f'artist:"{name}"',
+                    "limit": str(min(limit, 100)),
+                },
+            )
+
+            if not isinstance(response, Mapping):
+                return []
+
+            artists = response.get("artists")
+            if not isinstance(artists, list):
+                return []
+
+            results = []
+            for artist in artists:
+                if not isinstance(artist, Mapping):
+                    continue
+
+                artist_id = artist.get("id")
+                score = artist.get("score")
+
+                if isinstance(artist_id, str) and isinstance(score, int):
+                    results.append({"id": artist_id, "score": score})
+
+            # Sort by score descending
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results
+        except Exception:
+            return []
+
     def followed_artists(self, cursor: str | None = None) -> Page[Artist]:
         """Not supported."""
         raise CapabilityUnsupportedError()

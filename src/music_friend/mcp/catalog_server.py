@@ -22,6 +22,7 @@ from music_friend.domain import (
     Signal,
     SignalKind,
     SourceLimitState,
+    SourceReference,
     WatchlistAction,
     WatchlistEntry,
 )
@@ -151,6 +152,16 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
                 "enum": ["add", "pin", "mute", "remove"],
                 "type": "string",
             },
+            "source_ids": {
+                "description": (
+                    "Optional object mapping source names (e.g., 'musicbrainz') to "
+                    "provider-specific identity strings (e.g., MBID UUID). When "
+                    "supplied, overwrites any prior automated mapping for the "
+                    "artist with a user-confirmed identity."
+                ),
+                "type": ["object", "null"],
+                "additionalProperties": {"type": "string"},
+            },
         },
         "required": ["artist_id", "action"],
         "type": "object",
@@ -267,6 +278,13 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
             "event_radius_unit": {
                 "description": "Event discovery radius unit: 'miles' or 'kilometers', or null.",
                 "enum": ["miles", "kilometers", None],
+                "type": ["string", "null"],
+            },
+            "release_source": {
+                "description": (
+                    "Release discovery source: 'spotify' or 'musicbrainz' (default musicbrainz), or null to leave unchanged."
+                ),
+                "enum": ["spotify", "musicbrainz", None],
                 "type": ["string", "null"],
             },
         },
@@ -555,14 +573,71 @@ def create_music_server(
         annotations=_DESTRUCTIVE_MUTATING,
     )
     async def update_watchlist(
-        artist_id: str, action: Literal["add", "pin", "mute", "remove"]
+        artist_id: str,
+        action: Literal["add", "pin", "mute", "remove"],
+        source_ids: dict[str, str] | None = None,
     ) -> CallToolResult:
         def action_result() -> dict[str, object]:
             local_id = _local_id(artist_id, field="artist_id")
             selected = _watchlist_action(action)
-            if application.get_artist(local_id) is None:
+            artist = application.get_artist(local_id)
+            if artist is None:
                 return dict(_NOT_FOUND)
             updated_at = _now(clock)
+
+            # Handle source_ids if provided (user-confirmed identities)
+            if source_ids is not None:
+                from music_friend.domain import IdentityConfidence
+
+                updated_refs = list(artist.refs)
+                for source, identity_str in source_ids.items():
+                    if not isinstance(source, str) or not source:
+                        raise _InvalidArguments(f"source must be a non-empty string, got: {source}")
+                    if not isinstance(identity_str, str) or not identity_str:
+                        raise _InvalidArguments(
+                            f"identity for source {source} must be a non-empty string"
+                        )
+                    # For musicbrainz source, validate UUID format
+                    if source == "musicbrainz":
+                        # Basic UUID validation (8-4-4-4-12 hex digits)
+                        import re
+
+                        if not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", identity_str.lower()):
+                            raise _InvalidArguments(
+                                f"musicbrainz identity must be a valid UUID, got: {identity_str}"
+                            )
+
+                    # Remove any prior ref for this source and add new one with USER_CONFIRMED confidence
+                    updated_refs = [
+                        r for r in updated_refs if r.source != source
+                    ]
+                    updated_refs.append(
+                        SourceReference(
+                            source=source,
+                            identity=identity_str,
+                            confidence=IdentityConfidence.USER_CONFIRMED,
+                        )
+                    )
+
+                # Record the mapping in artist_identity_mappings table
+                for source, identity_str in source_ids.items():
+                    application._catalog.put_artist_identity_mapping(
+                        artist_local_id=local_id,
+                        source=source,
+                        status="mapped",
+                        identity=identity_str,
+                        method="user",
+                        checked_at=updated_at,
+                    )
+
+                # Update the artist with new refs
+                artist = Artist(
+                    local_id=artist.local_id,
+                    name=artist.name,
+                    refs=updated_refs,
+                )
+                application.put_artist(artist)
+
             if selected is WatchlistAction.ADD:
                 application.set_watchlist_add(local_id, updated_at=updated_at)
             elif selected is WatchlistAction.PIN:
@@ -735,6 +810,7 @@ def create_music_server(
                 "event_postal_code": config.event_postal_code,
                 "event_radius": config.event_radius,
                 "event_radius_unit": config.event_radius_unit,
+                "release_source": config.release_source or "musicbrainz",
                 "missing_fields": [
                     name
                     for name, value in [
@@ -769,6 +845,7 @@ def create_music_server(
         event_postal_code: str | None = None,
         event_radius: float | None = None,
         event_radius_unit: Literal["miles", "kilometers"] | None = None,
+        release_source: Literal["spotify", "musicbrainz"] | None = None,
     ) -> CallToolResult:
         def action() -> dict[str, object]:
             store = make_config_store()
@@ -787,6 +864,7 @@ def create_music_server(
                 event_radius_unit=event_radius_unit
                 if event_radius_unit is not None
                 else config.event_radius_unit,
+                release_source=release_source if release_source is not None else config.release_source,
             )
             store.save(updated_config)
 
@@ -797,6 +875,7 @@ def create_music_server(
                 "event_postal_code": updated_config.event_postal_code,
                 "event_radius": updated_config.event_radius,
                 "event_radius_unit": updated_config.event_radius_unit,
+                "release_source": updated_config.release_source or "musicbrainz",
                 "note": "To set the Ticketmaster key, run: music-friend setup --ticketmaster-key-env VAR_NAME",
             }
 
@@ -925,12 +1004,46 @@ def _now(clock: Clock) -> datetime:
 def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[str, object]:
     latest = application.list_refresh_runs(limit=1)
     unread = application.list_inbox_entries(InboxState.UNREAD, limit=1)
-    return {
+
+    # Check configured release_source and get identity status if using MusicBrainz
+    from music_friend.configuration import LocalConfigStore
+
+    config_store = LocalConfigStore()
+    config = config_store.load()
+    release_source = config.release_source or "musicbrainz"
+
+    status_dict: dict[str, object] = {
         "status": "ready",
         "inbox": {"has_unread": bool(unread)},
         "latest_refresh": None if not latest else _refresh_run(latest[0]),
         "source_limits": {"spotify": _source_limit_status(application, "spotify", checked_at)},
     }
+
+    # Add MusicBrainz identity mapping status if configured
+    if release_source == "musicbrainz":
+        watchlist = application.list_watchlist(limit=10000)
+        mapped_count = 0
+        unmapped_count = 0
+
+        for entry in watchlist:
+            artist = application.get_artist(entry.artist_local_id)
+            if artist is None:
+                continue
+
+            # Check if artist has musicbrainz ref
+            has_musicbrainz = any(ref.source == "musicbrainz" for ref in artist.refs)
+            if has_musicbrainz:
+                mapped_count += 1
+            else:
+                unmapped_count += 1
+
+        status_dict["identity"] = {
+            "source": "musicbrainz",
+            "mapped": mapped_count,
+            "unmapped": unmapped_count,
+        }
+
+    return status_dict
 
 
 def _source_limit_status(
@@ -1008,7 +1121,20 @@ def _artist(value: Artist) -> dict[str, object]:
 
 
 def _watchlist(value: WatchlistEntry) -> dict[str, object]:
-    return {
+    from music_friend.configuration import LocalConfigStore
+
+    # Check configured release_source
+    config_store = LocalConfigStore()
+    config = config_store.load()
+    release_source = config.release_source or "musicbrainz"
+
+    # Determine release_source_status based on whether artist has the configured source identity
+    release_source_status = None
+    if release_source == "musicbrainz":
+        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.refs)
+        release_source_status = "mapped" if has_musicbrainz else "unmapped"
+
+    result = {
         "artist": _artist(value.artist),
         "inclusion_reason": value.inclusion_reason.value,
         "affinity": {
@@ -1016,6 +1142,11 @@ def _watchlist(value: WatchlistEntry) -> dict[str, object]:
             "saved_track_count": value.affinity.saved_track_count,
         },
     }
+
+    if release_source_status is not None:
+        result["release_source_status"] = release_source_status
+
+    return result
 
 
 def _inbox(application: MusicFriendApplication, value: InboxEntry) -> dict[str, object]:

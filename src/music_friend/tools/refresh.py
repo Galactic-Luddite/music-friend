@@ -619,6 +619,25 @@ def _run_releases(
     checked_at: datetime,
     counts: _RefreshCounts,
 ) -> None:
+    # Run identity mapping before release discovery if using MusicBrainz
+    if source_name == "musicbrainz":
+        try:
+            run_identity_mapping(
+                application._catalog,
+                source.source,
+                source_name,
+                checked_at,
+            )
+        except RateLimitedError:
+            # If we hit a rate limit during mapping, record it and stop
+            counts.failures += 1
+            if source.limit_observation is not None:
+                application.put_source_limit(source.available_observation())
+            return
+        except Exception:
+            # Other errors during mapping don't stop the whole release discovery
+            pass
+
     checkpoint = application.get_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
     try:
         result = application.discover_releases(
