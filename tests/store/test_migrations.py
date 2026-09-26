@@ -24,10 +24,16 @@ from music_friend.domain import (
 )
 from music_friend.errors import CatalogUnavailableError
 from music_friend.store import Catalog
-from music_friend.store.migrations import Migration, _statements, apply_migrations
+from music_friend.store.migrations import (
+    Migration,
+    _statements,
+    apply_migrations,
+    bundled_migrations,
+)
 
 V1_FIXTURE = Path(__file__).parent / "fixtures" / "v1_catalog.sql"
 OFFSET = timezone(timedelta(hours=5, minutes=45))
+ALL_MIGRATION_VERSIONS = [(migration.version,) for migration in bundled_migrations()]
 OBSERVED = datetime(2026, 8, 31, 23, 17, 41, 123456, tzinfo=OFFSET)
 LATER = datetime(2026, 9, 1, 1, 2, 3, 654321, tzinfo=timezone(timedelta(hours=-7)))
 
@@ -78,9 +84,10 @@ def test_initial_migration_creates_complete_normalized_schema(catalog_path: Path
         "schema_migrations",
         "artist_identity_mappings",
     } <= _tables(connection)
-    assert connection.execute(
-        "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+    assert (
+        connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+        == ALL_MIGRATION_VERSIONS
+    )
     catalog.close()
 
 
@@ -89,9 +96,12 @@ def test_migrations_are_idempotent(catalog_path: Path) -> None:
 
     reopened = Catalog.open(catalog_path)
 
-    assert reopened._connection.execute(
-        "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+    assert (
+        reopened._connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        == ALL_MIGRATION_VERSIONS
+    )
     reopened.close()
 
 
@@ -258,9 +268,10 @@ def test_concurrent_migration_callers_serialize_version_check(tmp_path: Path) ->
     assert all(not thread.is_alive() for thread in threads)
     assert failures == []
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+        assert (
+            connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            == ALL_MIGRATION_VERSIONS
+        )
 
 
 def test_concurrent_catalog_openers_apply_initial_migration_once(catalog_path: Path) -> None:
@@ -283,9 +294,10 @@ def test_concurrent_catalog_openers_apply_initial_migration_once(catalog_path: P
     assert all(not thread.is_alive() for thread in threads)
     assert failures == []
     with closing(sqlite3.connect(catalog_path)) as connection:
-        assert connection.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+        assert (
+            connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            == ALL_MIGRATION_VERSIONS
+        )
 
 
 class _CommitFailureConnection:
@@ -375,9 +387,10 @@ def test_populated_v1_catalog_upgrades_to_v3_without_data_loss(catalog_path: Pat
     with Catalog.open(catalog_path) as catalog:
         connection = catalog._connection
         assert connection is not None
-        assert connection.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+        assert (
+            connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            == ALL_MIGRATION_VERSIONS
+        )
 
         artist = catalog.get_artist("legacy-artist-1")
         assert artist is not None
@@ -501,9 +514,10 @@ def test_populated_v1_catalog_upgrades_to_v3_without_data_loss(catalog_path: Pat
 
     Catalog.open(catalog_path).close()
     with closing(sqlite3.connect(catalog_path)) as reopened:
-        assert reopened.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+        assert (
+            reopened.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            == ALL_MIGRATION_VERSIONS
+        )
 
 
 @pytest.mark.parametrize(
