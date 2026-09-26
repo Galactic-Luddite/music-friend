@@ -1214,14 +1214,23 @@ def _release_repair_already_recorded(
     Tries both reasons a normal (non-repair) candidate could have used --
     ``NEW_RELEASE`` and ``UPDATED_RELEASE`` -- since repair cannot know which one the
     original, successfully-recorded signal used (see ``_repair_missing_signals``). If
-    either produces a material_version the store already has, the release's current
-    content is already signaled and repair must not write a duplicate.
+    either produces the current (v2, content-only) ``material_version`` the store
+    already has, the release's current content is already signaled.
+
+    Also checks the pre-#50 v1 shape (issue #50 upgrade safety): a real catalog already
+    holds signals written before this fix, whose ``material_version`` baked in the
+    original write's ``observed_at``. Recomputing v1 with a *guessed* timestamp cannot
+    work, so instead this replays the v1 formula against every signal already recorded
+    for this record, using that signal's own stored ``observed_at`` -- the exact value
+    that would have been hashed when it was written -- and both reasons. A match proves
+    that existing row already covers this content, whatever its explanation says.
     """
     reference = _single_reference(_source_references(release.source_refs, release_discovery.source))
     artist = application.get_artist(release.artist_refs[0])
     artist_name = "" if artist is None else artist.display_name
     material = _release_material(release)
-    for reason in (ExplanationReasonKind.NEW_RELEASE, ExplanationReasonKind.UPDATED_RELEASE):
+    reasons = (ExplanationReasonKind.NEW_RELEASE, ExplanationReasonKind.UPDATED_RELEASE)
+    for reason in reasons:
         explanation = Explanation(
             (
                 ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist_name),
@@ -1236,6 +1245,22 @@ def _release_repair_already_recorded(
             is not None
         ):
             return True
+    existing_signals = application.list_signals_for_record(
+        SignalKind.RELEASE, release.local_id, limit=500
+    )
+    for existing in existing_signals:
+        for reason in reasons:
+            explanation = Explanation(
+                (
+                    ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist_name),
+                    ExplanationReason(reason, release.title),
+                )
+            )
+            legacy_version = _legacy_v1_material_version(
+                SignalKind.RELEASE, material, explanation, existing.observed_at
+            )
+            if legacy_version == existing.material_version:
+                return True
     return False
 
 
@@ -1275,6 +1300,32 @@ def _material_version(
         "material": material,
         "reasons": tuple((reason.kind.value, reason.detail) for reason in explanation.reasons),
         "version": 2,
+    }
+    return f"material:{_digest(value)}"
+
+
+def _legacy_v1_material_version(
+    kind: SignalKind,
+    material: object,
+    explanation: Explanation,
+    observed_at: datetime,
+) -> str:
+    """Reproduce the pre-#50 ``material_version`` hash exactly (issue #50 upgrade safety).
+
+    Real catalogs already hold signals written with this v1 shape (``observed_at``
+    included, ``"version": 1``) before ``_material_version`` above was made
+    content-only. ``_release_repair_already_recorded`` replays this against each
+    existing signal's own stored ``observed_at`` to recognize a v1-format signal as
+    already covering the release's current content, so upgrading to v2 never causes a
+    repair pass to treat a real catalog's existing signals as missing and re-record
+    them as duplicates.
+    """
+    value = {
+        "kind": kind.value,
+        "material": material,
+        "observed_at": observed_at.isoformat(),
+        "reasons": tuple((reason.kind.value, reason.detail) for reason in explanation.reasons),
+        "version": 1,
     }
     return f"material:{_digest(value)}"
 

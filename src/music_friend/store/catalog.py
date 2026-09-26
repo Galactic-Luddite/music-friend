@@ -1969,6 +1969,13 @@ class Catalog:
         remix of it. See ``_release_title_variant_key`` and
         ``_release_title_variants_compatible``.
 
+        A bare ``(Remix)`` qualifier is a wildcard, so it can be compatible with more
+        than one already-stored, differently-named remix. Merging with an arbitrarily
+        chosen one of them would be exactly the false merge issue #50 exists to avoid,
+        so a variant-key match is only returned when it identifies exactly one
+        candidate real-world release; two or more distinct candidates is ambiguous and
+        returns no match at all (never an arbitrary pick).
+
         Also accepts a stored release date that differs by exactly one day
         (either direction) from ``release_date``, since a day-precision
         discrepancy between two independently-edited catalogs is exactly the
@@ -2027,7 +2034,7 @@ class Catalog:
             .fetchall()
         )
         exact_title_match: tuple[object, ...] | None = None
-        variant_match: tuple[object, ...] | None = None
+        variant_matches: dict[str, tuple[object, ...]] = {}
         incoming_variant_key = _release_title_variant_key(normalized_title)
         for row in rows:
             stored_date = date.fromisoformat(str(row[4]))
@@ -2042,12 +2049,24 @@ class Catalog:
                 if stored_date == release_date:
                     break
                 continue
-            if variant_match is None and _release_title_variants_compatible(
+            if _release_title_variants_compatible(
                 incoming_variant_key, _release_title_variant_key(stored_title)
             ):
-                variant_match = row
-        chosen = exact_title_match if exact_title_match is not None else variant_match
-        return None if chosen is None else self._release_discovery_from_row(chosen[:8])
+                # Keyed by release_local_id (distinct real-world releases), not row
+                # identity, since the same release can appear once per (date,
+                # artist-id) pair matched by the WHERE clause above.
+                variant_matches[str(row[0])] = row
+        if exact_title_match is not None:
+            return self._release_discovery_from_row(exact_title_match[:8])
+        if len(variant_matches) == 1:
+            # Exactly one candidate real-world release matches the conservative
+            # title-variant key: safe to merge. Two or more is ambiguous -- e.g. a
+            # bare "(Remix)" that could equally be either of two differently-named,
+            # already-stored remixes -- and issue #50 requires staying conservative
+            # rather than guessing which one it is, so no match is returned at all.
+            (only_match,) = variant_matches.values()
+            return self._release_discovery_from_row(only_match[:8])
+        return None
 
     @staticmethod
     def _release_discovery_from_row(row: tuple[object, ...]) -> ReleaseDiscovery:
@@ -2379,6 +2398,35 @@ class Catalog:
                 )
                 .fetchall()
             )
+        records: list[Signal] = []
+        for row in rows:
+            signal = self.get_signal(str(row[0]))
+            if signal is None:
+                raise sqlite3.IntegrityError("signal disappeared during list")
+            records.append(signal)
+        return tuple(records)
+
+    def list_signals_for_record(
+        self, kind: SignalKind, record_local_id: str, *, limit: int
+    ) -> tuple[Signal, ...]:
+        """List every signal already recorded for one canonical record (issue #50).
+
+        Used by repair to check whether a record already has a signal for its current
+        content under any historical ``material_version`` format, rather than only the
+        one this run's guessed reason would produce.
+        """
+        selected_limit = _bounded_limit(limit)
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT local_id FROM signals WHERE kind = ? AND record_local_id = ?
+                ORDER BY observed_at DESC, local_id LIMIT ?
+                """,
+                (kind.value, record_local_id, selected_limit),
+            )
+            .fetchall()
+        )
         records: list[Signal] = []
         for row in rows:
             signal = self.get_signal(str(row[0]))

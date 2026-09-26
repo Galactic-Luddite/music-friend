@@ -26,10 +26,15 @@ import pytest
 from music_friend.configuration import LocalConfig
 from music_friend.domain import (
     Artist,
+    Explanation,
+    ExplanationReason,
+    ExplanationReasonKind,
     IdentityConfidence,
+    InboxState,
     Release,
     ReleaseDatePrecision,
     ReleaseDiscovery,
+    SignalKind,
     SourceLimitObservation,
     SourceLimitState,
     SourceReference,
@@ -664,3 +669,140 @@ def test_same_source_repeat_through_cli_creates_no_new_inbox_item(
         application.close()
     assert len(entries) == 1
     assert len(signals) == 1
+
+
+@pytest.mark.parametrize(
+    "seeded_state", [InboxState.UNREAD, InboxState.SAVED, InboxState.DISMISSED]
+)
+def test_v1_signal_upgrade_safety_creates_no_duplicate_and_preserves_inbox_state(
+    clock: FakeClock, tmp_path: Path, seeded_state: InboxState
+) -> None:
+    """Issue #50 round 2, item 2: upgrading ``material_version`` from the pre-#53 v1
+    shape (included ``observed_at``) to the content-only v2 shape must not treat a
+    real catalog's existing v1-format signals as missing and re-record them.
+
+    Builds the pre-existing state exactly as the base branch (625049e, pre-#53) would
+    have written it: runs one real ``cli.run_cli`` refresh against a recorded
+    MusicBrainz fixture (so the release/discovery/signal/inbox rows are the actual
+    current-code output, not hand-built), then downgrades the created signal's
+    ``material_version`` in place to the exact v1 hash the base branch's
+    ``_material_version`` would have produced for that same signal -- the only piece
+    that changed -- and sets the inbox entry to the given historical state. Two more
+    refreshes past the freshness TTL must then create zero new signals, zero new inbox
+    entries, and leave the seeded state untouched.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    live = load_live_release_group_search()
+    one_release_group = live["release-groups"][:1]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "musicbrainz.org"
+        path = request.url.path
+        if path == "/ws/2/url":
+            resources = request.url.params.get_list("resource")
+            urls = [
+                {
+                    "resource": resources[0],
+                    "relations": [{"artist": {"id": LIVE_SEARCH_ARTIST_MBID}}],
+                }
+            ]
+            return httpx.Response(200, json={"url-count": 1, "url-offset": 0, "urls": urls})
+        if path == "/ws/2/release-group":
+            return httpx.Response(
+                200,
+                json={
+                    **live,
+                    "count": len(one_release_group),
+                    "release-groups": one_release_group,
+                },
+            )
+        if path.startswith("/ws/2/artist/"):
+            return httpx.Response(200, json={"relations": []})
+        raise AssertionError(f"unexpected MusicBrainz path: {path}")
+
+    def _run_at(now: datetime) -> dict[str, object]:
+        application = MusicFriendApplication(Catalog.open(catalog_path))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            cli.run_cli(
+                ["refresh", "releases", "--json"],
+                stdout=stdout,
+                stderr=stderr,
+                application=application,
+                config_store=_ConfigStore(LocalConfig()),
+                secret_prompt=lambda _message: "",
+                now=lambda: now,
+                connector_factory=lambda: httpx.MockTransport(handle),
+                credential_store_factory=lambda: _NoTicketmasterKey(),
+            )
+        finally:
+            application.close()
+        assert stderr.getvalue() == ""
+        payload = json.loads(stdout.getvalue())
+        assert isinstance(payload, dict)
+        return payload
+
+    # 1. A real refresh with today's (v2, content-only) code creates the actual
+    #    release/discovery/signal/inbox rows from the recorded fixture.
+    first = _run_at(NOW)
+    assert first["status"] == "succeeded"
+    assert _metrics(first)["signals_created"] == 1
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        seeded_signal = application.list_signals(SignalKind.RELEASE, limit=1)[0]
+        seeded_entry = application.list_inbox_entries(None, limit=1)[0]
+        assert seeded_entry.signal_local_id == seeded_signal.local_id
+        release = application.get_release(seeded_signal.record_local_id)
+        assert release is not None
+        artist = application.get_artist(release.artist_refs[0])
+        assert artist is not None
+
+        # 2. Downgrade this real signal to the exact v1 hash the pre-#53 base branch
+        #    would have produced for it -- same reason/material/observed_at, only the
+        #    hash formula changes (v1 includes observed_at; v2 does not).
+        material = refresh_module._release_material(release)
+        explanation = Explanation(
+            (
+                ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist.display_name),
+                ExplanationReason(ExplanationReasonKind.NEW_RELEASE, release.title),
+            )
+        )
+        legacy_material_version = refresh_module._legacy_v1_material_version(
+            SignalKind.RELEASE, material, explanation, seeded_signal.observed_at
+        )
+        connection = application._catalog._require_connection()
+        connection.execute(
+            "UPDATE signals SET material_version = ? WHERE local_id = ?",
+            (legacy_material_version, seeded_signal.local_id),
+        )
+        connection.commit()
+
+        # 3. Set the inbox entry to the historical state under test, exactly as a
+        #    real inbox row could already carry before this fix ever ran.
+        refresh_module.update_inbox_state(
+            application, seeded_entry.local_id, seeded_state, updated_at=NOW
+        )
+    finally:
+        application.close()
+
+    # 4. Two more refreshes, past the freshness TTL each time so MusicBrainz is
+    #    genuinely re-queried and returns the identical fixture release both times.
+    second = _run_at(NOW + timedelta(days=21))
+    assert second["status"] == "succeeded"
+    assert _metrics(second).get("signals_created", 0) == 0
+
+    third = _run_at(NOW + timedelta(days=42))
+    assert third["status"] == "succeeded"
+    assert _metrics(third).get("signals_created", 0) == 0
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        entries = application.list_inbox_entries(None, limit=10)
+        signals = application.list_signals(None, limit=10)
+    finally:
+        application.close()
+    assert len(signals) == 1
+    assert len(entries) == 1
+    assert entries[0].state is seeded_state
