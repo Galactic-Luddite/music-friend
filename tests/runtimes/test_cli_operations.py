@@ -637,6 +637,10 @@ def test_refresh_releases_uses_musicbrainz_and_never_opens_a_spotify_source(
             raise AssertionError("unused")
 
     monkeypatch.setattr(cli, "_spotify_source", _refuse_spotify_source)
+    # refresh_once() acquires a real lock file at the lock_path _refresh() builds
+    # from user_data_path(); redirect that to this test's own isolated tmp_path
+    # so the run never touches the real platform user-data directory.
+    monkeypatch.setattr(cli, "user_data_path", lambda *_args, **_kwargs: tmp_path)
 
     from music_friend.domain import (
         Artist,
