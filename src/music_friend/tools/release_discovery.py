@@ -53,10 +53,12 @@ class _ReleaseDiscoveryInterrupted(RuntimeError):
         self,
         artist_local_id: str,
         completed: tuple[ArtistReleaseDiscoveryResult, ...],
+        unmapped: int = 0,
     ) -> None:
         super().__init__()
         self.artist_local_id = artist_local_id
         self.completed = completed
+        self.unmapped = unmapped
 
 
 def discover_releases(
@@ -84,21 +86,27 @@ def discover_releases(
                 start = position
                 break
     completed: list[ArtistReleaseDiscoveryResult] = []
+    unmapped = 0
     for entry in entries[start:]:
         if not any(reference.source == source_name for reference in entry.artist.source_refs):
             # Not yet mapped to this release source (e.g. an artist identity
             # mapping hasn't resolved this artist to a musicbrainz identity
             # yet): skip it entirely rather than counting it as a failure.
             # Mapping and its retry window are identity_mapping's job, not
-            # discover_releases'.
+            # discover_releases'. Still surfaced to the caller so a run that
+            # skipped everyone for lack of mapping does not report a silent
+            # success with no signal (issue #48).
+            unmapped += 1
             continue
         try:
             completed.append(
                 _discover_artist(catalog, source_name, source, entry.artist, checked_at)
             )
         except _SourceCallStopped:
-            raise _ReleaseDiscoveryInterrupted(entry.artist.local_id, tuple(completed)) from None
-    return ReleaseDiscoveryResult(tuple(completed))
+            raise _ReleaseDiscoveryInterrupted(
+                entry.artist.local_id, tuple(completed), unmapped
+            ) from None
+    return ReleaseDiscoveryResult(tuple(completed), unmapped)
 
 
 def _discover_artist(
