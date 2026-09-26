@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 import os
 import random
+import sys
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import TypeVar
+from typing import NoReturn, TypeVar
 from uuid import uuid4
 
 from music_friend.configuration import LocalConfig
@@ -67,12 +68,57 @@ from music_friend.tools.release_discovery import (
 
 _DEADLINE_SECONDS = 600
 _LOCK_STALE_AFTER = timedelta(seconds=_DEADLINE_SECONDS)
-_SOURCE_WINDOW_SECONDS = 30.0
 _MAX_LIMIT_PAUSES = 2
 #: AIMD recovery: this many consecutive successful requests earns back one call
-#: per window, up to MAX_SOURCE_WINDOW_CALLS.
+#: per window, up to the profile's maximum.
 _RECOVERY_STREAK = 5
 _FALLBACK_LADDER = (60, 120, 240, 480, 900)
+#: Tolerance for comparing monotonic timestamps, so a sleep that lands a hair short of
+#: a window boundary (float rounding) never turns into a zero-length sleep loop.
+_CLOCK_EPSILON = 1e-6
+
+
+@dataclass(frozen=True, slots=True)
+class _PacingProfile:
+    """How one source's egress is paced: up to ``max_calls`` requests per ``window_seconds``.
+
+    An adaptive profile learns its per-window budget with AIMD (halved on a limit,
+    grown back after a success streak) and persists it for the next run. A fixed
+    profile always runs at ``max_calls`` per window: a limit response still pauses or
+    stops the run and records the cooldown, but never lowers the steady rate.
+    """
+
+    window_seconds: float
+    min_calls: int
+    max_calls: int
+    adaptive: bool
+
+
+#: Spotify publishes no fixed rate, so its budget is learned per 30-second window.
+_ADAPTIVE_PROFILE = _PacingProfile(30.0, MIN_SOURCE_WINDOW_CALLS, MAX_SOURCE_WINDOW_CALLS, True)
+#: MusicBrainz documents a steady 1 request per second per client; pacing below that
+#: only makes a normal daily run miss the refresh deadline.
+_MUSICBRAINZ_PROFILE = _PacingProfile(1.0, 1, 1, False)
+
+
+def _pacing_profile(source_name: str) -> _PacingProfile:
+    return _MUSICBRAINZ_PROFILE if source_name == "musicbrainz" else _ADAPTIVE_PROFILE
+
+
+def _deadline_clock() -> float:
+    """Elapsed-time clock for the refresh deadline that keeps counting while the host sleeps.
+
+    ``time.monotonic`` is ``mach_absolute_time`` on macOS and ``CLOCK_MONOTONIC`` on Linux;
+    neither advances while the machine is suspended, so a laptop that sleeps during a
+    refresh would otherwise let the run continue far past its wall-clock deadline. macOS
+    ``CLOCK_MONOTONIC`` and Linux ``CLOCK_BOOTTIME`` both include suspended time; Windows'
+    ``time.monotonic`` already does.
+    """
+    if sys.platform == "darwin":
+        return time.clock_gettime(time.CLOCK_MONOTONIC)
+    if sys.platform.startswith("linux"):
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +130,9 @@ class RefreshInvocation:
     skip_reason: str | None = None
     #: Set together on a partial outcome: why the run stopped short, an ISO-8601
     #: timestamp of when the source is expected to be ready again, and how many
-    #: units of work (artists, pages) remained undone.
+    #: units of work (artists, pages) remained undone. An ``already_running``
+    #: outcome carries ``reason="already_running"`` and, when the held lock is
+    #: readable, ``retry_after`` set to when that lock becomes stale.
     reason: str | None = None
     retry_after: str | None = None
     remaining: int | None = None
@@ -98,6 +146,9 @@ class _RefreshCounts:
     records_updated: int = 0
     records_skipped: int = 0
     signals_created: int = 0
+    #: Signals reconstructed at the start of the run for discoveries an earlier,
+    #: interrupted run committed without their signal; not this run's own output.
+    signals_repaired: int = 0
     failures: int = 0
     successes: int = 0
     catalog_skipped_fresh: int = 0
@@ -147,6 +198,7 @@ class _PacedSource:
     ) -> None:
         self.source = source
         self.source_name = source_name
+        self.profile = _pacing_profile(source_name)
         self.started_at = started_at
         self.checked_at = checked_at
         self.monotonic = monotonic
@@ -161,8 +213,12 @@ class _PacedSource:
             if saved_limit is not None and not saved_limit.retry_is_exact
             else 0
         )
+        # A fixed profile ignores a persisted budget: an older release stored a learned
+        # MusicBrainz budget of one call per 30 seconds, which must not carry forward.
         self.window_calls = (
-            MAX_SOURCE_WINDOW_CALLS if saved_limit is None else saved_limit.window_calls
+            saved_limit.window_calls
+            if self.profile.adaptive and saved_limit is not None
+            else self.profile.max_calls
         )
         self._success_streak = 0
         self.limit_observation = saved_limit
@@ -173,6 +229,9 @@ class _PacedSource:
             and saved_limit.retry_at is not None
             and saved_limit.retry_at > checked_at
         )
+        #: Why this source stopped making requests: ``rate_limited``, ``quota_exhausted``,
+        #: or ``deadline``; ``None`` while it is still usable.
+        self.stop_reason: str | None = "rate_limited" if self.stopped else None
 
     def capabilities(self) -> ProviderCapabilities:
         return self.source.capabilities()
@@ -271,8 +330,7 @@ class _PacedSource:
                     self._consecutive_limits,
                     self.window_calls,
                 )
-                self.stopped = True
-                raise _SourceCallStopped() from None
+                self._stop("quota_exhausted")
             except RateLimitedError as error:
                 observed_at = self._wall_now()
                 self._consecutive_limits += 1
@@ -298,42 +356,46 @@ class _PacedSource:
                     self.pauses += 1
                     self.sleeper(float(delay))
                     continue
-                self.stopped = True
-                raise _SourceCallStopped() from None
+                self._stop("rate_limited")
             self._consecutive_limits = 0
             self._estimated_limits = 0
             self._on_success()
             return result
 
+    def _stop(self, reason: str) -> NoReturn:
+        self.stopped = True
+        self.stop_reason = reason
+        raise _SourceCallStopped() from None
+
     def _on_limited(self) -> None:
         """AIMD multiplicative decrease: halve the learned per-window call budget."""
         self._success_streak = 0
         self._fresh_limit = True
-        self.window_calls = max(MIN_SOURCE_WINDOW_CALLS, self.window_calls // 2)
+        if self.profile.adaptive:
+            self.window_calls = max(self.profile.min_calls, self.window_calls // 2)
 
     def _on_success(self) -> None:
         """AIMD additive increase: grow the budget by one call after a success streak."""
         self._fresh_limit = False
         self._success_streak += 1
-        if self._success_streak >= _RECOVERY_STREAK and self.window_calls < MAX_SOURCE_WINDOW_CALLS:
+        if self._success_streak >= _RECOVERY_STREAK and self.window_calls < self.profile.max_calls:
             self._success_streak = 0
             self.window_calls += 1
 
     def _pace(self) -> None:
+        window = self.profile.window_seconds
         while True:
             now = self.monotonic()
             if now - self.started_at >= _DEADLINE_SECONDS:
-                self.stopped = True
-                raise _SourceCallStopped()
-            while self._request_times and now - self._request_times[0] >= _SOURCE_WINDOW_SECONDS:
+                self._stop("deadline")
+            while self._request_times and now - self._request_times[0] >= window - _CLOCK_EPSILON:
                 self._request_times.popleft()
             if len(self._request_times) < self.window_calls:
                 self._request_times.append(now)
                 return
-            delay = self._request_times[0] + _SOURCE_WINDOW_SECONDS - now
+            delay = max(self._request_times[0] + window - now, _CLOCK_EPSILON)
             if now + delay - self.started_at >= _DEADLINE_SECONDS:
-                self.stopped = True
-                raise _SourceCallStopped()
+                self._stop("deadline")
             self.sleeper(delay)
 
     def _wall_now(self) -> datetime:
@@ -354,6 +416,9 @@ class _DeadlineEventClient:
     client: TicketmasterClient
     started_at: float
     monotonic: Callable[[], float]
+    #: Provider requests issued through this wrapper (each lookup is one request).
+    requests: int = 0
+    deadline_reached: bool = False
 
     def is_configured(self) -> bool:
         self._check()
@@ -361,6 +426,7 @@ class _DeadlineEventClient:
 
     def resolve_music_attractions(self, artist_name: str) -> tuple[TicketmasterAttraction, ...]:
         self._check()
+        self.requests += 1
         return self.client.resolve_music_attractions(artist_name)
 
     def events_for_attraction(
@@ -369,10 +435,12 @@ class _DeadlineEventClient:
         config: LocalConfig,
     ) -> tuple[TicketmasterEvent, ...]:
         self._check()
+        self.requests += 1
         return self.client.events_for_attraction(attraction, config)
 
     def _check(self) -> None:
         if self.monotonic() - self.started_at >= _DEADLINE_SECONDS:
+            self.deadline_reached = True
             raise _DeadlineExpired()
 
 
@@ -442,7 +510,7 @@ def refresh_once(
         raise ValueError("lock_path must be a Path")
     if type(force) is not bool:
         raise ValueError("force must be a boolean")
-    clock = time.monotonic if monotonic is None else monotonic
+    clock = _deadline_clock if monotonic is None else monotonic
     if not callable(clock):
         raise ValueError("monotonic must be callable")
     acquisition_clock = time.time if lock_clock is None else lock_clock
@@ -459,7 +527,12 @@ def refresh_once(
         raise ValueError("rng must be a random.Random")
     lease = _acquire_lock(lock_path, lock_clock=acquisition_clock)
     if lease is None:
-        return RefreshInvocation(None, True)
+        return RefreshInvocation(
+            None,
+            True,
+            reason="already_running",
+            retry_after=_lock_stale_at(lock_path),
+        )
 
     try:
         started_monotonic = clock()
@@ -509,6 +582,7 @@ def refresh_once(
         _repair_inbox_entries(application, checked_at, counts)
         run_id = _run_id()
         deadline_exceeded = False
+        extra_sources: list[_PacedSource] = []
         for component in components:
             if clock() - started_monotonic >= _DEADLINE_SECONDS:
                 counts.failures += 1
@@ -527,23 +601,30 @@ def refresh_once(
                 if limited_release_source.stopped:
                     break
                 if additional_release_sources:
-                    _run_additional_release_sources(
-                        application,
-                        additional_release_sources,
-                        checked_at,
-                        counts,
-                        started_monotonic=started_monotonic,
-                        clock=clock,
-                        sleep=sleep,
-                        entropy=entropy,
+                    extra_sources.extend(
+                        _run_additional_release_sources(
+                            application,
+                            additional_release_sources,
+                            checked_at,
+                            counts,
+                            started_monotonic=started_monotonic,
+                            clock=clock,
+                            sleep=sleep,
+                            entropy=entropy,
+                        )
                     )
             else:
                 _run_events(application, config, limited_event_client, checked_at, counts)
+        # Every provider request made during this run counts, whichever provider served it:
+        # catalog, identity mapping, release discovery, additional release sources, events.
+        paced_sources = _distinct_sources(limited_source, limited_release_source, *extra_sources)
+        counts.source_requests = sum(paced.requests for paced in paced_sources) + (
+            0 if limited_event_client is None else limited_event_client.requests
+        )
+        counts.limit_pauses = sum(paced.pauses for paced in paced_sources)
         if limited_source is not None and (
             "catalog" in components or limited_source is limited_release_source
         ):
-            counts.source_requests = limited_source.requests
-            counts.limit_pauses = limited_source.pauses
             # Persist the learned pacing rate (and any cooldown) so the next invocation
             # starts from where this one left off, whether it hit a limit or recovered.
             # Gated on the catalog component actually running (or the release source
@@ -559,6 +640,7 @@ def refresh_once(
             and counts.successes == 0
             and counts.failures == 0
             and counts.signals_created == 0
+            and counts.signals_repaired == 0
         ):
             return RefreshInvocation(None, False, skip_reason=counts.events_skip_reason)
         status = _status(counts)
@@ -574,7 +656,17 @@ def refresh_once(
         )
         application.put_refresh_run(run)
         reason, retry_after, remaining = _partial_details(
-            status, limited_source, deadline_exceeded, counts
+            status,
+            # The catalog source names the reason only when the catalog actually ran: an
+            # unused Spotify wrapper constructed during a Spotify cooldown must not be
+            # blamed for a MusicBrainz-only release run.
+            _distinct_sources(
+                limited_release_source,
+                limited_source if "catalog" in components else None,
+            ),
+            deadline_exceeded
+            or (limited_event_client is not None and limited_event_client.deadline_reached),
+            counts,
         )
         return RefreshInvocation(
             run,
@@ -588,24 +680,45 @@ def refresh_once(
         _release_lock(lease)
 
 
+def _distinct_sources(*sources: _PacedSource | None) -> tuple[_PacedSource, ...]:
+    """The paced wrappers in order, each once (a shared wrapper appears only once)."""
+    distinct: list[_PacedSource] = []
+    for paced in sources:
+        if paced is not None and all(paced is not seen for seen in distinct):
+            distinct.append(paced)
+    return tuple(distinct)
+
+
 def _partial_details(
     status: RefreshStatus,
-    limited_source: _PacedSource | None,
+    primary_sources: Sequence[_PacedSource],
     deadline_exceeded: bool,
     counts: _RefreshCounts,
 ) -> tuple[str | None, str | None, int | None]:
-    """The reason/retry_after/remaining triple surfaced on a partial refresh result."""
+    """The reason/retry_after/remaining triple surfaced on a partial refresh result.
+
+    Every partial result carries a reason. The first primary source that stopped making
+    requests names it (``rate_limited`` with its ``retry_after``, ``quota_exhausted``, or
+    ``deadline``); otherwise the shared deadline, and failing that ``source_errors`` for
+    a run in which some items failed while others succeeded.
+    """
     if status is not RefreshStatus.PARTIAL:
         return None, None, None
-    observation = None if limited_source is None else limited_source.limit_observation
-    if observation is not None and observation.state is SourceLimitState.QUOTA_EXHAUSTED:
-        return "quota_exhausted", None, counts.records_skipped
-    if observation is not None and observation.state is SourceLimitState.COOLING_DOWN:
-        retry_after = None if observation.retry_at is None else observation.retry_at.isoformat()
-        return "rate_limited", retry_after, counts.records_skipped
+    for paced in primary_sources:
+        if paced.stop_reason is None:
+            continue
+        observation = paced.limit_observation
+        if paced.stop_reason == "rate_limited" and observation is not None:
+            retry_at = observation.retry_at
+            return (
+                "rate_limited",
+                None if retry_at is None else retry_at.isoformat(),
+                counts.records_skipped,
+            )
+        return paced.stop_reason, None, counts.records_skipped
     if deadline_exceeded:
         return "deadline", None, counts.records_skipped
-    return None, None, counts.records_skipped
+    return "source_errors", None, counts.records_skipped
 
 
 def _wall_clock_now(wall_clock: Callable[[], datetime]) -> datetime:
@@ -774,7 +887,7 @@ def _run_additional_release_sources(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     entropy: random.Random,
-) -> None:
+) -> list[_PacedSource]:
     """Iterate additional configured release sources in order (issue #42).
 
     Each source gets its own ``_PacedSource`` (independent pacing and cooldown
@@ -782,12 +895,14 @@ def _run_additional_release_sources(
     release source. A source that is rate-limited, unreachable, or otherwise
     fails does not prevent the next configured source from running: its name is
     recorded in ``counts.partial_sources`` and the run continues rather than
-    aborting, so e.g. a Deezer outage never blocks MusicBrainz results.
+    aborting, so e.g. a Deezer outage never blocks MusicBrainz results. Returns the
+    paced wrappers it used so the caller can count their requests.
     """
+    used: list[_PacedSource] = []
     for extra_name, extra_source in additional_release_sources:
         if clock() - started_monotonic >= _DEADLINE_SECONDS:
             counts.partial_sources.append(extra_name)
-            return
+            return used
         paced_extra = _PacedSource(
             extra_source,
             source_name=extra_name,
@@ -798,6 +913,7 @@ def _run_additional_release_sources(
             saved_limit=application.get_source_limit(extra_name),
             rng=entropy,
         )
+        used.append(paced_extra)
         try:
             _run_releases(application, extra_name, paced_extra, checked_at, counts)
         except Exception:
@@ -809,6 +925,7 @@ def _run_additional_release_sources(
             application.put_source_limit(paced_extra.limit_observation)
         else:
             application.put_source_limit(paced_extra.current_observation())
+    return used
 
 
 def _count_releases(
@@ -950,6 +1067,7 @@ def _record_candidate(
     material: object,
     checked_at: datetime,
     counts: _RefreshCounts,
+    repair: bool = False,
 ) -> None:
     reference = _single_reference(provider_reference)
     artist = application.get_artist(artist_local_id)
@@ -987,7 +1105,10 @@ def _record_candidate(
             _inbox_id(signal.local_id), signal.local_id, InboxState.UNREAD, checked_at, checked_at
         )
     )
-    counts.signals_created += 1
+    if repair:
+        counts.signals_repaired += 1
+    else:
+        counts.signals_created += 1
 
 
 def _repair_inbox_entries(
@@ -1031,6 +1152,7 @@ def _repair_missing_signals(application: MusicFriendApplication, counts: _Refres
                 material=_release_material(release),
                 checked_at=release_discovery.last_seen_at,
                 counts=counts,
+                repair=True,
             )
         except Exception:
             counts.failures += 1
@@ -1051,6 +1173,7 @@ def _repair_missing_signals(application: MusicFriendApplication, counts: _Refres
                 material=_event_material(event),
                 checked_at=event_discovery.last_seen_at,
                 counts=counts,
+                repair=True,
             )
         except Exception:
             counts.failures += 1
@@ -1156,6 +1279,7 @@ def _summary(counts: _RefreshCounts) -> RefreshSummary:
         RefreshMetricKind.RECORDS_UPDATED: counts.records_updated,
         RefreshMetricKind.RECORDS_SKIPPED: counts.records_skipped,
         RefreshMetricKind.SIGNALS_CREATED: counts.signals_created,
+        RefreshMetricKind.SIGNALS_REPAIRED: counts.signals_repaired,
         RefreshMetricKind.FAILURES: counts.failures,
         RefreshMetricKind.CATALOG_SKIPPED_FRESH: counts.catalog_skipped_fresh,
         RefreshMetricKind.LIMIT_PAUSES: counts.limit_pauses,
@@ -1207,6 +1331,18 @@ def _acquire_lock(
             os.close(descriptor)
         return _LockLease(path, token, created_at, metadata.st_dev, metadata.st_ino)
     except OSError:
+        return None
+
+
+def _lock_stale_at(path: Path) -> str | None:
+    """When a held refresh lock becomes stale and can be taken over, as ISO-8601 UTC."""
+    held = _read_lock(path)
+    if held is None:
+        return None
+    stale_at = held.created_at + _LOCK_STALE_AFTER.total_seconds()
+    try:
+        return datetime.fromtimestamp(stale_at, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
         return None
 
 

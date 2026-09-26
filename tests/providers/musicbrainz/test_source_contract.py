@@ -43,6 +43,7 @@ from tests.contracts.source_contract import (
     assert_retry_is_clamped,
     assert_source_text_is_sanitized,
 )
+from tests.providers.musicbrainz.live_fixtures import load_live_release_group_search
 
 _RECENT_RELEASES_CASE = next(
     case for case in OPERATION_CASES if case.operation == "recent_releases"
@@ -194,39 +195,18 @@ def test_recent_releases_pagination_is_bounded_and_stops_at_source_end() -> None
     factory = MusicBrainzSourceFactory()
     source = factory.create(capabilities=frozenset({Capability.RECENT_RELEASES}))
     artist_ref = factory.example_artist_reference()
+    # Page one is a verbatim live search response (2 of its ``count`` rows); page two
+    # is that response advanced past its last row, which must end pagination.
+    live = load_live_release_group_search()
+    rows = live["release-groups"]
     factory._transport.pages = [
-        {
-            "release-groups": [
-                {
-                    "id": _RGID,
-                    "title": DEFAULT_PROVIDER_TEXT,
-                    "primary-type": "Album",
-                    "first-release-date": "2026-01-01",
-                    "score": 100,
-                    "artist-credit": [{"artist": {"id": _MBID}}],
-                }
-            ],
-            "release-group-count": 2,
-        },
-        {
-            "release-groups": [
-                {
-                    "id": "33333333-3333-3333-3333-333333333333",
-                    "title": DEFAULT_PROVIDER_TEXT,
-                    "primary-type": "Album",
-                    "first-release-date": "2025-01-01",
-                    "score": 100,
-                    "artist-credit": [{"artist": {"id": _MBID}}],
-                }
-            ],
-            "release-group-count": 2,
-        },
+        live,
+        {**live, "offset": live["count"], "release-groups": []},
     ]
 
     first = source.recent_releases((artist_ref,), FIXED_OBSERVED_AT)
-    assert len(first.items) == 1
-    assert first.next_cursor == "1"
+    assert first.next_cursor == str(len(rows))
 
     second = source.recent_releases((artist_ref,), FIXED_OBSERVED_AT, first.next_cursor)
-    assert len(second.items) == 1
+    assert second.items == ()
     assert second.next_cursor is None

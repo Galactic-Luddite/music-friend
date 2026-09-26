@@ -82,7 +82,15 @@ def test_clock_and_refresh_result_reject_invalid_callback_results() -> None:
     with pytest.raises(ValueError):
         catalog_server._refresh_result(SimpleNamespace(already_running=False, run=object()))
     assert catalog_server._refresh_result(SimpleNamespace(already_running=True, run=None)) == {
-        "status": "partial"
+        "status": "partial",
+        "reason": "already_running",
+    }
+    assert catalog_server._refresh_result(
+        SimpleNamespace(already_running=True, run=None, retry_after="2026-09-02T12:10:00+00:00")
+    ) == {
+        "status": "partial",
+        "reason": "already_running",
+        "retry_after": "2026-09-02T12:10:00+00:00",
     }
     assert (
         catalog_server._now(lambda: datetime(2026, 9, 2, tzinfo=timezone.utc)).tzinfo
