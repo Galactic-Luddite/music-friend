@@ -52,6 +52,7 @@ from music_friend.domain import (
 )
 from music_friend.errors import QuotaExhaustedError, RateLimitedError
 from music_friend.providers import MusicSource, Page, ProviderCapabilities, ProviderHealth
+from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.ticketmaster import (
     TicketmasterAttraction,
     TicketmasterClient,
@@ -435,24 +436,23 @@ def refresh_once(
             and release_source is source
             and release_source_name == source_name
         )
-        limited_release_source = (
-            limited_source
-            if shares_paced_source
-            else (
-                None
-                if release_source is None
-                else _PacedSource(
-                    release_source,
-                    source_name=release_source_name,
-                    started_at=started_monotonic,
-                    checked_at=checked_at,
-                    monotonic=clock,
-                    sleeper=sleep,
-                    saved_limit=application.get_source_limit(release_source_name),
-                    rng=entropy,
-                )
+        limited_release_source: _PacedSource | None
+        if shares_paced_source:
+            limited_release_source = limited_source
+        elif release_source is None:
+            limited_release_source = None
+        else:
+            assert release_source_name is not None  # set together with release_source above
+            limited_release_source = _PacedSource(
+                release_source,
+                source_name=release_source_name,
+                started_at=started_monotonic,
+                checked_at=checked_at,
+                monotonic=clock,
+                sleeper=sleep,
+                saved_limit=application.get_source_limit(release_source_name),
+                rng=entropy,
             )
-        )
         limited_event_client = (
             None
             if event_client is None
@@ -473,7 +473,7 @@ def refresh_once(
                     raise AssertionError("catalog refresh requires a source")
                 _run_catalog(application, source_name, limited_source, checked_at, counts, force)
             elif component == "releases":
-                if limited_release_source is None:
+                if limited_release_source is None or release_source_name is None:
                     raise AssertionError("release refresh requires a release_source")
                 _run_releases(
                     application, release_source_name, limited_release_source, checked_at, counts
@@ -633,8 +633,11 @@ def _run_releases(
     checked_at: datetime,
     counts: _RefreshCounts,
 ) -> None:
-    # Run identity mapping before release discovery if using MusicBrainz
-    if source_name == "musicbrainz":
+    # Run identity mapping before release discovery if using MusicBrainz. Per-artist
+    # network failures are handled inside run_identity_mapping itself (that artist is
+    # recorded unmapped and the pass continues); only RateLimitedError propagates here,
+    # so pacing/cooldown accounting for this source stays correct.
+    if source_name == "musicbrainz" and isinstance(source.source, MusicBrainzSource):
         try:
             run_identity_mapping(
                 application._catalog,
@@ -643,14 +646,10 @@ def _run_releases(
                 checked_at,
             )
         except RateLimitedError:
-            # If we hit a rate limit during mapping, record it and stop
             counts.failures += 1
             if source.limit_observation is not None:
                 application.put_source_limit(source.available_observation())
             return
-        except Exception:
-            # Other errors during mapping don't stop the whole release discovery
-            pass
 
     checkpoint = application.get_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
     try:

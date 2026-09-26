@@ -41,13 +41,24 @@ class MusicBrainzTransport:
     def get(
         self,
         path: str,
-        query: Mapping[str, str] | None = None,
+        query: Mapping[str, str | list[str]] | None = None,
     ) -> JsonValue:
-        """Make a GET request and return parsed JSON, enforcing local 1 req/s pacing."""
+        """Make a GET request and return parsed JSON, enforcing local 1 req/s pacing.
+
+        A query value may be a ``list[str]`` to send one query-string parameter
+        name repeated for each element (used for batched ``resource=`` lookups);
+        every other value must be ``str``.
+        """
         if type(path) is not str:
             raise ValueError("path must be a string")
         if query is not None and not isinstance(query, Mapping):
             raise ValueError("query must be a Mapping")
+        if query is not None:
+            for value in query.values():
+                if not isinstance(value, str) and not (
+                    isinstance(value, list) and all(isinstance(item, str) for item in value)
+                ):
+                    raise ValueError("query values must be str or list[str]")
 
         # Enforce local 1 req/s pacing
         if self._pacing is not None:

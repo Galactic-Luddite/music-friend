@@ -1,230 +1,205 @@
-"""Identity mapping from Spotify artists to MusicBrainz IDs."""
+"""Identity mapping from Spotify artists to MusicBrainz identities.
+
+Runs at the start of the ``releases`` refresh component whenever the
+configured release source is not Spotify. Resolves each watchlisted artist's
+MusicBrainz identity by batching Spotify-URL relation lookups first, falling
+back to a name search for artists the batch call left unresolved, and
+recording every attempt (mapped or unmapped) so unmapped artists are retried
+only after ``MAPPING_RETRY_INTERVAL`` has elapsed.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Sequence
 
-from music_friend.domain import (
-    DAILY_REFRESH_MINUTES,
-    Artist,
-    IdentityConfidence,
-    SourceReference,
-)
-from music_friend.errors import RateLimitedError
-from music_friend.providers import MusicSource
+from music_friend.domain import DAILY_REFRESH_MINUTES, Artist, IdentityConfidence, SourceReference
+from music_friend.errors import InvalidSourceResponseError, SourceUnavailableError
+from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.store import Catalog
 
-#: Retry interval for unmapped artists: 7 days
+#: Unmapped artists are retried no more often than once per this interval.
 MAPPING_RETRY_INTERVAL = timedelta(minutes=7 * DAILY_REFRESH_MINUTES)
 
-#: Minimum score for artist name search acceptance
+#: Minimum score for a name-search hit to be accepted as a mapping.
 MIN_NAME_SEARCH_SCORE = 90
+
+_SPOTIFY_ARTIST_URL = "https://open.spotify.com/artist/{spotify_id}"
 
 
 def run_identity_mapping(
     catalog: Catalog,
-    source: MusicSource,
+    source: MusicBrainzSource,
     source_name: str,
     checked_at: datetime,
 ) -> None:
-    """Map watchlist artists to MusicBrainz identities.
+    """Map watchlisted artists lacking a ``source_name`` identity.
 
-    For each watched artist without a musicbrainz SourceReference:
-    1. Try to resolve via Spotify URL -> MBID relation
-    2. Fall back to artist name search with score thresholds
-    3. Record unmapped artists with retry gating
-
-    Args:
-        catalog: The catalog for artist/mapping storage
-        source: A MusicBrainz MusicSource instance
-        source_name: The source name (e.g., "musicbrainz")
-        checked_at: The timestamp for this mapping run
+    Artists already carrying a ``SourceReference`` for ``source_name`` are
+    skipped. Unmapped artists whose most recent attempt is within
+    ``MAPPING_RETRY_INTERVAL`` of ``checked_at`` are skipped too. A
+    ``RateLimitedError`` from the transport propagates unchanged so the
+    caller's paced source records the cooldown; mapping simply stops for this
+    run rather than marking the remaining artists unmapped.
     """
-    # Get all watched artists who don't have a musicbrainz identity yet
-    artists_needing_mapping = _get_artists_needing_mapping(catalog)
+    candidates = _artists_needing_mapping(catalog, source_name)
+    eligible = [
+        artist
+        for artist in candidates
+        if not _skip_for_retry_window(catalog, artist.local_id, source_name, checked_at)
+    ]
+    if not eligible:
+        return
 
-    for artist in artists_needing_mapping:
-        # Check if this artist was recently tried and marked unmapped
-        if _should_skip_unmapped_retry(catalog, artist.local_id, checked_at):
+    url_by_artist: dict[str, str] = {}
+    for artist in eligible:
+        spotify_ref = _spotify_ref(artist)
+        if spotify_ref is not None:
+            url_by_artist[artist.local_id] = _SPOTIFY_ARTIST_URL.format(
+                spotify_id=spotify_ref.native_id
+            )
+
+    url_hits: dict[str, str | None] = {}
+    if url_by_artist:
+        try:
+            url_hits = source.lookup_artists_by_spotify_urls(tuple(url_by_artist.values()))
+        except (InvalidSourceResponseError, SourceUnavailableError):
+            # A malformed or unreachable batch response falls back to name search for
+            # every eligible artist rather than aborting the whole mapping pass;
+            # RateLimitedError is not caught here and propagates to the caller.
+            url_hits = {}
+
+    for artist in eligible:
+        url = url_by_artist.get(artist.local_id)
+        mbid = url_hits.get(url) if url is not None else None
+        if mbid is not None:
+            _record_mapping(
+                catalog,
+                artist,
+                source_name,
+                mbid,
+                IdentityConfidence.EXTERNAL_ID,
+                "url_relation",
+                checked_at,
+            )
             continue
 
         try:
-            # First, try to resolve via Spotify URL relations
-            mapping_result = _try_url_based_mapping(source, artist)
-
-            if mapping_result is None:
-                # Fall back to name-based search
-                mapping_result = _try_name_based_mapping(source, artist)
-
-            if mapping_result is not None:
-                mbid, confidence, method = mapping_result
-                # Store the successful mapping
-                catalog.put_artist(
-                    Artist(
-                        local_id=artist.local_id,
-                        name=artist.name,
-                        refs=[
-                            *artist.refs,
-                            SourceReference(
-                                source=source_name,
-                                identity=mbid,
-                                confidence=confidence,
-                            ),
-                        ],
-                    ),
-                    updated_at=checked_at,
-                )
-                # Record successful mapping
-                catalog.put_artist_identity_mapping(
-                    artist_local_id=artist.local_id,
-                    source=source_name,
-                    status="mapped",
-                    identity=mbid,
-                    method=method,
-                    checked_at=checked_at,
-                )
-            else:
-                # No mapping found; record as unmapped
-                catalog.put_artist_identity_mapping(
-                    artist_local_id=artist.local_id,
-                    source=source_name,
-                    status="unmapped",
-                    identity=None,
-                    method=None,
-                    checked_at=checked_at,
-                )
-        except RateLimitedError:
-            # Stop processing if we hit a rate limit
-            return
-
-
-def _get_artists_needing_mapping(catalog: Catalog) -> Sequence[Artist]:
-    """Get all watched artists without a musicbrainz SourceReference."""
-    watchlist = catalog.list_watchlist(limit=10000)
-    needing_mapping = []
-
-    for entry in watchlist:
-        artist = catalog.get_artist(entry.artist_local_id)
-        if artist is None:
+            hits = source.search_artist_by_name(artist.display_name, limit=3)
+        except (InvalidSourceResponseError, SourceUnavailableError):
+            # This artist's name search failed; record unmapped and continue with the
+            # rest of the batch rather than failing the whole mapping pass.
+            catalog.put_artist_identity_mapping(
+                artist_local_id=artist.local_id,
+                source=source_name,
+                status="unmapped",
+                method="none",
+                attempted_at=checked_at,
+            )
             continue
+        accepted = _accept_name_search(hits)
+        if accepted is not None:
+            _record_mapping(
+                catalog,
+                artist,
+                source_name,
+                accepted,
+                IdentityConfidence.SOURCE_ONLY,
+                "name_search",
+                checked_at,
+            )
+        else:
+            catalog.put_artist_identity_mapping(
+                artist_local_id=artist.local_id,
+                source=source_name,
+                status="unmapped",
+                method="none",
+                attempted_at=checked_at,
+            )
 
-        # Check if already has musicbrainz reference
-        has_musicbrainz = any(ref.source == "musicbrainz" for ref in artist.refs)
-        if not has_musicbrainz:
-            needing_mapping.append(artist)
 
-    return needing_mapping
+def _artists_needing_mapping(catalog: Catalog, source_name: str) -> tuple[Artist, ...]:
+    seen: dict[str, Artist] = {}
+    for entry in catalog.list_watchlist(limit=10_000):
+        artist = entry.artist
+        if artist.local_id in seen:
+            continue
+        if any(ref.source == source_name for ref in artist.source_refs):
+            continue
+        seen[artist.local_id] = artist
+    return tuple(seen.values())
 
 
-def _should_skip_unmapped_retry(
+def _skip_for_retry_window(
     catalog: Catalog,
     artist_local_id: str,
+    source_name: str,
     checked_at: datetime,
 ) -> bool:
-    """Check if an unmapped artist should be skipped due to retry gating."""
-    mapping = catalog.get_artist_identity_mapping(artist_local_id, "musicbrainz")
-    if mapping is None:
+    mapping = catalog.get_artist_identity_mapping(artist_local_id, source_name)
+    if mapping is None or mapping.get("status") != "unmapped":
         return False
-
-    if mapping.get("status") != "unmapped":
+    attempted_at_raw = mapping.get("attempted_at")
+    if not isinstance(attempted_at_raw, str):
         return False
+    attempted_at = datetime.fromisoformat(attempted_at_raw)
+    return checked_at - attempted_at < MAPPING_RETRY_INTERVAL
 
-    last_checked = mapping.get("checked_at")
-    if last_checked is None:
-        return False
 
-    last_checked_dt = (
-        last_checked if isinstance(last_checked, datetime) else datetime.fromisoformat(last_checked)
+def _spotify_ref(artist: Artist) -> SourceReference | None:
+    for ref in artist.source_refs:
+        if ref.source == "spotify":
+            return ref
+    return None
+
+
+def _accept_name_search(hits: list[dict[str, object]]) -> str | None:
+    if not hits:
+        return None
+    top_score = hits[0]["score"]
+    if not isinstance(top_score, int) or top_score < MIN_NAME_SEARCH_SCORE:
+        return None
+    if len(hits) > 1:
+        second_score = hits[1]["score"]
+        if isinstance(second_score, int) and second_score >= MIN_NAME_SEARCH_SCORE:
+            return None
+    top_id = hits[0]["id"]
+    return top_id if isinstance(top_id, str) else None
+
+
+def _record_mapping(
+    catalog: Catalog,
+    artist: Artist,
+    source_name: str,
+    native_id: str,
+    confidence: IdentityConfidence,
+    method: str,
+    checked_at: datetime,
+) -> None:
+    updated_refs = tuple(ref for ref in artist.source_refs if ref.source != source_name) + (
+        SourceReference(
+            source=source_name,
+            native_id=native_id,
+            canonical_url=f"https://musicbrainz.org/artist/{native_id}",
+            observed_at=checked_at,
+            confidence=confidence,
+        ),
+    )
+    catalog.put_artist(
+        Artist(
+            local_id=artist.local_id,
+            display_name=artist.display_name,
+            source_refs=updated_refs,
+            identity_confidence=artist.identity_confidence,
+            observed_at=artist.observed_at,
+        )
+    )
+    catalog.put_artist_identity_mapping(
+        artist_local_id=artist.local_id,
+        source=source_name,
+        status="mapped",
+        method=method,
+        attempted_at=checked_at,
     )
 
-    time_since_last_attempt = checked_at - last_checked_dt
-    return time_since_last_attempt < MAPPING_RETRY_INTERVAL
 
-
-def _try_url_based_mapping(
-    source: MusicSource,
-    artist: Artist,
-) -> tuple[str, IdentityConfidence, str] | None:
-    """Try to resolve via Spotify URL -> MBID relation.
-
-    Returns (mbid, confidence, method) or None if no mapping found.
-    """
-    # Get the Spotify URL from artist refs
-    spotify_url = None
-    for ref in artist.refs:
-        if ref.source == "spotify":
-            spotify_url = f"https://open.spotify.com/artist/{ref.identity}"
-            break
-
-    if spotify_url is None:
-        return None
-
-    # Query MusicBrainz for artist relations via URL
-    # This uses the source's URL lookup capability if available
-    try:
-        mbid = _lookup_mbid_via_url(source, spotify_url)
-        if mbid is not None:
-            return (mbid, IdentityConfidence.EXTERNAL_ID, "url_relation")
-    except Exception:
-        pass
-
-    return None
-
-
-def _try_name_based_mapping(
-    source: MusicSource,
-    artist: Artist,
-) -> tuple[str, IdentityConfidence, str] | None:
-    """Try to resolve via artist name search.
-
-    Accepts only if top score >= 90 AND (no second hit OR second hit score < 90).
-    Returns (mbid, confidence, method) or None if no mapping found.
-    """
-    try:
-        results = _search_artists_by_name(source, artist.name)
-        if not results:
-            return None
-
-        # Must have top result with score >= 90
-        top_score = results[0]["score"]
-        if top_score < MIN_NAME_SEARCH_SCORE:
-            return None
-
-        # Must not have a second result with score >= 90
-        if len(results) > 1 and results[1]["score"] >= MIN_NAME_SEARCH_SCORE:
-            return None
-
-        # Accept the top result
-        mbid = results[0]["id"]
-        return (mbid, IdentityConfidence.SOURCE_ONLY, "name_search")
-    except Exception:
-        pass
-
-    return None
-
-
-def _lookup_mbid_via_url(source: MusicSource, url: str) -> str | None:
-    """Look up MBID from a Spotify artist URL via MusicBrainz."""
-    from music_friend.providers.musicbrainz import MusicBrainzSource
-
-    if not isinstance(source, MusicBrainzSource):
-        return None
-
-    return source.lookup_artist_by_spotify_url(url)
-
-
-def _search_artists_by_name(source: MusicSource, name: str) -> list[dict[str, object]]:
-    """Search for artists by name in MusicBrainz.
-
-    Returns a list of results with 'id' and 'score' keys, sorted by score descending.
-    """
-    from music_friend.providers.musicbrainz import MusicBrainzSource
-
-    if not isinstance(source, MusicBrainzSource):
-        return []
-
-    return source.search_artist_by_name(name, limit=3)
-
-
-__all__ = ["run_identity_mapping", "MAPPING_RETRY_INTERVAL"]
+__all__ = ["run_identity_mapping", "MAPPING_RETRY_INTERVAL", "MIN_NAME_SEARCH_SCORE"]

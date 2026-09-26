@@ -22,6 +22,50 @@ from music_friend.providers import (
 from music_friend.providers.musicbrainz.normalize import normalize_release_group
 from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
 
+#: Maximum ``resource`` parameters per /ws/2/url batch call.
+_URL_BATCH_SIZE = 100
+
+
+def _single_artist_relation_mbid(response: object, url: str, batch_size: int) -> str | None:
+    """Return the MBID for ``url`` only when it has exactly one artist relation.
+
+    ``/ws/2/url`` with a single ``resource`` parameter returns one object shaped
+    like the target URL's own relations; with multiple ``resource`` parameters
+    it returns ``{"url-list": [...]}`` reporting the same shape per resource. Any
+    other shape, or a URL with zero or more than one ``artist``-type relation, is
+    ambiguous or unresolved and must fall back to name search rather than guess.
+    """
+    if not isinstance(response, Mapping):
+        return None
+    if batch_size == 1:
+        candidate = response
+    else:
+        url_list = response.get("url-list")
+        if not isinstance(url_list, list):
+            return None
+        candidate = None
+        for entry in url_list:
+            if isinstance(entry, Mapping) and entry.get("resource") == url:
+                candidate = entry
+                break
+        if candidate is None:
+            return None
+    relations = candidate.get("relations") if isinstance(candidate, Mapping) else None
+    if not isinstance(relations, list):
+        return None
+    artist_ids: set[str] = set()
+    for relation in relations:
+        if not isinstance(relation, Mapping) or relation.get("target-type") != "artist":
+            continue
+        artist = relation.get("artist")
+        if isinstance(artist, Mapping):
+            artist_id = artist.get("id")
+            if isinstance(artist_id, str):
+                artist_ids.add(artist_id)
+    if len(artist_ids) == 1:
+        return next(iter(artist_ids))
+    return None
+
 
 class MusicBrainzSource:
     """MusicBrainz source supporting release discovery only."""
@@ -40,65 +84,44 @@ class MusicBrainzSource:
         return self._capabilities
 
     def health(self) -> ProviderHealth:
-        """Check MusicBrainz API health via a simple request."""
-        try:
-            self._transport.get("artist/5b11f4ce-a62d-471e-81fc-a69a8278c7da")
-        except Exception:
-            pass
+        """Report MusicBrainz as healthy without making a network request.
+
+        MusicBrainz is keyless and has no credential or connectivity state worth
+        probing here; an unreachable service surfaces through ``RateLimitedError``
+        or ``InvalidSourceResponseError`` on the calls that matter (mapping,
+        recent_releases), which must propagate rather than being swallowed.
+        """
         return ProviderHealth(HealthStatus.HEALTHY, self._capabilities)
 
     def search_artists(self, query: str, limit: int) -> Page[Artist]:
         """Not supported."""
         raise CapabilityUnsupportedError()
 
-    def lookup_artist_by_spotify_url(self, spotify_url: str) -> str | None:
-        """Look up MusicBrainz artist ID from a Spotify artist URL.
+    def lookup_artists_by_spotify_urls(self, spotify_urls: Sequence[str]) -> dict[str, str | None]:
+        """Batch-resolve Spotify artist URLs to MusicBrainz artist IDs.
 
-        Uses the MusicBrainz URL lookup endpoint to find artist relations.
-
-        Args:
-            spotify_url: Spotify artist URL (e.g., https://open.spotify.com/artist/...)
-
-        Returns:
-            MusicBrainz artist ID (MBID) if found, None otherwise.
+        Calls ``/ws/2/url?resource=...&inc=artist-rels`` with up to 100
+        ``resource`` parameters per call, chunking larger inputs. A URL is
+        mapped to an MBID only when it carries exactly one ``artist``-type
+        relation; a URL with zero or more than one artist relation (or that is
+        simply absent from the response) maps to ``None`` so the caller can
+        fall back to name search. ``RateLimitedError`` and
+        ``InvalidSourceResponseError`` from the transport propagate unchanged
+        so pacing/cooldown accounting stays correct.
         """
-        if not isinstance(spotify_url, str):
-            return None
-
-        try:
+        if not isinstance(spotify_urls, Sequence):
+            raise ValueError("spotify_urls must be a sequence of URLs")
+        deduped = list(dict.fromkeys(spotify_urls))
+        resolved: dict[str, str | None] = {url: None for url in deduped}
+        for start in range(0, len(deduped), _URL_BATCH_SIZE):
+            batch = deduped[start : start + _URL_BATCH_SIZE]
             response = self._transport.get(
                 "url",
-                query={
-                    "resource": spotify_url,
-                    "inc": "artist-rels",
-                },
+                query={"resource": batch, "inc": "artist-rels"},
             )
-
-            if not isinstance(response, Mapping):
-                return None
-
-            # Check if URL has artist relations
-            rels = response.get("relations")
-            if not isinstance(rels, list):
-                return None
-
-            # Find the artist relation
-            for rel in rels:
-                if not isinstance(rel, Mapping):
-                    continue
-                if rel.get("type") != "artist":
-                    continue
-
-                # Extract artist ID from relation
-                artist = rel.get("artist")
-                if isinstance(artist, Mapping):
-                    artist_id = artist.get("id")
-                    if isinstance(artist_id, str):
-                        return artist_id
-
-            return None
-        except Exception:
-            return None
+            for url in batch:
+                resolved[url] = _single_artist_relation_mbid(response, url, len(batch))
+        return resolved
 
     def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
         """Search for artists by name in MusicBrainz.
@@ -109,42 +132,32 @@ class MusicBrainzSource:
 
         Returns:
             List of dicts with 'id' and 'score' keys, sorted by score descending.
+            Raises ``RateLimitedError``/``InvalidSourceResponseError`` unchanged.
         """
         if not isinstance(name, str) or not name.strip():
             return []
-
-        try:
-            response = self._transport.get(
-                "artist",
-                query={
-                    "query": f'artist:"{name}"',
-                    "limit": str(min(limit, 100)),
-                },
-            )
-
-            if not isinstance(response, Mapping):
-                return []
-
-            artists = response.get("artists")
-            if not isinstance(artists, list):
-                return []
-
-            results = []
-            for artist in artists:
-                if not isinstance(artist, Mapping):
-                    continue
-
-                artist_id = artist.get("id")
-                score = artist.get("score")
-
-                if isinstance(artist_id, str) and isinstance(score, int):
-                    results.append({"id": artist_id, "score": score})
-
-            # Sort by score descending
-            results.sort(key=lambda x: x["score"], reverse=True)
-            return results
-        except Exception:
-            return []
+        response = self._transport.get(
+            "artist",
+            query={
+                "query": f'artist:"{name}"',
+                "limit": str(min(limit, 100)),
+            },
+        )
+        if not isinstance(response, Mapping):
+            raise InvalidSourceResponseError("musicbrainz artist search response must be an object")
+        artists = response.get("artists")
+        if not isinstance(artists, list):
+            raise InvalidSourceResponseError("musicbrainz artist search response missing artists")
+        scored: list[tuple[str, int]] = []
+        for artist in artists:
+            if not isinstance(artist, Mapping):
+                continue
+            artist_id = artist.get("id")
+            score = artist.get("score")
+            if isinstance(artist_id, str) and isinstance(score, int):
+                scored.append((artist_id, score))
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [{"id": artist_id, "score": score} for artist_id, score in scored[:limit]]
 
     def followed_artists(self, cursor: str | None = None) -> Page[Artist]:
         """Not supported."""

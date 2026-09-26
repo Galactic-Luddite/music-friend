@@ -546,16 +546,18 @@ def create_music_server(
         annotations=_READ_ONLY,
     )
     async def list_watchlist(limit: int) -> CallToolResult:
-        return _safe_call(
-            lambda: {
+        def _build() -> dict[str, object]:
+            release_source = _effective_release_source()
+            return {
                 "items": [
-                    _watchlist(item)
+                    _watchlist(item, release_source)
                     for item in application.list_watchlist(
                         limit=_limit(limit, maximum=100, field="limit")
                     )
                 ]
             }
-        )
+
+        return _safe_call(_build)
 
     @server.tool(
         name="update_watchlist",
@@ -1124,23 +1126,18 @@ def _artist(value: Artist) -> dict[str, object]:
     }
 
 
-def _watchlist(value: WatchlistEntry) -> dict[str, object]:
+def _effective_release_source() -> str:
     from music_friend.configuration import LocalConfigStore
 
-    # Check configured release_source
     try:
         config = LocalConfigStore().load()
     except ValueError:
         config = LocalConfig()
-    release_source = config.release_source or "musicbrainz"
+    return config.release_source or "musicbrainz"
 
-    # Determine release_source_status based on whether artist has the configured source identity
-    release_source_status = None
-    if release_source == "musicbrainz":
-        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.source_refs)
-        release_source_status = "mapped" if has_musicbrainz else "unmapped"
 
-    result = {
+def _watchlist(value: WatchlistEntry, release_source: str) -> dict[str, object]:
+    result: dict[str, object] = {
         "artist": _artist(value.artist),
         "inclusion_reason": value.inclusion_reason.value,
         "affinity": {
@@ -1149,8 +1146,12 @@ def _watchlist(value: WatchlistEntry) -> dict[str, object]:
         },
     }
 
-    if release_source_status is not None:
-        result["release_source_status"] = release_source_status
+    # Determine release_source_status based on whether the artist has the
+    # configured source identity. Only musicbrainz has an identity-mapping
+    # concept today; spotify is always the library source of record.
+    if release_source == "musicbrainz":
+        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.source_refs)
+        result["release_source_status"] = "mapped" if has_musicbrainz else "unmapped"
 
     return result
 

@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Literal, TextIO
 
 import httpx
 from platformdirs import user_data_path
@@ -488,15 +488,19 @@ def _setup_config(prior: LocalConfig, prompt: Prompt) -> LocalConfig:
     )
 
 
-def _setup_release_source(prior: str | None, value: str) -> str:
+def _setup_release_source(
+    prior: Literal["spotify", "musicbrainz"] | None, value: str
+) -> Literal["spotify", "musicbrainz"]:
     if type(value) is not str:
         raise ValueError("release_source is invalid")
     normalized = value.strip().lower()
     if not normalized:
         return prior or "musicbrainz"
-    if normalized not in {"spotify", "musicbrainz"}:
-        raise ValueError("release_source is invalid")
-    return normalized
+    if normalized == "spotify":
+        return "spotify"
+    if normalized == "musicbrainz":
+        return "musicbrainz"
+    raise ValueError("release_source is invalid")
 
 
 def _setup_event_area(
