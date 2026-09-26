@@ -356,6 +356,8 @@ def refresh_once(
     checked_at: datetime,
     lock_path: Path,
     force: bool = False,
+    release_source: MusicSource | None = None,
+    release_source_name: str | None = None,
     monotonic: Callable[[], float] | object | None = None,
     lock_clock: Callable[[], float] | object | None = None,
     sleeper: Callable[[float], None] | object | None = None,
@@ -373,6 +375,15 @@ def refresh_once(
         raise ValueError("source must implement the music source contract")
     if source is None and any(component in {"catalog", "releases"} for component in components):
         raise ValueError("source is required for catalog and release refresh")
+    if release_source is not None and not isinstance(release_source, MusicSource):
+        raise ValueError("release_source must implement the music source contract")
+    if release_source_name is not None and (type(release_source_name) is not str or not release_source_name):
+        raise ValueError("release_source_name must be text")
+    if "releases" in components:
+        if release_source is None:
+            release_source = source
+        if release_source_name is None:
+            release_source_name = source_name
     if type(config) is not LocalConfig:
         raise ValueError("config must be LocalConfig")
     if not isinstance(checked_at, datetime) or checked_at.tzinfo is None:
@@ -416,6 +427,20 @@ def refresh_once(
                 rng=entropy,
             )
         )
+        limited_release_source = (
+            None
+            if release_source is None
+            else _PacedSource(
+                release_source,
+                source_name=release_source_name,
+                started_at=started_monotonic,
+                checked_at=checked_at,
+                monotonic=clock,
+                sleeper=sleep,
+                saved_limit=application.get_source_limit(release_source_name),
+                rng=entropy,
+            )
+        )
         limited_event_client = (
             None
             if event_client is None
@@ -436,10 +461,10 @@ def refresh_once(
                     raise AssertionError("catalog refresh requires a source")
                 _run_catalog(application, source_name, limited_source, checked_at, counts, force)
             elif component == "releases":
-                if limited_source is None:
-                    raise AssertionError("release refresh requires a source")
-                _run_releases(application, source_name, limited_source, checked_at, counts)
-                if limited_source.stopped:
+                if limited_release_source is None:
+                    raise AssertionError("release refresh requires a release_source")
+                _run_releases(application, release_source_name, limited_release_source, checked_at, counts)
+                if limited_release_source.stopped:
                     break
             else:
                 _run_events(application, config, limited_event_client, checked_at, counts)
@@ -449,6 +474,8 @@ def refresh_once(
             # Persist the learned pacing rate (and any cooldown) so the next invocation
             # starts from where this one left off, whether it hit a limit or recovered.
             application.put_source_limit(limited_source.current_observation())
+        if limited_release_source is not None and limited_release_source is not limited_source:
+            application.put_source_limit(limited_release_source.current_observation())
         if (
             selected_kind is RefreshKind.EVENTS
             and counts.events_skip_reason is not None
