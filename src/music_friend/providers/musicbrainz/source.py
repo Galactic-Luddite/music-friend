@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from datetime import datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Protocol
 
 from music_friend.domain import (
@@ -79,7 +79,12 @@ class _Transport(Protocol):
 class MusicBrainzSource:
     """MusicBrainz source supporting release discovery only."""
 
-    def __init__(self, *, transport: _Transport | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: _Transport | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._transport: _Transport = (
             transport
             if transport is not None
@@ -87,6 +92,7 @@ class MusicBrainzSource:
                 user_agent="music-friend/0.1.0 (https://github.com/Galactic-Luddite/music-friend)"
             )
         )
+        self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
         self._capabilities = ProviderCapabilities(
             supported=frozenset({Capability.RECENT_RELEASES}),
             granted=frozenset({Capability.RECENT_RELEASES}),
@@ -248,7 +254,7 @@ class MusicBrainzSource:
         # Build artist ID map for the normalizer
         artist_id_map = {mbid: artist_ref.native_id}
 
-        now = datetime.now()
+        now = self._now()
         releases: list[Release] = []
         for rg in release_groups:
             if not isinstance(rg, Mapping):
@@ -283,6 +289,12 @@ class MusicBrainzSource:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("clock result must be timezone-aware")
+        return value
 
 
 __all__ = ["MusicBrainzSource"]
