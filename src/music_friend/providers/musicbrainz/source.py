@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import Protocol
 
 from music_friend.domain import (
     Artist,
@@ -67,12 +68,24 @@ def _single_artist_relation_mbid(response: object, url: str, batch_size: int) ->
     return None
 
 
+class _Transport(Protocol):
+    """The subset of MusicBrainzTransport this source depends on, for test injection."""
+
+    def get(self, path: str, query: Mapping[str, str | list[str]] | None = None) -> object: ...
+
+    def close(self) -> None: ...
+
+
 class MusicBrainzSource:
     """MusicBrainz source supporting release discovery only."""
 
-    def __init__(self) -> None:
-        self._transport = MusicBrainzTransport(
-            user_agent="music-friend/0.1.0 (https://github.com/Galactic-Luddite/music-friend)"
+    def __init__(self, *, transport: _Transport | None = None) -> None:
+        self._transport: _Transport = (
+            transport
+            if transport is not None
+            else MusicBrainzTransport(
+                user_agent="music-friend/0.1.0 (https://github.com/Galactic-Luddite/music-friend)"
+            )
         )
         self._capabilities = ProviderCapabilities(
             supported=frozenset({Capability.RECENT_RELEASES}),
