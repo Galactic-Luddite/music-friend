@@ -698,6 +698,12 @@ def test_refresh_releases_calls_musicbrainz_and_deezer_but_never_spotify(
     from music_friend.store import Catalog
     from music_friend.tools import MusicFriendApplication
 
+    # Clean-room boundary: _refresh()'s lock_path is derived from user_data_path,
+    # which resolves to the real platform data directory unless patched. Keep the
+    # refresh lock inside pytest's tmp_path so this test never writes outside its
+    # declared roots (same fix pattern as #45's musicbrainz-only entry-point test).
+    monkeypatch.setattr(cli, "user_data_path", lambda *_args, **_kwargs: tmp_path)
+
     @contextmanager
     def _refuse_spotify_source(**kwargs: object) -> object:
         raise AssertionError("spotify must not be opened when it is not a configured source")
