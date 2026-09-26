@@ -162,16 +162,24 @@ def test_recent_releases_propagates_rate_limited_error() -> None:
         source.recent_releases((_mb_ref("mbid"),), FIXED_NOW)
 
 
+def _url_response(*entries: dict[str, object]) -> dict[str, object]:
+    """The verified real MusicBrainz /ws/2/url batch response shape."""
+    return {"url-count": len(entries), "url-offset": 0, "urls": list(entries)}
+
+
 def test_lookup_artists_by_spotify_urls_exact_hit_returns_the_single_artist() -> None:
     transport = FakeTransport()
     mbid = "33333333-3333-3333-3333-333333333333"
     url = "https://open.spotify.com/artist/spotify123"
     transport.queue(
-        {
-            "relations": [
-                {"target-type": "artist", "artist": {"id": mbid}},
-            ]
-        }
+        _url_response(
+            {
+                "resource": url,
+                "relations": [
+                    {"type": "free streaming", "target-type": "artist", "artist": {"id": mbid}}
+                ],
+            }
+        )
     )
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls((url,))
@@ -182,12 +190,23 @@ def test_lookup_artists_by_spotify_urls_ambiguous_relation_returns_none() -> Non
     transport = FakeTransport()
     url = "https://open.spotify.com/artist/spotify123"
     transport.queue(
-        {
-            "relations": [
-                {"target-type": "artist", "artist": {"id": "mbid-one"}},
-                {"target-type": "artist", "artist": {"id": "mbid-two"}},
-            ]
-        }
+        _url_response(
+            {
+                "resource": url,
+                "relations": [
+                    {
+                        "type": "free streaming",
+                        "target-type": "artist",
+                        "artist": {"id": "mbid-one"},
+                    },
+                    {
+                        "type": "social network",
+                        "target-type": "artist",
+                        "artist": {"id": "mbid-two"},
+                    },
+                ],
+            }
+        )
     )
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls((url,))
@@ -197,10 +216,33 @@ def test_lookup_artists_by_spotify_urls_ambiguous_relation_returns_none() -> Non
 def test_lookup_artists_by_spotify_urls_no_relation_returns_none() -> None:
     transport = FakeTransport()
     url = "https://open.spotify.com/artist/spotify123"
-    transport.queue({"relations": []})
+    transport.queue(_url_response({"resource": url, "relations": []}))
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls((url,))
     assert result == {url: None}
+
+
+def test_lookup_artists_by_spotify_urls_omitted_unknown_url_returns_none() -> None:
+    """Verified live: an unmatched URL is OMITTED from ``urls`` entirely, not an
+    error entry -- "unresolved" must be computed as (requested) minus (present),
+    never by looking for a per-input error or empty entry."""
+    transport = FakeTransport()
+    known_url = "https://open.spotify.com/artist/known"
+    unknown_url = "https://open.spotify.com/artist/unknown"
+    mbid = "33333333-3333-3333-3333-333333333333"
+    transport.queue(
+        _url_response(
+            {
+                "resource": known_url,
+                "relations": [
+                    {"type": "free streaming", "target-type": "artist", "artist": {"id": mbid}}
+                ],
+            }
+        )
+    )
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls((known_url, unknown_url))
+    assert result == {known_url: mbid, unknown_url: None}
 
 
 def test_lookup_artists_by_spotify_urls_propagates_rate_limited_error() -> None:
@@ -214,8 +256,8 @@ def test_lookup_artists_by_spotify_urls_propagates_rate_limited_error() -> None:
 def test_lookup_artists_by_spotify_urls_batches_at_most_one_hundred_per_call() -> None:
     transport = FakeTransport()
     urls = tuple(f"https://open.spotify.com/artist/{index}" for index in range(150))
-    transport.queue({"url-list": []})
-    transport.queue({"url-list": []})
+    transport.queue(_url_response())
+    transport.queue(_url_response())
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls(urls)
     assert len(transport.calls) == 2
@@ -346,7 +388,7 @@ def test_lookup_artists_by_spotify_urls_batch_response_not_a_mapping_returns_non
     assert result == {url: None for url in urls}
 
 
-def test_lookup_artists_by_spotify_urls_batch_missing_url_list_returns_none() -> None:
+def test_lookup_artists_by_spotify_urls_batch_missing_urls_field_returns_none() -> None:
     transport = FakeTransport()
     urls = tuple(f"https://open.spotify.com/artist/{index}" for index in range(2))
     transport.queue({"unexpected": "shape"})
@@ -358,7 +400,7 @@ def test_lookup_artists_by_spotify_urls_batch_missing_url_list_returns_none() ->
 def test_lookup_artists_by_spotify_urls_batch_unmatched_resource_returns_none() -> None:
     transport = FakeTransport()
     urls = ("https://open.spotify.com/artist/a", "https://open.spotify.com/artist/b")
-    transport.queue({"url-list": [{"resource": "https://open.spotify.com/artist/a"}]})
+    transport.queue(_url_response({"resource": "https://open.spotify.com/artist/a"}))
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls(urls)
     assert result["https://open.spotify.com/artist/b"] is None
@@ -367,32 +409,58 @@ def test_lookup_artists_by_spotify_urls_batch_unmatched_resource_returns_none() 
 def test_lookup_artists_by_spotify_urls_non_list_relations_returns_none() -> None:
     transport = FakeTransport()
     url = "https://open.spotify.com/artist/spotify123"
-    transport.queue({"relations": "not-a-list"})
+    transport.queue(_url_response({"resource": url, "relations": "not-a-list"}))
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls((url,))
     assert result == {url: None}
 
 
-def test_lookup_artists_by_spotify_urls_ignores_non_artist_relations() -> None:
+def test_lookup_artists_by_spotify_urls_ignores_malformed_relation_entries() -> None:
     transport = FakeTransport()
     url = "https://open.spotify.com/artist/spotify123"
     transport.queue(
-        {
-            "relations": [
-                {"target-type": "release-group", "artist": {"id": "irrelevant"}},
-                "not-a-mapping",
-            ]
-        }
+        _url_response(
+            {
+                "resource": url,
+                "relations": [
+                    {"type": "official homepage", "artist": "not-a-mapping"},
+                    "not-a-mapping",
+                ],
+            }
+        )
     )
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls((url,))
     assert result == {url: None}
 
 
+def test_lookup_artists_by_spotify_urls_excludes_relations_with_a_different_target_type() -> None:
+    """A relation object with an explicit target-type other than "artist" (verified
+    live shape: every artist relation carries both "type": "<name>" and
+    "target-type": "artist") must not count toward the ambiguity/exact-hit tally."""
+    transport = FakeTransport()
+    url = "https://open.spotify.com/artist/spotify123"
+    mbid = "33333333-3333-3333-3333-333333333333"
+    transport.queue(
+        _url_response(
+            {
+                "resource": url,
+                "relations": [
+                    {"type": "free streaming", "target-type": "artist", "artist": {"id": mbid}},
+                    {"type": "part of", "target-type": "release-group", "artist": {"id": "rg"}},
+                ],
+            }
+        )
+    )
+    source = _source(transport)
+    result = source.lookup_artists_by_spotify_urls((url,))
+    assert result == {url: mbid}
+
+
 def test_lookup_artists_by_spotify_urls_deduplicates_repeated_urls() -> None:
     transport = FakeTransport()
     url = "https://open.spotify.com/artist/spotify123"
-    transport.queue({"relations": []})
+    transport.queue(_url_response({"resource": url, "relations": []}))
     source = _source(transport)
     result = source.lookup_artists_by_spotify_urls((url, url, url))
     assert len(transport.calls[0][1]["resource"]) == 1  # type: ignore[arg-type]

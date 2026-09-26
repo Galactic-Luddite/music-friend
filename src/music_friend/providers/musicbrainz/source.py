@@ -27,36 +27,57 @@ from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
 _URL_BATCH_SIZE = 100
 
 
-def _single_artist_relation_mbid(response: object, url: str, batch_size: int) -> str | None:
-    """Return the MBID for ``url`` only when it has exactly one artist relation.
+def _url_entries(response: object) -> dict[str, Mapping[str, object]]:
+    """Map each resolved URL to its response entry.
 
-    ``/ws/2/url`` with a single ``resource`` parameter returns one object shaped
-    like the target URL's own relations; with multiple ``resource`` parameters
-    it returns ``{"url-list": [...]}`` reporting the same shape per resource. Any
-    other shape, or a URL with zero or more than one ``artist``-type relation, is
-    ambiguous or unresolved and must fall back to name search rather than guess.
+    Verified live against the real MusicBrainz API (2026-09): a batch
+    ``/ws/2/url?resource=...&inc=artist-rels`` call (``resource`` repeated, even
+    for a single URL, to always take this response shape and avoid the
+    unwrapped single-resource form and its 404-on-unknown-URL behavior) returns
+    ``{"url-count": N, "url-offset": 0, "urls": [{"resource": "<url>",
+    "relations": [...]}, ...]}``. A URL with no artist relation is simply
+    OMITTED from ``urls`` entirely -- not an error, not a null entry -- so
+    "unresolved" is computed by the caller as (requested URLs) minus (URLs
+    present in this map), never by looking for an error or an empty entry per
+    input.
     """
     if not isinstance(response, Mapping):
-        return None
-    if batch_size == 1:
-        candidate = response
-    else:
-        url_list = response.get("url-list")
-        if not isinstance(url_list, list):
-            return None
-        candidate = None
-        for entry in url_list:
-            if isinstance(entry, Mapping) and entry.get("resource") == url:
-                candidate = entry
-                break
-        if candidate is None:
-            return None
-    relations = candidate.get("relations") if isinstance(candidate, Mapping) else None
+        return {}
+    urls = response.get("urls")
+    if not isinstance(urls, list):
+        return {}
+    entries: dict[str, Mapping[str, object]] = {}
+    for entry in urls:
+        if not isinstance(entry, Mapping):
+            continue
+        resource = entry.get("resource")
+        if isinstance(resource, str):
+            entries[resource] = entry
+    return entries
+
+
+def _single_artist_relation_mbid(entry: Mapping[str, object]) -> str | None:
+    """Return the MBID for a resolved URL entry only when it has exactly one
+    artist relation.
+
+    ``inc=artist-rels`` scopes ``relations`` to artist relations server-side, so
+    every entry here should carry an ``artist`` object; a relation is accepted
+    when it has one regardless of whether it also carries a ``target-type``
+    field (unverified: live reports have disagreed on whether ``target-type``
+    is present at all), but a relation that DOES carry an explicit
+    ``target-type`` other than ``"artist"`` is excluded defensively. A URL
+    resolving to more than one distinct artist id is ambiguous and must fall
+    back to name search rather than guess.
+    """
+    relations = entry.get("relations")
     if not isinstance(relations, list):
         return None
     artist_ids: set[str] = set()
     for relation in relations:
-        if not isinstance(relation, Mapping) or relation.get("target-type") != "artist":
+        if not isinstance(relation, Mapping):
+            continue
+        target_type = relation.get("target-type")
+        if target_type is not None and target_type != "artist":
             continue
         artist = relation.get("artist")
         if isinstance(artist, Mapping):
@@ -119,14 +140,18 @@ class MusicBrainzSource:
     def lookup_artists_by_spotify_urls(self, spotify_urls: Sequence[str]) -> dict[str, str | None]:
         """Batch-resolve Spotify artist URLs to MusicBrainz artist IDs.
 
-        Calls ``/ws/2/url?resource=...&inc=artist-rels`` with up to 100
+        Always calls ``/ws/2/url?resource=...&inc=artist-rels`` with the
+        ``resource`` parameter repeated (even for a single URL) so the response
+        is always the batch ``{"urls": [...]}`` shape and never the unwrapped
+        single-resource shape, which 404s on an unknown URL. Up to 100
         ``resource`` parameters per call, chunking larger inputs. A URL is
-        mapped to an MBID only when it carries exactly one ``artist``-type
-        relation; a URL with zero or more than one artist relation (or that is
-        simply absent from the response) maps to ``None`` so the caller can
-        fall back to name search. ``RateLimitedError`` and
-        ``InvalidSourceResponseError`` from the transport propagate unchanged
-        so pacing/cooldown accounting stays correct.
+        mapped to an MBID only when it carries exactly one artist relation; a
+        URL with zero or more than one artist relation, or that is simply
+        omitted from the response (an unknown URL, per verified live API
+        behavior), maps to ``None`` so the caller can fall back to name search.
+        ``RateLimitedError`` and ``InvalidSourceResponseError`` from the
+        transport propagate unchanged so pacing/cooldown accounting stays
+        correct.
         """
         if not isinstance(spotify_urls, Sequence):
             raise ValueError("spotify_urls must be a sequence of URLs")
@@ -138,8 +163,10 @@ class MusicBrainzSource:
                 "url",
                 query={"resource": batch, "inc": "artist-rels"},
             )
+            entries = _url_entries(response)
             for url in batch:
-                resolved[url] = _single_artist_relation_mbid(response, url, len(batch))
+                entry = entries.get(url)
+                resolved[url] = None if entry is None else _single_artist_relation_mbid(entry)
         return resolved
 
     def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:

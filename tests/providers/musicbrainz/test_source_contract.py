@@ -27,7 +27,7 @@ this file.
 from __future__ import annotations
 
 from music_friend.domain import SourceReference
-from music_friend.errors import RateLimitedError, SourceUnavailableError
+from music_friend.errors import InvalidSourceResponseError, RateLimitedError, SourceUnavailableError
 from music_friend.providers import Capability
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from tests.contracts.source_contract import (
@@ -58,6 +58,9 @@ class _FakeTransport:
         self.calls: list[TransportCall] = []
         self.scenario = "happy_path"
         self.text = DEFAULT_PROVIDER_TEXT
+        #: When set, one entry is popped and returned per call, in order,
+        #: overriding the single-page happy-path response (used for pagination).
+        self.pages: list[dict[str, object]] = []
 
     def get(self, path: str, query: object = None) -> object:
         self.calls.append(TransportCall("recent_releases", (("artist_count", 1),)))
@@ -70,6 +73,8 @@ class _FakeTransport:
             # which the normalizer tolerates by dropping it): the source itself must
             # reject this before it ever reaches normalize_release_group().
             return {"release-groups": "not-a-list"}
+        if self.pages:
+            return self.pages.pop(0)
         release_group = {
             "id": _RGID,
             "title": self.text,
@@ -159,3 +164,69 @@ def test_rate_limited_maps_exactly_and_stays_redacted() -> None:
 
 def test_retry_timing_clamps_to_nine_hundred_seconds() -> None:
     assert_retry_is_clamped(MusicBrainzSourceFactory(), _RECENT_RELEASES_CASE)
+
+
+def test_every_failure_scenario_stays_redacted() -> None:
+    """Equivalent to the generic mixin's assert_error_text_is_redacted, scoped to
+    recent_releases: no failure scenario's public representation leaks a raw
+    credential or provider response body. (assert_error_maps_exactly already
+    calls the same _assert_safe_error check internally for each scenario below;
+    this test exists as the explicit, named equivalent the reviewer asked for.)
+    """
+    for scenario, expected in (
+        ("timeout", SourceUnavailableError),
+        ("rate_limited", RateLimitedError),
+        ("malformed_record", InvalidSourceResponseError),
+    ):
+        error = assert_error_maps_exactly(
+            MusicBrainzSourceFactory(), _RECENT_RELEASES_CASE, scenario, expected
+        )
+        representations = (str(error), repr(error), str(error.to_public_dict()))
+        assert all("raw-body-canary" not in value for value in representations)
+        assert all("credential-canary" not in value for value in representations)
+
+
+def test_recent_releases_pagination_is_bounded_and_stops_at_source_end() -> None:
+    """Equivalent to the generic mixin's assert_pagination_is_bounded_and_stops,
+    scoped to recent_releases (MusicBrainzSource has no followed_artists-style
+    cursor, so the analogous paginated operation is recent_releases' offset
+    cursor)."""
+    factory = MusicBrainzSourceFactory()
+    source = factory.create(capabilities=frozenset({Capability.RECENT_RELEASES}))
+    artist_ref = factory.example_artist_reference()
+    factory._transport.pages = [
+        {
+            "release-groups": [
+                {
+                    "id": _RGID,
+                    "title": DEFAULT_PROVIDER_TEXT,
+                    "primary-type": "Album",
+                    "first-release-date": "2026-01-01",
+                    "score": 100,
+                    "artist-credit": [{"artist": {"id": _MBID}}],
+                }
+            ],
+            "release-group-count": 2,
+        },
+        {
+            "release-groups": [
+                {
+                    "id": "33333333-3333-3333-3333-333333333333",
+                    "title": DEFAULT_PROVIDER_TEXT,
+                    "primary-type": "Album",
+                    "first-release-date": "2025-01-01",
+                    "score": 100,
+                    "artist-credit": [{"artist": {"id": _MBID}}],
+                }
+            ],
+            "release-group-count": 2,
+        },
+    ]
+
+    first = source.recent_releases((artist_ref,), FIXED_OBSERVED_AT)
+    assert len(first.items) == 1
+    assert first.next_cursor == "1"
+
+    second = source.recent_releases((artist_ref,), FIXED_OBSERVED_AT, first.next_cursor)
+    assert len(second.items) == 1
+    assert second.next_cursor is None
