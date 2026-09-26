@@ -78,7 +78,7 @@ def run_identity_mapping(
                 source_name,
                 mbid,
                 IdentityConfidence.EXTERNAL_ID,
-                "url_relation",
+                "url_rel",
                 checked_at,
             )
             continue
@@ -92,7 +92,7 @@ def run_identity_mapping(
                 artist_local_id=artist.local_id,
                 source=source_name,
                 status="unmapped",
-                method="none",
+                method="name_search",
                 attempted_at=checked_at,
             )
             continue
@@ -112,14 +112,14 @@ def run_identity_mapping(
                 artist_local_id=artist.local_id,
                 source=source_name,
                 status="unmapped",
-                method="none",
+                method="name_search",
                 attempted_at=checked_at,
             )
 
 
 def _artists_needing_mapping(catalog: Catalog, source_name: str) -> tuple[Artist, ...]:
     seen: dict[str, Artist] = {}
-    for entry in catalog.list_watchlist(limit=10_000):
+    for entry in catalog.list_watchlist(limit=500):
         artist = entry.artist
         if artist.local_id in seen:
             continue
