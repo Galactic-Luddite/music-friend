@@ -573,3 +573,94 @@ def test_refresh_all_through_cli_still_opens_the_catalog_source(
     # transport; refresh_once would have raised "source is required for catalog
     # refresh" before any of this if the CLI had passed source=None instead.
     assert connector_calls >= 1
+
+
+def test_same_source_repeat_through_cli_creates_no_new_inbox_item(
+    clock: FakeClock, tmp_path: Path
+) -> None:
+    """Issue #50 AC: the same real-world release, re-seen through ``music-friend
+    refresh releases`` on later runs spaced past the freshness TTL, creates no new
+    inbox item -- proved through ``cli.run_cli``, the shipped entry point, not
+    ``refresh_once`` directly.
+
+    Three ``music-friend refresh releases`` runs against a watchlisted artist already
+    mapped to MusicBrainz, each returning the identical recorded release-group. The
+    first creates the one inbox item; the second and third runs are far enough apart
+    (21 and 42 days) that ``FRESHNESS_TTL`` does not skip them, so MusicBrainz is
+    genuinely re-queried each time and returns the same release both times.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    live = load_live_release_group_search()
+    one_release_group = live["release-groups"][:1]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "musicbrainz.org"
+        path = request.url.path
+        if path == "/ws/2/url":
+            resources = request.url.params.get_list("resource")
+            urls = [
+                {
+                    "resource": resources[0],
+                    "relations": [{"artist": {"id": LIVE_SEARCH_ARTIST_MBID}}],
+                }
+            ]
+            return httpx.Response(200, json={"url-count": 1, "url-offset": 0, "urls": urls})
+        if path == "/ws/2/release-group":
+            return httpx.Response(
+                200,
+                json={
+                    **live,
+                    "count": len(one_release_group),
+                    "release-groups": one_release_group,
+                },
+            )
+        if path.startswith("/ws/2/artist/"):
+            # A later run's map-then-discover hardening pass (#48) also validates the
+            # already-mapped artist's url-rels; an empty relation list is a harmless,
+            # already-mapped no-op here.
+            return httpx.Response(200, json={"relations": []})
+        raise AssertionError(f"unexpected MusicBrainz path: {path}")
+
+    def _run_at(now: datetime) -> dict[str, object]:
+        application = MusicFriendApplication(Catalog.open(catalog_path))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            cli.run_cli(
+                ["refresh", "releases", "--json"],
+                stdout=stdout,
+                stderr=stderr,
+                application=application,
+                config_store=_ConfigStore(LocalConfig()),
+                secret_prompt=lambda _message: "",
+                now=lambda: now,
+                connector_factory=lambda: httpx.MockTransport(handle),
+                credential_store_factory=lambda: _NoTicketmasterKey(),
+            )
+        finally:
+            application.close()
+        assert stderr.getvalue() == ""
+        payload = json.loads(stdout.getvalue())
+        assert isinstance(payload, dict)
+        return payload
+
+    first = _run_at(NOW)
+    assert first["status"] == "succeeded"
+    assert _metrics(first)["signals_created"] == 1
+
+    second = _run_at(NOW + timedelta(days=21))
+    assert second["status"] == "succeeded"
+    assert _metrics(second).get("signals_created", 0) == 0
+
+    third = _run_at(NOW + timedelta(days=42))
+    assert third["status"] == "succeeded"
+    assert _metrics(third).get("signals_created", 0) == 0
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        entries = application.list_inbox_entries(None, limit=10)
+        signals = application.list_signals(None, limit=10)
+    finally:
+        application.close()
+    assert len(entries) == 1
+    assert len(signals) == 1

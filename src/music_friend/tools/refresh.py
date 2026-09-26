@@ -40,6 +40,7 @@ from music_friend.domain import (
     RefreshSummary,
     Release,
     ReleaseCandidate,
+    ReleaseDiscovery,
     ReleaseDiscoveryResult,
     ReleaseDiscoveryStatus,
     Signal,
@@ -1085,7 +1086,7 @@ def _record_candidate(
             ExplanationReason(reason, detail),
         )
     )
-    material_version = _material_version(kind, material, explanation, checked_at)
+    material_version = _material_version(kind, material, explanation)
     existing = application.find_signal(
         reference.source,
         kind,
@@ -1134,13 +1135,31 @@ def _repair_inbox_entries(
 
 
 def _repair_missing_signals(application: MusicFriendApplication, counts: _RefreshCounts) -> None:
-    """Reconstruct bounded initial signals after discovery committed before their signal write."""
+    """Reconstruct bounded initial signals after discovery committed before their signal write.
+
+    ``list_release_discoveries_without_current_signal`` is deliberately over-inclusive
+    (issue #50): it also lists a release that already has a signal for its current
+    content, just recorded at an earlier ``last_seen_at`` than the discovery's latest
+    touch (true of every no-op refresh on an already-seen release). Recording a signal
+    here always guesses the candidate's reason from ``first_seen_at == last_seen_at``,
+    which is only accurate the first time a discovery is ever touched -- on a later
+    no-op touch it guesses ``UPDATED_RELEASE`` even though the original signal (created
+    outside repair, on first discovery) was recorded as ``NEW_RELEASE``. Since the
+    reason feeds ``material_version``, that guess mismatch alone used to make every
+    repair pass write a fresh, wrongly-reasoned duplicate signal for an unchanged
+    release. ``_release_repair_already_recorded`` checks both possible reasons' exact
+    material_version against the store before writing, so an unchanged release's repair
+    is always a genuine no-op, while a release whose material really did change (and
+    whose signal write for that change failed) still gets recorded correctly.
+    """
     for release_discovery in application.list_release_discoveries_without_current_signal(limit=500):
         release = application.get_release(release_discovery.release_local_id)
         if release is None or not release.artist_refs:
             counts.failures += 1
             continue
         try:
+            if _release_repair_already_recorded(application, release, release_discovery):
+                continue
             _record_candidate(
                 application,
                 kind=SignalKind.RELEASE,
@@ -1185,6 +1204,41 @@ def _repair_missing_signals(application: MusicFriendApplication, counts: _Refres
             counts.failures += 1
 
 
+def _release_repair_already_recorded(
+    application: MusicFriendApplication,
+    release: Release,
+    release_discovery: ReleaseDiscovery,
+) -> bool:
+    """Check whether a signal for this release's current content already exists.
+
+    Tries both reasons a normal (non-repair) candidate could have used --
+    ``NEW_RELEASE`` and ``UPDATED_RELEASE`` -- since repair cannot know which one the
+    original, successfully-recorded signal used (see ``_repair_missing_signals``). If
+    either produces a material_version the store already has, the release's current
+    content is already signaled and repair must not write a duplicate.
+    """
+    reference = _single_reference(_source_references(release.source_refs, release_discovery.source))
+    artist = application.get_artist(release.artist_refs[0])
+    artist_name = "" if artist is None else artist.display_name
+    material = _release_material(release)
+    for reason in (ExplanationReasonKind.NEW_RELEASE, ExplanationReasonKind.UPDATED_RELEASE):
+        explanation = Explanation(
+            (
+                ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist_name),
+                ExplanationReason(reason, release.title),
+            )
+        )
+        material_version = _material_version(SignalKind.RELEASE, material, explanation)
+        if (
+            application.find_signal(
+                reference.source, SignalKind.RELEASE, reference.native_id, material_version
+            )
+            is not None
+        ):
+            return True
+    return False
+
+
 def _single_reference(references: tuple[SourceReference, ...]) -> SourceReference:
     if len(references) != 1:
         raise ValueError("candidate has invalid provider provenance")
@@ -1202,14 +1256,25 @@ def _material_version(
     kind: SignalKind,
     material: object,
     explanation: Explanation,
-    observed_at: datetime,
 ) -> str:
+    """Compute a content-only identity for one candidate's material.
+
+    Deliberately excludes the run's ``checked_at``/``observed_at`` timestamp (issue #50):
+    that value changes on every refresh, so including it made every run's material_version
+    unique regardless of whether the underlying release or event actually changed. Combined
+    with the missing-signal repair pass in ``_repair_missing_signals`` (which re-records a
+    candidate whenever a discovery's ``last_seen_at`` was touched without a signal at that
+    exact timestamp -- true on every no-op run once a discovery has been seen more than
+    once), that made ``find_signal``'s de-dup lookup useless: a same-source repeat of an
+    unchanged release created a fresh signal and inbox item every run. Keeping this a
+    content-only digest lets ``find_signal`` recognize the repeat and no-op, whether the
+    duplicate signal write comes from the normal candidate path or from repair.
+    """
     value = {
         "kind": kind.value,
         "material": material,
-        "observed_at": observed_at.isoformat(),
         "reasons": tuple((reason.kind.value, reason.detail) for reason in explanation.reasons),
-        "version": 1,
+        "version": 2,
     }
     return f"material:{_digest(value)}"
 

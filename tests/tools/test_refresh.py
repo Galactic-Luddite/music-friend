@@ -290,6 +290,68 @@ def test_release_refresh_creates_an_unread_item_then_preserves_saved_and_dismiss
         assert application.list_inbox_entries(None, limit=10) == (dismissed,)
 
 
+def test_same_source_repeat_of_an_unchanged_release_creates_no_new_inbox_item(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #50): a release re-seen by the same source on later runs, past the
+    freshness TTL each time so the source is genuinely re-queried, creates no new
+    signal or inbox item.
+
+    Reproduces the live bug first: before the fix, the *third* full run (the second
+    run after the release was already known) spuriously re-recorded a duplicate
+    signal/inbox item, because ``_repair_missing_signals`` ran on every refresh and
+    treated ``release_discoveries.last_seen_at`` (bumped on every no-op touch) not
+    matching any existing signal's exact ``observed_at`` as "signal missing", then
+    recorded a fresh one under a guessed explanation reason that didn't match the
+    original signal's reason -- so ``material_version`` never matched and the
+    duplicate was never deduplicated. Two runs is not enough to observe this: the
+    mismatch only appears once ``last_seen_at`` has diverged from the signal's
+    ``observed_at`` on entry to a *subsequent* refresh's repair pass, which requires
+    three runs (see the root-cause synthetic repro this test is drawn from).
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeMusicSource()
+        source.releases[("one", None)] = Page(
+            (_release("release-1", artist, title="Song X"),), None
+        )
+
+        first = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
+        assert first.run is not None
+        assert len(application.list_inbox_entries(None, limit=10)) == 1
+
+        source.releases[("one", None)] = Page(
+            (_release("release-1", artist, title="Song X"),), None
+        )
+        second = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW + timedelta(days=21),
+        )
+        assert second.run is not None
+        assert len(application.list_inbox_entries(None, limit=10)) == 1
+
+        source.releases[("one", None)] = Page(
+            (_release("release-1", artist, title="Song X"),), None
+        )
+        third = _refresh(
+            application,
+            source,
+            kind="releases",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW + timedelta(days=42),
+        )
+        assert third.run is not None
+        entries = application.list_inbox_entries(None, limit=10)
+        assert len(entries) == 1
+        assert entries[0].state is InboxState.UNREAD
+        assert len(application.list_signals(None, limit=10)) == 1
+
+
 def test_finished_at_is_read_from_the_clock_when_the_run_completes_not_started_at(
     tmp_path: Path,
 ) -> None:
