@@ -1888,25 +1888,28 @@ class Catalog:
         Also accepts a stored release date that differs by exactly one day
         (either direction) from ``release_date``, since a day-precision
         discrepancy between two independently-edited catalogs is exactly the
-        kind of variant this lookup exists to catch -- but per the design doc,
-        only "when either side has day precision": a year- or month-precision
-        date is normalized to that period's first day, so a naive one-day
-        widening against it would spuriously match an unrelated day-precision
-        release landing on the 2nd of the same period. ``date_precision`` is
-        the incoming candidate's precision; the stored side's precision is
-        read from the ``releases`` table it points at. The widening applies
-        only when at least one of the two is ``DAY``; when ``date_precision``
-        is omitted (legacy callers), the exact-date-only behavior from before
-        this widening was added is preserved. An exact match is always
-        preferred and returned first when both an exact and a one-day-off
-        match exist.
+        kind of variant this lookup exists to catch -- but only "when BOTH
+        sides have day precision" (issue #42's authoritative resolution of a
+        conflict with an earlier design-doc draft that said "either": a false
+        merge hides a real release from the inbox, which is worse than an
+        occasional duplicate, so the widening is deliberately conservative).
+        A year- or month-precision date is normalized to that period's first
+        day, so a naive one-day widening against it would spuriously match an
+        unrelated day-precision release landing on the 2nd of the same
+        period. ``date_precision`` is the incoming candidate's precision; the
+        stored side's precision is read from the ``releases`` table it points
+        at. The widening applies only when BOTH the incoming candidate and
+        the stored release are ``DAY`` precision; when ``date_precision`` is
+        omitted (legacy callers) or either side is not ``DAY``, only an exact
+        date match is considered. An exact match is always preferred and
+        returned first when both an exact and a one-day-off match exist.
         """
         _ = source  # unused: matching is source-agnostic, see docstring
         one_day = timedelta(days=1)
         incoming_is_day = date_precision is ReleaseDatePrecision.DAY
         candidate_dates = (
             (release_date, release_date - one_day, release_date + one_day)
-            if date_precision is None or incoming_is_day
+            if incoming_is_day
             else (release_date,)
         )
         placeholders = ",".join("?" for _ in candidate_dates)
@@ -1941,7 +1944,7 @@ class Catalog:
             if stored_date == release_date:
                 return self._release_discovery_from_row(row[:8])
             stored_is_day = ReleaseDatePrecision(str(row[8])) is ReleaseDatePrecision.DAY
-            if date_precision is None or incoming_is_day or stored_is_day:
+            if incoming_is_day and stored_is_day:
                 return self._release_discovery_from_row(row[:8])
         return None
 
