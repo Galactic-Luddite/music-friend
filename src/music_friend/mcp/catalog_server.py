@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from mcp.server.context import CallNext, HandlerResult, ServerMiddleware, ServerRequestContext
 from mcp.server.mcpserver import MCPServer
@@ -274,11 +274,22 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     },
 }
 
-#: A refresh callback takes the selected kind and, optionally, a positional-or-keyword
-#: ``force`` flag. Test doubles in this module's tests commonly pass a single-argument
-#: lambda, so the wider ``Callable[..., object]`` shape stays accurate; ``refresh_music``
-#: calls with ``force`` first and falls back to the one-argument shape on ``TypeError``.
-RefreshCallback = Callable[..., object]
+
+class RefreshCallback(Protocol):
+    """A refresh callback takes the selected kind and a keyword ``force`` flag.
+
+    ``force`` always has a default so existing single-argument test doubles built as
+    ``lambda kind: ...`` still satisfy this protocol structurally, but ``refresh_music``
+    always calls with ``force`` explicitly -- there is no fallback call shape, so a
+    ``TypeError`` raised by the callback body itself is never mistaken for an
+    argument-arity mismatch and silently retried.
+    """
+
+    def __call__(
+        self, kind: Literal["catalog", "releases", "events", "all"], *, force: bool = False
+    ) -> object: ...
+
+
 Clock = Callable[[], datetime]
 
 
@@ -335,6 +346,8 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
     try:
         if name == "refresh_music":
             _refresh_kind(arguments["kind"])
+            if "force" in arguments:
+                _refresh_force(arguments["force"])
         elif name == "search_catalog":
             _search_arguments(arguments["query"], arguments["limit"])
         elif name in {"list_watchlist", "list_inbox"}:
@@ -466,12 +479,7 @@ def create_music_server(
     ) -> CallToolResult:
         def action() -> dict[str, object]:
             kindval = _refresh_kind(kind)
-            try:
-                result = refresh(kindval, force=force)
-            except TypeError:
-                # Callback doesn't accept force parameter (backward compat)
-                result = refresh(kindval)
-            return _refresh_result(result)
+            return _refresh_result(refresh(kindval, force=force))
 
         return _safe_call(action)
 
@@ -827,6 +835,12 @@ def _refresh_kind(value: object) -> Literal["catalog", "releases", "events", "al
     if value == "all":
         return "all"
     raise _InvalidArguments("kind must be one of: catalog, releases, events, all")
+
+
+def _refresh_force(value: object) -> bool:
+    if type(value) is not bool:
+        raise _InvalidArguments("force must be a boolean")
+    return value
 
 
 def _search_arguments(query: object, limit: object) -> tuple[str, int]:

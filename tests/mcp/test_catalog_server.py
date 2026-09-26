@@ -103,7 +103,7 @@ def test_catalog_server_exposes_only_the_stable_local_tool_inventory(tmp_path: P
     """Catches re-exposure of a direct provider tool or an unbounded extra model action."""
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     tools = asyncio.run(server.list_tools())
@@ -158,7 +158,7 @@ def test_every_tool_description_is_rich_and_every_identifier_argument_names_its_
     """
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
     tools = asyncio.run(server.list_tools())
 
@@ -222,7 +222,7 @@ def test_mcp_read_boundary_sanitizes_display_names_written_before_the_ingestion_
     )
     application.put_release(legacy_release)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     search_result = _call(server, "search_catalog", {"query": "Legacy", "limit": 5})
@@ -254,7 +254,9 @@ def test_listening_history_summary_names_its_evidence_boundary(tmp_path: Path) -
             "2026-09-04T00:00:00Z",
         ),
     )
-    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: object(), now=lambda: NOW
+    )
 
     result = _call(
         server,
@@ -274,7 +276,9 @@ def test_listening_history_summary_accepts_rfc_3339_offsets_and_rejects_naive_ti
     tmp_path: Path,
 ) -> None:
     application = _application(tmp_path)
-    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: object(), now=lambda: NOW
+    )
 
     for since in (
         "2026-03-01T08:00:00Z",
@@ -302,7 +306,9 @@ def test_listening_history_summary_rejects_reversed_zero_length_and_impossible_r
     tmp_path: Path,
 ) -> None:
     application = _application(tmp_path)
-    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: object(), now=lambda: NOW
+    )
 
     reversed_range = _call(
         server,
@@ -333,7 +339,9 @@ def test_invalid_argument_messages_name_the_field_and_constraint_without_echoing
     never echo the caller-supplied value back (a canary secret-shaped value must never
     appear in the message)."""
     application = _application(tmp_path)
-    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: object(), now=lambda: NOW
+    )
     canary = "supersecretcanary-value-should-never-appear"
 
     cases = [
@@ -354,6 +362,52 @@ def test_invalid_argument_messages_name_the_field_and_constraint_without_echoing
     application.close()
 
 
+@pytest.mark.parametrize("bad_force", ("true", 1, None))
+def test_refresh_music_rejects_a_non_boolean_force(tmp_path: Path, bad_force: object) -> None:
+    """`force` must be a strict boolean: a string, an int, or null is rejected before any
+    refresh callback runs -- ``isinstance(1, bool)`` is False but ``isinstance(True, int)``
+    is True, so the check must be ``type(value) is bool``, not ``isinstance``."""
+    application = _application(tmp_path)
+    calls: list[object] = []
+    server = create_music_server(
+        application,
+        refresh=lambda kind, force=False: calls.append((kind, force)) or {"status": "succeeded"},
+        now=lambda: NOW,
+    )
+
+    result = _call(server, "refresh_music", {"kind": "catalog", "force": bad_force})
+
+    assert result["category"] == "invalid_arguments"
+    assert "force" in str(result["message"])
+    assert calls == []
+    application.close()
+
+
+def test_refresh_music_does_not_retry_when_the_callback_itself_raises_typeerror(
+    tmp_path: Path,
+) -> None:
+    """A `TypeError` raised by the refresh callback's own body (not an argument-arity
+    mismatch) must surface once as `internal_error`, never be silently retried with a
+    second, force-dropped call to the provider-contacting callback."""
+    application = _application(tmp_path)
+    calls: list[object] = []
+
+    def refresh(kind: str, force: bool = False) -> object:
+        calls.append((kind, force))
+        raise TypeError("private path canary")
+
+    server = create_music_server(application, refresh=refresh, now=lambda: NOW)
+
+    result = _call(server, "refresh_music", {"kind": "catalog", "force": True})
+
+    assert result == {
+        "category": "internal_error",
+        "message": "Music Friend could not complete the request.",
+    }
+    assert calls == [("catalog", True)]
+    application.close()
+
+
 def test_listening_history_summary_reports_internal_error_for_a_non_caller_valueerror(
     tmp_path: Path,
 ) -> None:
@@ -361,7 +415,9 @@ def test_listening_history_summary_reports_internal_error_for_a_non_caller_value
     row) must not be misreported as the caller's mistake, and must not leak exception
     text to the client."""
     application = _application(tmp_path)
-    server = create_music_server(application, refresh=lambda _kind: object(), now=lambda: NOW)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: object(), now=lambda: NOW
+    )
 
     def _raise_internal(**_kwargs: object) -> object:
         raise ValueError("supersecretcanary: corrupt row at offset 42")
@@ -383,7 +439,7 @@ def test_catalog_server_publishes_exact_tool_effect_annotations(tmp_path: Path) 
     """Catches tool metadata under-reporting provider access or destructive local mutations."""
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     tools = asyncio.run(server.list_tools())
@@ -483,7 +539,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
     calls: list[str] = []
     server = create_music_server(
         application,
-        refresh=lambda kind: calls.append(kind) or {"status": "partial", "kind": kind},
+        refresh=lambda kind, force=False: calls.append(kind) or {"status": "partial", "kind": kind},
         now=lambda: NOW,
     )
 
@@ -571,7 +627,9 @@ def test_catalog_server_redacts_invalid_or_failed_model_calls(tmp_path: Path) ->
     application = _application(tmp_path)
     server = create_music_server(
         application,
-        refresh=lambda _kind: (_ for _ in ()).throw(RuntimeError("private path canary")),
+        refresh=lambda _kind, force=False: (_ for _ in ()).throw(
+            RuntimeError("private path canary")
+        ),
         now=lambda: NOW,
     )
 
@@ -593,15 +651,15 @@ def test_catalog_server_validates_construction_and_clock_boundaries(tmp_path: Pa
     application = _application(tmp_path)
 
     with pytest.raises(ValueError, match="application and refresh callback are required"):
-        create_music_server(object(), refresh=lambda _kind: object())  # type: ignore[arg-type]
+        create_music_server(object(), refresh=lambda _kind, force=False: object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="application and refresh callback are required"):
         create_music_server(application, refresh=None)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="now must be callable"):
-        create_music_server(application, refresh=lambda _kind: object(), now=1)  # type: ignore[arg-type]
+        create_music_server(application, refresh=lambda _kind, force=False: object(), now=1)  # type: ignore[arg-type]
 
     server = create_music_server(
         application,
-        refresh=lambda _kind: {"status": "succeeded"},
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
         now=lambda: datetime(2026, 9, 1),
     )
     result = _call(server, "update_watchlist", {"artist_id": "artist-1", "action": "add"})
@@ -615,7 +673,7 @@ def test_catalog_server_validates_construction_and_clock_boundaries(tmp_path: Pa
 def test_catalog_server_supports_every_watchlist_action_and_missing_artist(tmp_path: Path) -> None:
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     for action in ("add", "pin", "mute", "remove"):
@@ -636,7 +694,7 @@ def test_catalog_server_filters_inbox_and_reports_missing_updates_and_explanatio
 ) -> None:
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     assert _call(server, "list_inbox", {"state": "saved", "limit": 10}) == {"items": []}
@@ -655,7 +713,7 @@ def test_list_inbox_returns_a_compact_summary_without_a_follow_up_call(tmp_path:
     """AC #21: an agent must be able to summarize the inbox from list_inbox alone."""
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     result = _call(server, "list_inbox", {"state": "unread", "limit": 10})
@@ -684,7 +742,7 @@ def test_catalog_server_accepts_each_bounded_refresh_kind(tmp_path: Path, kind: 
     calls: list[str] = []
     server = create_music_server(
         application,
-        refresh=lambda selected: (
+        refresh=lambda selected, force=False: (
             calls.append(selected) or {"kind": selected, "status": "succeeded"}
         ),
         now=lambda: NOW,
@@ -705,7 +763,7 @@ def test_catalog_server_reports_events_only_refresh_skipped_for_unconfigured_are
     application = _application(tmp_path)
     server = create_music_server(
         application,
-        refresh=lambda _kind: RefreshInvocation(
+        refresh=lambda _kind, force=False: RefreshInvocation(
             None, False, skip_reason="event_area_not_configured"
         ),
         now=lambda: NOW,
@@ -723,7 +781,7 @@ def test_catalog_server_rejects_invalid_argument_shapes_before_application_work(
 ) -> None:
     application = _application(tmp_path)
     server = create_music_server(
-        application, refresh=lambda _kind: {"status": "succeeded"}, now=lambda: NOW
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
     )
 
     cases = (
@@ -751,7 +809,7 @@ def test_get_setup_reports_missing_fields_and_never_returns_the_client_id_value(
     application = _application(tmp_path)
     server = create_music_server(
         application,
-        refresh=lambda _kind: {"status": "succeeded"},
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
         now=lambda: NOW,
         config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
     )
@@ -783,7 +841,7 @@ def test_get_setup_reports_ready_once_every_nonsecret_field_is_set(tmp_path: Pat
     application = _application(tmp_path)
     server = create_music_server(
         application,
-        refresh=lambda _kind: {"status": "succeeded"},
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
         now=lambda: NOW,
         config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
     )
@@ -805,7 +863,7 @@ def test_update_setup_persists_nonsecret_fields_and_never_returns_the_client_id_
     application = _application(tmp_path)
     server = create_music_server(
         application,
-        refresh=lambda _kind: {"status": "succeeded"},
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
         now=lambda: NOW,
         config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
     )
@@ -842,7 +900,7 @@ def test_update_setup_leaves_unspecified_fields_unchanged(tmp_path: Path) -> Non
     application = _application(tmp_path)
     server = create_music_server(
         application,
-        refresh=lambda _kind: {"status": "succeeded"},
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
         now=lambda: NOW,
         config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
     )
@@ -861,7 +919,7 @@ def test_create_music_server_rejects_a_non_callable_config_store_factory(tmp_pat
     with pytest.raises(ValueError, match="config_store_factory"):
         create_music_server(
             application,
-            refresh=lambda _kind: {"status": "succeeded"},
+            refresh=lambda _kind, force=False: {"status": "succeeded"},
             config_store_factory="not-callable",  # type: ignore[arg-type]
         )
     application.close()
