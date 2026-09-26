@@ -81,6 +81,13 @@ def discover_releases(
                 break
     completed: list[ArtistReleaseDiscoveryResult] = []
     for entry in entries[start:]:
+        if not any(reference.source == source_name for reference in entry.artist.source_refs):
+            # Not yet mapped to this release source (e.g. an artist identity
+            # mapping hasn't resolved this artist to a musicbrainz identity
+            # yet): skip it entirely rather than counting it as a failure.
+            # Mapping and its retry window are identity_mapping's job, not
+            # discover_releases'.
+            continue
         try:
             completed.append(
                 _discover_artist(catalog, source_name, source, entry.artist, checked_at)

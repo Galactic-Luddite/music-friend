@@ -317,6 +317,20 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
         assert kwargs["values"] == {"SPOTIFY_CLIENT_ID": "public-client"}
         yield source
 
+    class FakeMusicBrainzTransport:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class FakeMusicBrainzSource:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
     def create_server(actual_application: object, *, refresh: Callable[[str], object]) -> _Server:
         assert actual_application is application
         for kind in ("events", "catalog", "releases", "all"):
@@ -333,6 +347,8 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
     monkeypatch.setattr(mcp_stdio, "TicketmasterTransport", lambda _connector: event_transport)
     monkeypatch.setattr(mcp_stdio, "TicketmasterDiscoveryClient", EventClientFactory)
     monkeypatch.setattr(mcp_stdio, "spotify_source", source_context)
+    monkeypatch.setattr(mcp_stdio, "MusicBrainzTransport", FakeMusicBrainzTransport)
+    monkeypatch.setattr(mcp_stdio, "MusicBrainzSource", FakeMusicBrainzSource)
     monkeypatch.setattr(mcp_stdio, "refresh_once", run_refresh)
     monkeypatch.setattr(mcp_stdio, "create_music_server", create_server)
     mcp_stdio.run_catalog_stdio_session(
@@ -346,8 +362,107 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
     assert event_transport.closes == 1
     assert application_closes == [application]
     assert [call["kind"] for call in refresh_calls] == ["events", "catalog", "releases", "all"]
-    assert refresh_calls[0]["source"] is None
-    assert all(call["source"] is source for call in refresh_calls[1:])
+    events_call, catalog_call, releases_call, all_call = refresh_calls
+    # events: no source at all.
+    assert events_call["source"] is None
+    # catalog: the (fake) Spotify source, no distinct release_source since releases
+    # doesn't run for this kind.
+    assert catalog_call["source"] is source
+    assert catalog_call["release_source_name"] is None
+    # releases (default release_source=musicbrainz): no Spotify token session opened
+    # at all -- source is None, and release_source is a real (unfaked in this test,
+    # but never invoked since refresh_once itself is faked) MusicBrainzSource.
+    assert releases_call["source"] is None
+    assert releases_call["release_source_name"] == "musicbrainz"
+    assert isinstance(releases_call["release_source"], mcp_stdio.MusicBrainzSource)
+    # all: catalog still uses the Spotify source; releases uses a distinct
+    # MusicBrainz release_source.
+    assert all_call["source"] is source
+    assert all_call["release_source_name"] == "musicbrainz"
+    assert isinstance(all_call["release_source"], mcp_stdio.MusicBrainzSource)
+    assert all_call["release_source"] is not all_call["source"]
+
+
+def test_mcp_refresh_releases_uses_musicbrainz_and_never_opens_a_spotify_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AC: the MCP refresh_music path, driven through
+    mcp_stdio.run_catalog_stdio_session's own refresh() closure (not just
+    refresh_once directly), reaches MusicBrainz and never opens a Spotify
+    token session for a musicbrainz-only releases refresh."""
+    import httpx
+
+    from music_friend.domain import (
+        Artist,
+        IdentityConfidence,
+        SourceReference,
+        WatchlistAction,
+        WatchlistOverride,
+    )
+    from music_friend.store import Catalog
+    from music_friend.tools import MusicFriendApplication
+
+    NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+    catalog_path = tmp_path / "catalog.sqlite3"
+    seed_application = MusicFriendApplication(Catalog.open(catalog_path))
+    seed_application.put_artist(
+        Artist(
+            "artist-1",
+            "Artist One",
+            (SourceReference("spotify", "artist-native", None, NOW),),
+            IdentityConfidence.SOURCE_ONLY,
+            NOW,
+        )
+    )
+    seed_application.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.ADD, NOW))
+    seed_application.close()
+
+    musicbrainz_calls: list[httpx.Request] = []
+
+    def _musicbrainz_response(request: httpx.Request) -> httpx.Response:
+        musicbrainz_calls.append(request)
+        assert request.url.host == "musicbrainz.org"
+        return httpx.Response(200, json={"urls": [], "url-count": 0, "url-offset": 0})
+
+    def connector_factory() -> httpx.BaseTransport:
+        return httpx.MockTransport(_musicbrainz_response)
+
+    @contextmanager
+    def _refuse_spotify_source(**kwargs: object):  # type: ignore[no-untyped-def]
+        raise AssertionError("a musicbrainz-only releases refresh must not open Spotify")
+        yield  # pragma: no cover
+
+    refresh_results: list[object] = []
+
+    def create_server(actual_application: object, *, refresh: Callable[[str], object]) -> _Server:
+        refresh_results.append(refresh("releases"))
+        return _Server()
+
+    class _EventStore:
+        def save(self, _key: object, _value: str) -> None:
+            raise AssertionError("unused")
+
+        def load(self, _key: object) -> str | None:
+            return None
+
+        def delete(self, _key: object) -> None:
+            raise AssertionError("unused")
+
+    monkeypatch.setattr(mcp_stdio, "spotify_source", _refuse_spotify_source)
+    monkeypatch.setattr(mcp_stdio, "create_music_server", create_server)
+
+    mcp_stdio.run_catalog_stdio_session(
+        config=mcp_stdio.LocalConfig(),
+        catalog_path=catalog_path,
+        connector_factory=connector_factory,
+        credential_store_factory=lambda: _EventStore(),  # type: ignore[arg-type]
+    )
+
+    assert len(refresh_results) == 1
+    result = refresh_results[0]
+    assert result.run is not None  # type: ignore[union-attr]
+    assert result.run.status.value == "succeeded"  # type: ignore[union-attr]
+    assert musicbrainz_calls
 
 
 def test_catalog_stdio_session_starts_without_an_available_native_credential_store(
@@ -533,8 +648,13 @@ def _assert_catalog_stdio_flow(process: subprocess.Popen[str]) -> None:
     assert stderr == ""
     assert remaining_stdout == ""
     assert status["result"]["structuredContent"]["status"] == "ready"  # type: ignore[index]
-    for result in (catalog, releases, events, refreshed):
-        assert result["result"]["structuredContent"]["status"] == "succeeded"  # type: ignore[index]
+    for label, result in (
+        ("catalog", catalog),
+        ("releases", releases),
+        ("events", events),
+        ("refreshed", refreshed),
+    ):
+        assert result["result"]["structuredContent"]["status"] == "succeeded", (label, result)  # type: ignore[index]
     watched = watchlist["result"]["structuredContent"]["items"]  # type: ignore[index]
     assert watched == [
         {

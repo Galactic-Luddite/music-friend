@@ -10,7 +10,7 @@ import sys
 import warnings
 import webbrowser
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, TextIO
@@ -33,6 +33,8 @@ from music_friend.domain import (
 from music_friend.providers import Capability, MusicSource
 from music_friend.providers.credentials import CredentialStore
 from music_friend.providers.keyring_store import KeyringCredentialStore
+from music_friend.providers.musicbrainz.source import MusicBrainzSource
+from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
 from music_friend.providers.spotify.config import SpotifySettings
 from music_friend.providers.spotify.oauth import AuthorizationMode, SpotifyAuthorization
 from music_friend.providers.spotify.source import SpotifySource
@@ -164,6 +166,23 @@ def _spotify_source(
         credential_store_factory=credential_store_factory,
     ) as (settings, tokens):
         yield SpotifySource(settings=settings, tokens=tokens, clock=now)
+
+
+@contextmanager
+def _musicbrainz_source(
+    *, connector_factory: ConnectorFactory, now: Clock
+) -> Iterator[MusicSource]:
+    """MusicBrainz is keyless: no credential store needed, but the same injectable
+    connector as every other provider so tests never need a live network call."""
+    transport = MusicBrainzTransport(
+        user_agent=f"music-friend/{__version__} (https://github.com/Galactic-Luddite/music-friend)",
+        connector=connector_factory(),
+    )
+    source = MusicBrainzSource(transport=transport, clock=now)
+    try:
+        yield source
+    finally:
+        source.close()
 
 
 @contextmanager
@@ -776,13 +795,11 @@ def _doctor(
     )
     unmapped_artists = 0
     if release_source == "musicbrainz":
-        list_watchlist = getattr(application, "list_watchlist", None)
-        if callable(list_watchlist):
-            unmapped_artists = sum(
-                1
-                for entry in list_watchlist(limit=500)
-                if not any(ref.source == "musicbrainz" for ref in entry.artist.refs)
-            )
+        unmapped_artists = sum(
+            1
+            for entry in application.list_watchlist(limit=500)
+            if not any(ref.source == "musicbrainz" for ref in entry.artist.source_refs)
+        )
     ready = all(value is True for value in checks.values())
     payload: dict[str, object] = {
         "status": "ready" if ready else "not_ready",
@@ -842,6 +859,10 @@ def _refresh(
         return refresh_runner(kind)
     checked_at = _checked_at(now)
     lock_path = Path(user_data_path("music-friend", appauthor=False)) / "refresh.lock"
+    release_source_name = config.release_source or "musicbrainz"
+    needs_catalog = kind in ("catalog", "all")
+    needs_releases = kind in ("releases", "all")
+    needs_spotify_source = needs_catalog or (needs_releases and release_source_name == "spotify")
     with _ticketmaster_client(
         connector_factory=connector_factory,
         credential_store_factory=credential_store_factory,
@@ -860,17 +881,37 @@ def _refresh(
                 force=force,
                 now=lambda: _checked_at(now),
             )
-        with _spotify_source(
-            config,
-            connector_factory=connector_factory,
-            credential_store_factory=credential_store_factory,
-            now=now,
-        ) as source:
+        with ExitStack() as stack:
+            source: MusicSource | None = None
+            if needs_spotify_source:
+                source = stack.enter_context(
+                    _spotify_source(
+                        config,
+                        connector_factory=connector_factory,
+                        credential_store_factory=credential_store_factory,
+                        now=now,
+                    )
+                )
+            release_source: MusicSource | None = None
+            if needs_releases:
+                if release_source_name == "spotify":
+                    # Same source, same name: refresh_once shares one paced wrapper.
+                    release_source = source
+                else:
+                    # A musicbrainz-only or "all" refresh never needs a Spotify
+                    # token session just for release discovery: identity mapping
+                    # reads Spotify URLs already stored in the local catalog, it
+                    # never calls Spotify live.
+                    release_source = stack.enter_context(
+                        _musicbrainz_source(connector_factory=connector_factory, now=now)
+                    )
             return refresh_once(
                 application,
                 kind=kind,
                 source_name="spotify",
                 source=source,
+                release_source=release_source,
+                release_source_name=release_source_name if needs_releases else None,
                 config=config,
                 event_client=event_client,
                 checked_at=checked_at,

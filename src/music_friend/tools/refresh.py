@@ -392,14 +392,16 @@ def refresh_once(
     components = _components(selected_kind)
     if source is not None and not isinstance(source, MusicSource):
         raise ValueError("source must implement the music source contract")
-    if source is None and any(component in {"catalog", "releases"} for component in components):
-        raise ValueError("source is required for catalog and release refresh")
     if release_source is not None and not isinstance(release_source, MusicSource):
         raise ValueError("release_source must implement the music source contract")
     if release_source_name is not None and (
         type(release_source_name) is not str or not release_source_name
     ):
         raise ValueError("release_source_name must be text")
+    if source is None and "catalog" in components:
+        raise ValueError("source is required for catalog refresh")
+    if source is None and "releases" in components and release_source is None:
+        raise ValueError("source or release_source is required for release refresh")
     if "releases" in components:
         if release_source is None:
             release_source = source

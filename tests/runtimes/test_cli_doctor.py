@@ -270,3 +270,52 @@ def test_native_store_probe_reports_an_approved_backend_as_available(
     monkeypatch.undo()  # Drop the hermetic probe stub so the real probe runs.
     monkeypatch.setattr(cli, "KeyringCredentialStore", object)
     assert cli._native_store_available() is True
+
+
+def test_doctor_reports_unmapped_artists_for_a_non_empty_watchlist_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC: doctor with a non-empty watchlist reports the unmapped count instead of
+    raising AttributeError (Artist.source_refs, not Artist.refs) when
+    release_source=musicbrainz (the default)."""
+    from datetime import datetime, timezone
+
+    from music_friend.domain import (
+        Artist,
+        IdentityConfidence,
+        SourceReference,
+        WatchlistAction,
+        WatchlistOverride,
+    )
+
+    monkeypatch.setattr(cli, "_spotify_tokens", _fake_tokens(connected=True))
+    now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+    application = MusicFriendApplication(Catalog.open(tmp_path / "catalog.sqlite3"))
+    artist = Artist(
+        "artist-1",
+        "Artist One",
+        (SourceReference("spotify", "artist-native", None, now),),
+        IdentityConfidence.SOURCE_ONLY,
+        now,
+    )
+    application.put_artist(artist)
+    application.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.ADD, now))
+    application.close()
+
+    store = _KeyStore({TICKETMASTER_CREDENTIAL_KEY: "tm-secret-canary"})
+    result, stdout, stderr = _run(
+        tmp_path,
+        ["doctor", "--json"],
+        config_store=_ConfigStore(_COMPLETE),
+        native=lambda: True,
+        credential_store_factory=lambda: store,
+    )
+
+    payload = json.loads(stdout)
+    assert payload["release_source"] == {
+        "source": "musicbrainz",
+        "unmapped_artists": 1,
+        "remedy": "Run 'music-friend refresh releases' to map artists",
+    }
+    assert stderr == ""
+    assert result == 0

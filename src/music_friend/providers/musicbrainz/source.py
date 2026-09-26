@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Protocol
 
+from music_friend import __version__
 from music_friend.domain import (
     Artist,
     CatalogItemBatch,
@@ -25,6 +26,11 @@ from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
 
 #: Maximum ``resource`` parameters per /ws/2/url batch call.
 _URL_BATCH_SIZE = 100
+
+#: Mandatory, meaningful User-Agent for the keyless MusicBrainz API.
+_DEFAULT_USER_AGENT = (
+    f"music-friend/{__version__} (https://github.com/Galactic-Luddite/music-friend)"
+)
 
 
 def _url_entries(response: object) -> dict[str, Mapping[str, object]]:
@@ -109,9 +115,7 @@ class MusicBrainzSource:
         self._transport: _Transport = (
             transport
             if transport is not None
-            else MusicBrainzTransport(
-                user_agent="music-friend/0.1.0 (https://github.com/Galactic-Luddite/music-friend)"
-            )
+            else MusicBrainzTransport(user_agent=_DEFAULT_USER_AGENT)
         )
         self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
         self._capabilities = ProviderCapabilities(
