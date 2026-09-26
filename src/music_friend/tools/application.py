@@ -134,8 +134,17 @@ class MusicFriendApplication:
     def remove_watchlist_override(self, artist_local_id: str) -> None:
         self._catalog.remove_watchlist_override(artist_local_id)
 
-    def synchronize_catalog(self, source_name: str, source: MusicSource) -> CatalogSyncResult:
-        return synchronize_catalog(self._catalog, source_name, source)
+    def synchronize_catalog(
+        self,
+        source_name: str,
+        source: MusicSource,
+        *,
+        checked_at: datetime | None = None,
+        force: bool = False,
+    ) -> CatalogSyncResult:
+        return synchronize_catalog(
+            self._catalog, source_name, source, checked_at=checked_at, force=force
+        )
 
     def discover_releases(
         self,

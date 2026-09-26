@@ -146,6 +146,13 @@ def test_named_child_validators_reject_shaped_bypasses(tmp_path: Path) -> None:
         source_root=source,
     )
     python = str(Path(sys.executable).resolve())
+    # A fake wheel directory with no wheel file present makes _artifact_smoke_code() return
+    # None (see its `len(wheels) != 1` guard), so this literal is built by hand in the same
+    # shape rather than through that helper; the migration-version tuple is still derived from
+    # bundled_migrations() so it cannot drift from the real bundled schema.
+    from music_friend.store.migrations import bundled_migrations
+
+    expected_versions = [(migration.version,) for migration in bundled_migrations()]
     expected_smoke = (
         "import sys; from pathlib import Path; "
         f"sys.path.insert(0, {str(allowed / 'wheel.whl')!r}); "
@@ -153,7 +160,7 @@ def test_named_child_validators_reject_shaped_bypasses(tmp_path: Path) -> None:
         f"catalog = Catalog.open(Path({str(allowed / 'catalog.sqlite3')!r})); "
         "assert catalog._connection.execute("
         "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]; catalog.close()"
+        f"== {expected_versions!r}; catalog.close()"
     )
     shaped_bypasses = (
         (python, "-m", "build", "--arbitrary", str(allowed)),

@@ -44,7 +44,9 @@ def test_codex_and_claude_stdio_fixture_shapes_select_the_same_local_command() -
 def test_openai_compatible_loop_translates_mcp_schema_and_synthetic_result(tmp_path: Path) -> None:
     """The non-shipping harness proves bridge data shape, not model quality or native MCP support."""
     application = MusicFriendApplication(Catalog.open(tmp_path / "catalog.sqlite3"))
-    server = create_music_server(application, refresh=lambda _kind: {"status": "succeeded"})
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}
+    )
 
     async def listed() -> object:
         async with Client(server) as client:

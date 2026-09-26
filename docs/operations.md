@@ -85,6 +85,7 @@ approved native credential store.
 ```bash
 music-friend status --json
 music-friend refresh catalog --json
+music-friend refresh catalog --force --json
 music-friend refresh releases --json
 music-friend refresh events --json
 music-friend refresh all --json
@@ -114,6 +115,23 @@ the scheduled daily refresh's 24-hour cadence so a scheduled run that starts sli
 mistakes every artist for fresh and silently skips a whole cycle. The Spotify adapter has no batch
 lookup endpoint today (it calls `/v1/artists/{id}/albums` per artist), so batching several artists
 into one call and conditional (`If-None-Match`) requests remain future work.
+
+`refresh catalog` applies the same freshness skip per capability (followed artists, saved items,
+and each top-items time range): a capability that completed successfully within the same freshness
+window makes zero requests on the next run, so a daily refresh spends its request budget on
+release discovery instead of re-paginating an unchanged library. A capability that ends `failed`
+never marks itself fresh, so the next run retries it in full. Pass `--force` to bypass the skip and
+re-paginate every catalog capability regardless of freshness -- for example, after connecting a
+different Spotify account or when you want to force a full re-sync:
+
+```bash
+music-friend refresh catalog --force --json
+```
+
+The refresh result's metrics include a `catalog_skipped_fresh` count of how many catalog
+capabilities were skipped as fresh, and `status --json` surfaces the same count from the latest
+run, so a script can tell "made few requests because everything was fresh" apart from "made few
+requests because it failed early".
 
 A `partial` refresh result includes three extra fields when the cause is known:
 

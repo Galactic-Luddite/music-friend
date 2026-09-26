@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+- Catalog sync (`refresh catalog` / `refresh all`, and the MCP `refresh_music` tool) now skips a
+  capability (followed artists, saved items, each top-items time range) that completed
+  successfully within the same freshness window release discovery already uses, making zero
+  Spotify requests for it and reporting it `skipped_fresh`. A capability that ends `failed` is
+  never marked fresh, so the next run retries it in full. This lets a daily refresh reach release
+  discovery instead of exhausting the request budget re-paginating an unchanged library.
+- New CLI flag `music-friend refresh catalog --force` and MCP `refresh_music` argument
+  `force: bool` (default `false`) bypass the freshness skip for a deliberate full re-sync.
+- The refresh result's metrics and `music_status` now report `catalog_skipped_fresh`, the number
+  of catalog capabilities skipped as fresh in the latest run.
+
 ## 0.4.0
 
 Minor release: setup, data commands, and Spotify connection can be driven by an agent without a terminal, two MCP configuration tools are added, and refresh paces itself under Spotify rate limits.

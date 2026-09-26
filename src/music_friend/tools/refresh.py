@@ -98,6 +98,7 @@ class _RefreshCounts:
     signals_created: int = 0
     failures: int = 0
     successes: int = 0
+    catalog_skipped_fresh: int = 0
     source_requests: int = 0
     limit_pauses: int = 0
     partial: bool = False
@@ -354,6 +355,7 @@ def refresh_once(
     event_client: TicketmasterClient | None,
     checked_at: datetime,
     lock_path: Path,
+    force: bool = False,
     monotonic: Callable[[], float] | object | None = None,
     lock_clock: Callable[[], float] | object | None = None,
     sleeper: Callable[[float], None] | object | None = None,
@@ -377,6 +379,8 @@ def refresh_once(
         raise ValueError("checked_at must be timezone-aware")
     if not isinstance(lock_path, Path):
         raise ValueError("lock_path must be a Path")
+    if type(force) is not bool:
+        raise ValueError("force must be a boolean")
     clock = time.monotonic if monotonic is None else monotonic
     if not callable(clock):
         raise ValueError("monotonic must be callable")
@@ -430,7 +434,7 @@ def refresh_once(
             if component == "catalog":
                 if limited_source is None:
                     raise AssertionError("catalog refresh requires a source")
-                _run_catalog(application, source_name, limited_source, counts)
+                _run_catalog(application, source_name, limited_source, checked_at, counts, force)
             elif component == "releases":
                 if limited_source is None:
                     raise AssertionError("release refresh requires a source")
@@ -552,10 +556,14 @@ def _run_catalog(
     application: MusicFriendApplication,
     source_name: str,
     source: _PacedSource,
+    checked_at: datetime,
     counts: _RefreshCounts,
+    force: bool = False,
 ) -> None:
     try:
-        result = application.synchronize_catalog(source_name, source)
+        result = application.synchronize_catalog(
+            source_name, source, checked_at=checked_at, force=force
+        )
     except Exception:
         counts.failures += 1
         return
@@ -571,6 +579,8 @@ def _count_catalog(result: CatalogSyncResult, counts: _RefreshCounts) -> None:
         counts.records_seen += capability.artists_seen
         if capability.status is SyncCapabilityStatus.SUCCESS:
             counts.successes += 1
+        elif capability.status is SyncCapabilityStatus.SKIPPED_FRESH:
+            counts.catalog_skipped_fresh += 1
         else:
             counts.failures += 1
 
@@ -968,6 +978,7 @@ def _summary(counts: _RefreshCounts) -> RefreshSummary:
         RefreshMetricKind.RECORDS_SKIPPED: counts.records_skipped,
         RefreshMetricKind.SIGNALS_CREATED: counts.signals_created,
         RefreshMetricKind.FAILURES: counts.failures,
+        RefreshMetricKind.CATALOG_SKIPPED_FRESH: counts.catalog_skipped_fresh,
         RefreshMetricKind.LIMIT_PAUSES: counts.limit_pauses,
         RefreshMetricKind.SOURCE_REQUESTS: counts.source_requests,
     }

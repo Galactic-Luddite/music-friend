@@ -37,7 +37,7 @@ catalog; "provider contact" means it makes read-only network requests to Spotify
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
 | `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `source_limits.spotify` (`ready`, `state`, `retry_at`) | read-only, local |
-| `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all` | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
+| `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all`; `force` (boolean, default `false`) | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
 | `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries | read-only, local |
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove` | the applied decision, or `not_found` | local write |
@@ -69,6 +69,15 @@ A `partial` `refresh_music` result adds `reason` (`rate_limited`, `quota_exhaust
 `remaining` (how many records this run skipped) when the cause is known. Call `music_status`
 first, or read `retry_after` from a prior `partial` result, before starting another refresh during
 a cooldown -- see [adaptive request pacing](operations.md#adaptive-request-pacing).
+
+`refresh_music` with `kind: "catalog"` or `"all"` skips a catalog capability (followed artists,
+saved items, each top-items time range) that completed successfully within the freshness window --
+see [catalog freshness](operations.md#inspect-and-refresh) -- making zero source requests for it
+and reporting it `skipped_fresh`. A failed capability is never marked fresh and is retried in full
+on the next run. Pass `force: true` to bypass the skip and re-paginate every catalog capability
+regardless of freshness. The result's metrics include `catalog_skipped_fresh`, the number of
+catalog capabilities skipped as fresh in that run; `music_status` reports the same count from the
+latest run.
 
 `refresh_music` with `kind: "events"` and no event area configured makes no source requests; it
 returns `{"status": "skipped", "reason": "event_area_not_configured"}` instead of reporting

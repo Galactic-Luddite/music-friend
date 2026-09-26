@@ -424,7 +424,7 @@ def test_accepted_import_text_remains_inert_through_plain_cli_and_mcp(
     )
     server = create_music_server(
         application,
-        refresh=lambda _kind: {"status": "succeeded"},
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
         now=lambda: datetime(2026, 9, 1, tzinfo=timezone.utc),
     )
 

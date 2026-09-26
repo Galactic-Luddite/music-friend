@@ -31,6 +31,7 @@ from music_friend.domain import (
     AffinityEvidenceKind,
     AffinityScore,
     Artist,
+    CatalogSyncCursor,
     Event,
     EventDiscovery,
     Explanation,
@@ -1706,6 +1707,46 @@ class Catalog:
                 """,
                 (source, artist_local_id),
             )
+
+    def put_catalog_sync_cursor(self, cursor: CatalogSyncCursor) -> None:
+        """Record one capability's completed catalog-sync boundary."""
+        if type(cursor) is not CatalogSyncCursor:
+            raise ValueError("cursor must be a CatalogSyncCursor")
+        with self.transaction():
+            self._require_connection().execute(
+                """
+                INSERT INTO catalog_sync_cursors (source, capability, last_successful_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (source, capability) DO UPDATE SET
+                    last_successful_at = excluded.last_successful_at
+                """,
+                (
+                    cursor.source,
+                    cursor.capability,
+                    _datetime_text(cursor.last_successful_at),
+                ),
+            )
+
+    def get_catalog_sync_cursor(self, source: str, capability: str) -> CatalogSyncCursor | None:
+        """Read one capability's last fully successful sync boundary."""
+        row = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT source, capability, last_successful_at
+                FROM catalog_sync_cursors WHERE source = ? AND capability = ?
+                """,
+                (source, capability),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return CatalogSyncCursor(
+            str(row[0]),
+            str(row[1]),
+            datetime.fromisoformat(str(row[2])),
+        )
 
     def put_release_discovery(self, discovery: ReleaseDiscovery) -> None:
         """Persist bounded release first/last-seen and material identity state."""

@@ -404,3 +404,116 @@ def test_synchronize_catalog_rejects_invalid_inputs(tmp_path: Path) -> None:
                 "spotify",
                 object(),  # type: ignore[arg-type]
             )
+
+
+def test_catalog_freshness_ttl_stays_below_the_scheduled_refresh_interval() -> None:
+    """Catalog TTL is derived from DAILY_REFRESH_MINUTES and stays below it."""
+    from datetime import timedelta
+
+    from music_friend.domain import DAILY_REFRESH_MINUTES
+
+    catalog_ttl = sync_module.FRESHNESS_TTL
+    refresh_interval = timedelta(minutes=DAILY_REFRESH_MINUTES)
+
+    # TTL must be less than the refresh interval
+    assert catalog_ttl < refresh_interval
+    # TTL should be refresh_interval minus 4 hours
+    expected = refresh_interval - timedelta(hours=4)
+    assert catalog_ttl == expected
+
+
+def test_two_consecutive_syncs_within_ttl_skips_fresh(tmp_path: Path) -> None:
+    """A second sync within TTL skips all capabilities and reports skipped_fresh."""
+    from datetime import timedelta
+
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        source = FakeCatalogSource()
+        checked_at = NOW
+
+        # First sync: full run
+        result1 = application.synchronize_catalog(
+            "spotify", source, checked_at=checked_at, force=False
+        )
+        results1 = _result_map(result1)
+
+        # All capabilities should be SUCCESS on first run
+        for status in results1.values():
+            assert status.status is SyncCapabilityStatus.SUCCESS
+            assert status.pages_seen > 0
+
+        # Second sync: shortly after the first one (within TTL)
+        checked_at2 = checked_at + timedelta(minutes=5)
+        result2 = application.synchronize_catalog(
+            "spotify", source, checked_at=checked_at2, force=False
+        )
+        results2 = _result_map(result2)
+
+        # All capabilities should be SKIPPED_FRESH and make zero requests
+        for capability, status in results2.items():
+            assert status.status is SyncCapabilityStatus.SKIPPED_FRESH
+            assert status.pages_seen == 0
+            assert status.artists_seen == 0
+            assert status.evidence_count == 0
+
+
+def test_failed_run_does_not_mark_capability_fresh(tmp_path: Path) -> None:
+    """A failed capability does not update last_successful_at."""
+    from datetime import timedelta
+
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        source = FakeCatalogSource()
+        checked_at = NOW
+
+        # First sync: mark followed_artists as failed
+        source.failures.add("followed")
+        result1 = application.synchronize_catalog(
+            "spotify", source, checked_at=checked_at, force=False
+        )
+        results1 = _result_map(result1)
+        assert results1[SourceCapability.FOLLOWED_ARTISTS].status is SyncCapabilityStatus.FAILED
+
+        # Second sync: shortly after (within TTL), but followed should not be skipped
+        # because it never completed successfully
+        source.failures.clear()
+        checked_at2 = checked_at + timedelta(minutes=5)
+        result2 = application.synchronize_catalog(
+            "spotify", source, checked_at=checked_at2, force=False
+        )
+        results2 = _result_map(result2)
+
+        # FOLLOWED_ARTISTS should retry (SUCCESS), not skip
+        assert results2[SourceCapability.FOLLOWED_ARTISTS].status is SyncCapabilityStatus.SUCCESS
+        assert results2[SourceCapability.FOLLOWED_ARTISTS].pages_seen > 0
+
+
+def test_force_bypasses_freshness_check(tmp_path: Path) -> None:
+    """With force=True, all capabilities refresh fully even within TTL."""
+    from datetime import timedelta
+
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        source = FakeCatalogSource()
+        checked_at = NOW
+
+        # First sync: full run
+        result1 = application.synchronize_catalog(
+            "spotify", source, checked_at=checked_at, force=False
+        )
+        results1 = _result_map(result1)
+
+        for status in results1.values():
+            assert status.status is SyncCapabilityStatus.SUCCESS
+
+        # Second sync: shortly after, but with force=True
+        checked_at2 = checked_at + timedelta(minutes=5)
+        result2 = application.synchronize_catalog(
+            "spotify", source, checked_at=checked_at2, force=True
+        )
+        results2 = _result_map(result2)
+
+        # All capabilities should be SUCCESS and make requests
+        for capability, status in results2.items():
+            assert status.status is SyncCapabilityStatus.SUCCESS
+            assert status.pages_seen > 0

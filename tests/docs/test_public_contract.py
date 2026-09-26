@@ -353,6 +353,7 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend doctor --json",
         "music-friend status --json",
         "music-friend refresh catalog --json",
+        "music-friend refresh catalog --force --json",
         "music-friend refresh releases --json",
         "music-friend refresh events --json",
         "music-friend refresh all --json",
