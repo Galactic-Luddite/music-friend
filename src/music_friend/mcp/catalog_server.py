@@ -589,7 +589,7 @@ def create_music_server(
             if source_ids is not None:
                 from music_friend.domain import IdentityConfidence
 
-                updated_refs = list(artist.refs)
+                updated_refs = list(artist.source_refs)
                 for source, identity_str in source_ids.items():
                     if not isinstance(source, str) or not source:
                         raise _InvalidArguments(f"source must be a non-empty string, got: {source}")
@@ -602,19 +602,22 @@ def create_music_server(
                         # Basic UUID validation (8-4-4-4-12 hex digits)
                         import re
 
-                        if not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", identity_str.lower()):
+                        if not re.match(
+                            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            identity_str.lower(),
+                        ):
                             raise _InvalidArguments(
                                 f"musicbrainz identity must be a valid UUID, got: {identity_str}"
                             )
 
                     # Remove any prior ref for this source and add new one with USER_CONFIRMED confidence
-                    updated_refs = [
-                        r for r in updated_refs if r.source != source
-                    ]
+                    updated_refs = [r for r in updated_refs if r.source != source]
                     updated_refs.append(
                         SourceReference(
                             source=source,
-                            identity=identity_str,
+                            native_id=identity_str,
+                            canonical_url=None,
+                            observed_at=updated_at,
                             confidence=IdentityConfidence.USER_CONFIRMED,
                         )
                     )
@@ -622,19 +625,16 @@ def create_music_server(
                 # Record the mapping in artist_identity_mappings table
                 for source, identity_str in source_ids.items():
                     application._catalog.put_artist_identity_mapping(
-                        artist_local_id=local_id,
-                        source=source,
-                        status="mapped",
-                        identity=identity_str,
-                        method="user",
-                        checked_at=updated_at,
+                        local_id, source, "mapped", "user", updated_at
                     )
 
                 # Update the artist with new refs
                 artist = Artist(
                     local_id=artist.local_id,
-                    name=artist.name,
-                    refs=updated_refs,
+                    display_name=artist.display_name,
+                    source_refs=tuple(updated_refs),
+                    identity_confidence=IdentityConfidence.USER_CONFIRMED,
+                    observed_at=updated_at,
                 )
                 application.put_artist(artist)
 
@@ -864,7 +864,9 @@ def create_music_server(
                 event_radius_unit=event_radius_unit
                 if event_radius_unit is not None
                 else config.event_radius_unit,
-                release_source=release_source if release_source is not None else config.release_source,
+                release_source=release_source
+                if release_source is not None
+                else config.release_source,
             )
             store.save(updated_config)
 
@@ -1008,8 +1010,10 @@ def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[s
     # Check configured release_source and get identity status if using MusicBrainz
     from music_friend.configuration import LocalConfigStore
 
-    config_store = LocalConfigStore()
-    config = config_store.load()
+    try:
+        config = LocalConfigStore().load()
+    except ValueError:
+        config = LocalConfig()
     release_source = config.release_source or "musicbrainz"
 
     status_dict: dict[str, object] = {
@@ -1021,17 +1025,17 @@ def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[s
 
     # Add MusicBrainz identity mapping status if configured
     if release_source == "musicbrainz":
-        watchlist = application.list_watchlist(limit=10000)
+        watchlist = application.list_watchlist(limit=500)
         mapped_count = 0
         unmapped_count = 0
 
         for entry in watchlist:
-            artist = application.get_artist(entry.artist_local_id)
+            artist = application.get_artist(entry.artist.local_id)
             if artist is None:
                 continue
 
             # Check if artist has musicbrainz ref
-            has_musicbrainz = any(ref.source == "musicbrainz" for ref in artist.refs)
+            has_musicbrainz = any(ref.source == "musicbrainz" for ref in artist.source_refs)
             if has_musicbrainz:
                 mapped_count += 1
             else:
@@ -1124,14 +1128,16 @@ def _watchlist(value: WatchlistEntry) -> dict[str, object]:
     from music_friend.configuration import LocalConfigStore
 
     # Check configured release_source
-    config_store = LocalConfigStore()
-    config = config_store.load()
+    try:
+        config = LocalConfigStore().load()
+    except ValueError:
+        config = LocalConfig()
     release_source = config.release_source or "musicbrainz"
 
     # Determine release_source_status based on whether artist has the configured source identity
     release_source_status = None
     if release_source == "musicbrainz":
-        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.refs)
+        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.source_refs)
         release_source_status = "mapped" if has_musicbrainz else "unmapped"
 
     result = {

@@ -11,7 +11,8 @@ from music_friend.domain import (
     IdentityConfidence,
     SourceReference,
 )
-from music_friend.providers import MusicSource, RateLimitedError
+from music_friend.errors import RateLimitedError
+from music_friend.providers import MusicSource
 from music_friend.store import Catalog
 
 #: Retry interval for unmapped artists: 7 days
@@ -109,9 +110,7 @@ def _get_artists_needing_mapping(catalog: Catalog) -> Sequence[Artist]:
             continue
 
         # Check if already has musicbrainz reference
-        has_musicbrainz = any(
-            ref.source == "musicbrainz" for ref in artist.refs
-        )
+        has_musicbrainz = any(ref.source == "musicbrainz" for ref in artist.refs)
         if not has_musicbrainz:
             needing_mapping.append(artist)
 
@@ -136,9 +135,7 @@ def _should_skip_unmapped_retry(
         return False
 
     last_checked_dt = (
-        last_checked
-        if isinstance(last_checked, datetime)
-        else datetime.fromisoformat(last_checked)
+        last_checked if isinstance(last_checked, datetime) else datetime.fromisoformat(last_checked)
     )
 
     time_since_last_attempt = checked_at - last_checked_dt

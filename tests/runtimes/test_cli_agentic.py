@@ -98,6 +98,26 @@ def test_setup_with_flags_non_tty() -> None:
     assert config_store.value.spotify_client_id == "example-id"
 
 
+def test_setup_release_source_flag_is_saved_and_rejects_unknown_value() -> None:
+    """Release discovery source is explicit in non-interactive setup."""
+    config_store = _ConfigStore()
+
+    exit_code, _stdout, stderr = _run(
+        ["setup", "--release-source", "spotify"], config_store=config_store
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert config_store.value.release_source == "spotify"
+
+    exit_code, _stdout, stderr = _run(
+        ["setup", "--release-source", "not-a-source"], config_store=config_store
+    )
+
+    assert exit_code == 1
+    assert "release_source" in stderr
+
+
 def test_setup_with_all_flags() -> None:
     """Setup with all event area flags should configure fully."""
     config_store = _ConfigStore()

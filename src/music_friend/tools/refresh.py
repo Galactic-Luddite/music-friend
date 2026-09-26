@@ -58,6 +58,7 @@ from music_friend.providers.ticketmaster import (
     TicketmasterEvent,
 )
 from music_friend.tools.application import MusicFriendApplication
+from music_friend.tools.identity_mapping import run_identity_mapping
 from music_friend.tools.release_discovery import (
     _ReleaseDiscoveryInterrupted,
     _SourceCallStopped,
@@ -377,7 +378,9 @@ def refresh_once(
         raise ValueError("source is required for catalog and release refresh")
     if release_source is not None and not isinstance(release_source, MusicSource):
         raise ValueError("release_source must implement the music source contract")
-    if release_source_name is not None and (type(release_source_name) is not str or not release_source_name):
+    if release_source_name is not None and (
+        type(release_source_name) is not str or not release_source_name
+    ):
         raise ValueError("release_source_name must be text")
     if "releases" in components:
         if release_source is None:
@@ -463,7 +466,9 @@ def refresh_once(
             elif component == "releases":
                 if limited_release_source is None:
                     raise AssertionError("release refresh requires a release_source")
-                _run_releases(application, release_source_name, limited_release_source, checked_at, counts)
+                _run_releases(
+                    application, release_source_name, limited_release_source, checked_at, counts
+                )
                 if limited_release_source.stopped:
                     break
             else:

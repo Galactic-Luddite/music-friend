@@ -17,6 +17,10 @@ expire before resuming. If the artist is no longer on the watchlist, discovery r
 current watchlist. Completing the watchlist clears the interrupted state. Source-limit state is
 included in exports and imports.
 
+MusicBrainz is the default release source. It requires no API key; Music Friend spaces MusicBrainz
+requests at no more than one request per second and records bounded partial outcomes if a refresh
+cannot complete.
+
 Ticketmaster is optional and does not establish a completeness guarantee for live events. Music
 Friend searches only an explicit country and postal-code area. It uses a default radius of 50 miles
 or 80 kilometers when a configured area omits a radius, searches the next 365 days, asks for up to

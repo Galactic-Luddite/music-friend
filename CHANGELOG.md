@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added MusicBrainz as the default release source; use `--release-source` to configure it.
+
 - Catalog sync (`refresh catalog` / `refresh all`, and the MCP `refresh_music` tool) now skips a
   capability (followed artists, saved items, each top-items time range) that completed
   successfully within the same freshness window release discovery already uses, making zero

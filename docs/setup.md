@@ -1,4 +1,18 @@
-# Spotify and optional event setup
+# Spotify, release source, and optional event setup
+
+## Release source
+
+Music Friend uses MusicBrainz for release discovery by default. It needs no API key and maps
+watched artists to MusicBrainz identities during `music-friend refresh releases`. Use Spotify as
+the release source only when its release catalog is preferable for your account:
+
+```bash
+music-friend setup --release-source musicbrainz
+music-friend setup --release-source spotify
+```
+
+Interactive setup also asks for the release source; an empty response selects MusicBrainz unless a
+previous selection is already saved.
 
 ## Spotify
 

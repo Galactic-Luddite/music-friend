@@ -68,7 +68,7 @@ AuthorizerFactory = Callable[
 ]
 
 _USAGE = (
-    "Usage: music-friend doctor | setup | connect spotify | disconnect spotify | status | "
+    "Usage: music-friend doctor | setup [--release-source spotify|musicbrainz] | connect spotify | disconnect spotify | status | "
     "refresh catalog|releases|events|all [--force] | watchlist list | inbox list|show | "
     "data export|import|import-spotify|backup|restore|delete | diagnostics | "
     "schedule install|status|remove | version\n"
@@ -304,6 +304,7 @@ def _run_local_command(
 ) -> int:
     if argv == ["doctor"]:
         return _doctor(
+            application,
             config_store,
             structured,
             stdout,
@@ -470,13 +471,32 @@ def _setup_config(prior: LocalConfig, prompt: Prompt) -> LocalConfig:
         normalize=lambda value: value.strip(),
     )
     country, postal, radius, unit = _setup_event_area(prior, prompt)
+    try:
+        release_source_input = prompt(
+            "Choose release source (default: musicbrainz): [spotify|musicbrainz] "
+        )
+    except StopIteration:
+        release_source_input = ""
+    release_source = _setup_release_source(prior.release_source, release_source_input)
     return LocalConfig(
         spotify_client_id=spotify_client_id,
         event_country_code=country,
         event_postal_code=postal,
         event_radius=radius,
         event_radius_unit=unit,
+        release_source=release_source,
     )
+
+
+def _setup_release_source(prior: str | None, value: str) -> str:
+    if type(value) is not str:
+        raise ValueError("release_source is invalid")
+    normalized = value.strip().lower()
+    if not normalized:
+        return prior or "musicbrainz"
+    if normalized not in {"spotify", "musicbrainz"}:
+        raise ValueError("release_source is invalid")
+    return normalized
 
 
 def _setup_event_area(
@@ -697,6 +717,7 @@ _DOCTOR_REMEDIES = {
 
 
 def _doctor(
+    application: MusicFriendApplication,
     config_store: object,
     structured: bool,
     stdout: TextIO,
@@ -746,6 +767,18 @@ def _doctor(
                 checks["ticketmaster_key"] = client.is_configured()
         except Exception:
             checks["ticketmaster_key"] = False
+    release_source = (
+        config.release_source if config is not None and config.release_source else "musicbrainz"
+    )
+    unmapped_artists = 0
+    if release_source == "musicbrainz":
+        list_watchlist = getattr(application, "list_watchlist", None)
+        if callable(list_watchlist):
+            unmapped_artists = sum(
+                1
+                for entry in list_watchlist(limit=500)
+                if not any(ref.source == "musicbrainz" for ref in entry.artist.refs)
+            )
     ready = all(value is True for value in checks.values())
     payload: dict[str, object] = {
         "status": "ready" if ready else "not_ready",
@@ -755,6 +788,15 @@ def _doctor(
                 "remedy": None if value is True else _DOCTOR_REMEDIES[name],
             }
             for name, value in checks.items()
+        },
+        "release_source": {
+            "source": release_source,
+            "unmapped_artists": unmapped_artists,
+            "remedy": (
+                "Run 'music-friend refresh releases' to map artists"
+                if release_source == "musicbrainz" and unmapped_artists
+                else None
+            ),
         },
     }
     _emit(payload, structured, stdout, text=_doctor_text(payload))
@@ -769,6 +811,16 @@ def _doctor_text(payload: dict[str, object]) -> str:
         lines.append(f"[{result['state']}] {name}")
         if result["remedy"] is not None:
             lines.append(f"    {result['remedy']}")
+    release_source = payload["release_source"]
+    assert isinstance(release_source, dict)
+    if release_source["source"] == "musicbrainz":
+        lines.append(
+            f"release_source: musicbrainz ({release_source['unmapped_artists']} artists unmapped)"
+        )
+        if release_source["remedy"] is not None:
+            lines.append(f"    {release_source['remedy']}")
+    else:
+        lines.append("release_source: spotify")
     return "\n".join(lines)
 
 
@@ -1253,6 +1305,7 @@ def _setup_command(
             "--event-radius",
             "--event-unit",
             "--spotify-client-id",
+            "--release-source",
         }:
             if i + 1 >= len(argv):
                 print(_USAGE, end="", file=stderr)
@@ -1337,6 +1390,7 @@ def _setup_command(
         "event_postal_code": configured.event_postal_code,
         "event_radius": configured.event_radius,
         "event_radius_unit": configured.event_radius_unit,
+        "release_source": configured.release_source or "musicbrainz",
     }
     return _emit(result, structured, stdout, text="Music Friend setup complete.")
 
@@ -1348,6 +1402,7 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
     event_postal_code = prior.event_postal_code
     event_radius = prior.event_radius
     event_radius_unit = prior.event_radius_unit
+    release_source = prior.release_source
 
     # Handle clears
     if flags.get("clear_spotify_client_id") == "true":
@@ -1368,6 +1423,8 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
             flags["spotify_client_id"],
             normalize=lambda value: value.strip(),
         )
+    if "release_source" in flags and flags["release_source"] is not None:
+        release_source = _setup_release_source(prior.release_source, flags["release_source"])
 
     if (
         "event_country" in flags
@@ -1419,6 +1476,7 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
         event_postal_code=event_postal_code,
         event_radius=event_radius,
         event_radius_unit=event_radius_unit,
+        release_source=release_source,
     )
 
 

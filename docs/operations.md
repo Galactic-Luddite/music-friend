@@ -21,7 +21,7 @@ All setup operations support non-interactive flags and JSON output for automatio
 
 ```bash
 # Non-interactive setup (TTY optional)
-music-friend setup --spotify-client-id <id> --event-country US --event-postal 94110 --event-radius 50 --event-unit miles
+music-friend setup --spotify-client-id <id> --event-country US --event-postal 94110 --event-radius 50 --event-unit miles --release-source musicbrainz
 
 # Clear individual fields
 music-friend setup --clear-spotify-client-id
@@ -76,6 +76,9 @@ event area, and the Ticketmaster key in one pass. Each check is `ok`, `failed`, 
 unlocked), and every non-`ok` check names its fix. It exits 0 when everything is ready and 5
 otherwise. It reads only local state, never contacts a provider, and never prints credential
 values, so its output is safe to paste into an issue.
+
+It also reports the selected release source. When MusicBrainz is selected, the report includes the
+number of unmapped watchlist artists and directs you to `music-friend refresh releases` to map them.
 
 `status --json` includes `mcp_ready`, which is `false` when the MCP server could not open an
 approved native credential store.
