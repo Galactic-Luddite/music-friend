@@ -21,7 +21,7 @@ import time
 import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
 from urllib.parse import quote
@@ -1876,7 +1876,21 @@ class Catalog:
         normalized_title: str,
         release_date: date,
     ) -> ReleaseDiscovery | None:
-        """Find an obvious same-artist/title/date release variant without a new candidate."""
+        """Find an obvious same-artist/title/date release variant without a new candidate.
+
+        Source-agnostic (issue #42): a release discovered via one source and
+        later discovered again via a different source (e.g. MusicBrainz then
+        Deezer) is the same real-world release, so this no longer filters by
+        ``discovery.source`` -- the ``source`` argument is accepted for call-site
+        compatibility but unused for matching. Also accepts a release date that
+        differs by exactly one day (either direction) from ``release_date``,
+        since a day-precision discrepancy between two independently-edited
+        catalogs is exactly the kind of variant this lookup exists to catch;
+        an exact match is preferred and returned first when both exist.
+        """
+        _ = source  # unused: matching is source-agnostic, see docstring
+        one_day = timedelta(days=1)
+        candidate_dates = (release_date, release_date - one_day, release_date + one_day)
         row = (
             self._require_connection()
             .execute(
@@ -1886,12 +1900,20 @@ class Catalog:
                        discovery.first_seen_at, discovery.last_seen_at
                 FROM release_discoveries AS discovery
                 JOIN release_artists AS artist ON artist.release_id = discovery.release_local_id
-                WHERE discovery.source = ? AND artist.artist_id = ?
-                  AND discovery.normalized_title = ? AND discovery.release_date = ?
-                ORDER BY discovery.release_local_id
+                WHERE artist.artist_id = ?
+                  AND discovery.normalized_title = ?
+                  AND discovery.release_date IN (?, ?, ?)
+                ORDER BY
+                    CASE WHEN discovery.release_date = ? THEN 0 ELSE 1 END,
+                    discovery.release_local_id
                 LIMIT 1
                 """,
-                (source, artist_local_id, normalized_title, release_date.isoformat()),
+                (
+                    artist_local_id,
+                    normalized_title,
+                    *(candidate.isoformat() for candidate in candidate_dates),
+                    release_date.isoformat(),
+                ),
             )
             .fetchone()
         )

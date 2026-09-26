@@ -28,7 +28,7 @@ _SPOTIFY_ARTIST_URL = "https://open.spotify.com/artist/{spotify_id}"
 
 
 class IdentityMappingSource(Protocol):
-    """The two MusicBrainz-specific mapping calls, satisfied by either a bare
+    """The MusicBrainz-specific mapping calls, satisfied by either a bare
     MusicBrainzSource or a _PacedSource wrapping one (the caller decides which,
     and the paced wrapper is preferred so mapping requests count toward the same
     pacing/cooldown budget as release discovery)."""
@@ -38,6 +38,8 @@ class IdentityMappingSource(Protocol):
     ) -> dict[str, str | None]: ...
 
     def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]: ...
+
+    def deezer_artist_id(self, mbid: str) -> str | None: ...
 
 
 def run_identity_mapping(
@@ -61,6 +63,8 @@ def run_identity_mapping(
         for artist in candidates
         if not _skip_for_retry_window(catalog, artist.local_id, source_name, checked_at)
     ]
+    if source_name == "musicbrainz":
+        _run_deezer_url_rel_mapping(catalog, source, checked_at)
     if not eligible:
         return
 
@@ -127,6 +131,79 @@ def run_identity_mapping(
                 source=source_name,
                 status="unmapped",
                 method="name_search",
+                attempted_at=checked_at,
+            )
+
+
+def _run_deezer_url_rel_mapping(
+    catalog: Catalog,
+    source: IdentityMappingSource,
+    checked_at: datetime,
+) -> None:
+    """Resolve Deezer artist ids from the MusicBrainz url-rels batch (issue #42).
+
+    Only artists already carrying a musicbrainz ``SourceReference`` (mapped by
+    the caller's Spotify-url batch, this run or an earlier one) and lacking a
+    deezer ``SourceReference`` are eligible. There is no Deezer name-search
+    fallback: an artist with no Deezer url-rel is simply left unmapped. A
+    ``RateLimitedError`` propagates unchanged (via ``_SourceCallStopped`` from
+    the caller's paced wrapper) so the caller's cooldown accounting stays
+    correct and mapping simply stops for this run.
+    """
+    candidates = _artists_needing_mapping(catalog, "deezer")
+    eligible = [
+        artist
+        for artist in candidates
+        if any(ref.source == "musicbrainz" for ref in artist.source_refs)
+        and not _skip_for_retry_window(catalog, artist.local_id, "deezer", checked_at)
+    ]
+    for artist in eligible:
+        mb_ref = next(ref for ref in artist.source_refs if ref.source == "musicbrainz")
+        try:
+            deezer_id = source.deezer_artist_id(mb_ref.native_id)
+        except (InvalidSourceResponseError, SourceUnavailableError):
+            # This artist's url-rels lookup failed; record unmapped and continue
+            # with the rest of the batch rather than failing the whole pass.
+            catalog.put_artist_identity_mapping(
+                artist_local_id=artist.local_id,
+                source="deezer",
+                status="unmapped",
+                method="url_rel",
+                attempted_at=checked_at,
+            )
+            continue
+        if deezer_id is not None:
+            updated_refs = tuple(ref for ref in artist.source_refs if ref.source != "deezer") + (
+                SourceReference(
+                    source="deezer",
+                    native_id=deezer_id,
+                    canonical_url=f"https://www.deezer.com/artist/{deezer_id}",
+                    observed_at=checked_at,
+                    confidence=IdentityConfidence.EXTERNAL_ID,
+                ),
+            )
+            catalog.put_artist(
+                Artist(
+                    local_id=artist.local_id,
+                    display_name=artist.display_name,
+                    source_refs=updated_refs,
+                    identity_confidence=artist.identity_confidence,
+                    observed_at=artist.observed_at,
+                )
+            )
+            catalog.put_artist_identity_mapping(
+                artist_local_id=artist.local_id,
+                source="deezer",
+                status="mapped",
+                method="url_rel",
+                attempted_at=checked_at,
+            )
+        else:
+            catalog.put_artist_identity_mapping(
+                artist_local_id=artist.local_id,
+                source="deezer",
+                status="unmapped",
+                method="url_rel",
                 attempted_at=checked_at,
             )
 

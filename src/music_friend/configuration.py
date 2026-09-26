@@ -14,24 +14,26 @@ from platformdirs import user_config_path
 
 from music_friend._local_files import atomic_replace
 
-_VERSION = 3
+_VERSION = 4
 _MAX_FILE_BYTES = 65_536
 _COUNTRY_CODE = re.compile(r"[A-Z]{2}\Z")
 _POSTAL_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 -]{0,15}\Z")
 RadiusUnit = Literal["miles", "kilometers"]
-ReleaseSource = Literal["spotify", "musicbrainz"]
+ReleaseSource = Literal["spotify", "musicbrainz", "deezer"]
+_ALLOWED_RELEASE_SOURCES = frozenset({"spotify", "musicbrainz", "deezer"})
+DEFAULT_RELEASE_SOURCES: tuple[ReleaseSource, ...] = ("musicbrainz",)
 
 
 @dataclass(frozen=True, slots=True)
 class LocalConfig:
-    """Closed v3 schema for public Spotify, optional event-discovery, and release-source settings."""
+    """Closed v4 schema for public Spotify, optional event-discovery, and release-source settings."""
 
     spotify_client_id: str | None = None
     event_country_code: str | None = None
     event_postal_code: str | None = None
     event_radius: int | float | None = None
     event_radius_unit: RadiusUnit | None = None
-    release_source: ReleaseSource | None = None
+    release_sources: tuple[str, ...] = DEFAULT_RELEASE_SOURCES
 
     def __post_init__(self) -> None:
         if self.spotify_client_id is not None and not _is_client_id(self.spotify_client_id):
@@ -53,11 +55,22 @@ class LocalConfig:
             "kilometers",
         }:
             raise ValueError("event_radius_unit must be miles or kilometers")
-        if self.release_source is not None and self.release_source not in {
-            "spotify",
-            "musicbrainz",
-        }:
-            raise ValueError("release_source must be spotify or musicbrainz")
+        _require_release_sources(self.release_sources)
+
+
+def _require_release_sources(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError("release_sources must be a tuple")
+    if not value:
+        raise ValueError("release_sources must contain at least one source")
+    if len(value) > len(_ALLOWED_RELEASE_SOURCES):
+        raise ValueError("release_sources must not contain duplicates")
+    if len(set(value)) != len(value):
+        raise ValueError("release_sources must not contain duplicates")
+    for source in value:
+        if type(source) is not str or source not in _ALLOWED_RELEASE_SOURCES:
+            raise ValueError("release_sources must contain only spotify, musicbrainz, or deezer")
+    return value
 
 
 class LocalConfigStore:
@@ -92,7 +105,7 @@ class LocalConfigStore:
             if type(decoded) is not dict:
                 raise ValueError
             version = decoded.get("version")
-            if type(version) is not int or version not in {2, 3}:
+            if type(version) is not int or version not in {2, 3, 4}:
                 raise ValueError
             # Version 2 read path: 5 keys without release_source
             if version == 2:
@@ -111,18 +124,48 @@ class LocalConfigStore:
                     event_postal_code=decoded["event_postal_code"],
                     event_radius=decoded["event_radius"],
                     event_radius_unit=decoded["event_radius_unit"],
-                    release_source=None,
+                    release_sources=DEFAULT_RELEASE_SOURCES,
                 )
-            # Version 3: 6 keys including release_source
+            # Version 3 read path: 6 keys with a scalar release_source (nullable)
+            if version == 3:
+                if set(decoded) != {
+                    "event_country_code",
+                    "event_postal_code",
+                    "event_radius",
+                    "event_radius_unit",
+                    "release_source",
+                    "spotify_client_id",
+                    "version",
+                }:
+                    raise ValueError
+                legacy_source = decoded["release_source"]
+                if legacy_source is None:
+                    migrated_sources = DEFAULT_RELEASE_SOURCES
+                elif legacy_source in _ALLOWED_RELEASE_SOURCES:
+                    migrated_sources = (legacy_source,)
+                else:
+                    raise ValueError
+                return LocalConfig(
+                    spotify_client_id=decoded["spotify_client_id"],
+                    event_country_code=decoded["event_country_code"],
+                    event_postal_code=decoded["event_postal_code"],
+                    event_radius=decoded["event_radius"],
+                    event_radius_unit=decoded["event_radius_unit"],
+                    release_sources=migrated_sources,
+                )
+            # Version 4: 6 keys including release_sources (a nonempty tuple)
             if set(decoded) != {
                 "event_country_code",
                 "event_postal_code",
                 "event_radius",
                 "event_radius_unit",
-                "release_source",
+                "release_sources",
                 "spotify_client_id",
                 "version",
             }:
+                raise ValueError
+            release_sources_raw = decoded["release_sources"]
+            if not isinstance(release_sources_raw, list):
                 raise ValueError
             return LocalConfig(
                 spotify_client_id=decoded["spotify_client_id"],
@@ -130,7 +173,7 @@ class LocalConfigStore:
                 event_postal_code=decoded["event_postal_code"],
                 event_radius=decoded["event_radius"],
                 event_radius_unit=decoded["event_radius_unit"],
-                release_source=decoded["release_source"],
+                release_sources=tuple(release_sources_raw),
             )
         except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
             raise ValueError("local configuration is invalid") from None
@@ -145,7 +188,7 @@ class LocalConfigStore:
             event_postal_code=config.event_postal_code,
             event_radius=config.event_radius,
             event_radius_unit=config.event_radius_unit,
-            release_source=config.release_source,
+            release_sources=config.release_sources,
         )
         encoded = json.dumps(
             {
@@ -153,7 +196,7 @@ class LocalConfigStore:
                 "event_postal_code": canonical.event_postal_code,
                 "event_radius": canonical.event_radius,
                 "event_radius_unit": canonical.event_radius_unit,
-                "release_source": canonical.release_source,
+                "release_sources": list(canonical.release_sources),
                 "spotify_client_id": canonical.spotify_client_id,
                 "version": _VERSION,
             },
@@ -178,4 +221,10 @@ def _is_radius(value: object) -> bool:
     return math.isfinite(radius) and 1 <= radius <= 100
 
 
-__all__ = ["LocalConfig", "LocalConfigStore", "RadiusUnit", "ReleaseSource"]
+__all__ = [
+    "DEFAULT_RELEASE_SOURCES",
+    "LocalConfig",
+    "LocalConfigStore",
+    "RadiusUnit",
+    "ReleaseSource",
+]

@@ -98,24 +98,31 @@ def test_setup_with_flags_non_tty() -> None:
     assert config_store.value.spotify_client_id == "example-id"
 
 
-def test_setup_release_source_flag_is_saved_and_rejects_unknown_value() -> None:
-    """Release discovery source is explicit in non-interactive setup."""
+def test_setup_release_sources_flag_is_saved_and_rejects_unknown_value() -> None:
+    """Release discovery sources are explicit in non-interactive setup."""
     config_store = _ConfigStore()
 
     exit_code, _stdout, stderr = _run(
-        ["setup", "--release-source", "spotify"], config_store=config_store
+        ["setup", "--release-sources", "spotify"], config_store=config_store
     )
 
     assert exit_code == 0
     assert stderr == ""
-    assert config_store.value.release_source == "spotify"
+    assert config_store.value.release_sources == ("spotify",)
 
     exit_code, _stdout, stderr = _run(
-        ["setup", "--release-source", "not-a-source"], config_store=config_store
+        ["setup", "--release-sources", "musicbrainz,deezer"], config_store=config_store
+    )
+
+    assert exit_code == 0
+    assert config_store.value.release_sources == ("musicbrainz", "deezer")
+
+    exit_code, _stdout, stderr = _run(
+        ["setup", "--release-sources", "not-a-source"], config_store=config_store
     )
 
     assert exit_code == 1
-    assert "release_source" in stderr
+    assert "release_sources" in stderr
 
 
 def test_setup_with_all_flags() -> None:

@@ -21,7 +21,7 @@ All setup operations support non-interactive flags and JSON output for automatio
 
 ```bash
 # Non-interactive setup (TTY optional)
-music-friend setup --spotify-client-id <id> --event-country US --event-postal 94110 --event-radius 50 --event-unit miles --release-source musicbrainz
+music-friend setup --spotify-client-id <id> --event-country US --event-postal 94110 --event-radius 50 --event-unit miles --release-sources musicbrainz
 
 # Clear individual fields
 music-friend setup --clear-spotify-client-id

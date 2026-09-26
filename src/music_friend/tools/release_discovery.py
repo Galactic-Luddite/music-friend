@@ -233,6 +233,14 @@ def _persist_artist_releases(
                     release.release_date,
                 )
                 if existing is not None:
+                    # Cross-source match (issue #42): attach this source's
+                    # SourceReference to the already-known release rather than
+                    # creating a new release or inbox item. Same-source variant
+                    # matches (the pre-existing behavior) are a no-op here since
+                    # the release already carries this source's reference.
+                    _attach_source_reference(
+                        catalog, existing.release_local_id, release, source_name
+                    )
                     catalog.put_release_discovery(replace(existing, last_seen_at=checked_at))
                     continue
 
@@ -280,6 +288,35 @@ def _persist_artist_releases(
                     ReleaseCandidate(persisted, artist_local_id, ReleaseCandidateKind.UPDATED)
                 )
     return tuple(candidates)
+
+
+def _attach_source_reference(
+    catalog: Catalog,
+    release_local_id: str,
+    discovered: Release,
+    source_name: str,
+) -> None:
+    """Merge ``discovered``'s SourceReference for ``source_name`` onto the already-
+    stored release at ``release_local_id`` (issue #42 cross-source dedupe), unless
+    it already carries one for that source."""
+    stored = catalog.get_release(release_local_id)
+    if stored is None:
+        raise ValueError("stored release discovery target is missing")
+    if any(ref.source == source_name for ref in stored.source_refs):
+        return
+    new_ref = next(ref for ref in discovered.source_refs if ref.source == source_name)
+    catalog.put_release(
+        Release(
+            stored.local_id,
+            stored.title,
+            stored.release_type,
+            stored.release_date,
+            stored.date_precision,
+            stored.artist_refs,
+            stored.source_refs + (new_ref,),
+            stored.observed_at,
+        )
+    )
 
 
 def _source_reference(artist: Artist, source_name: str) -> SourceReference:

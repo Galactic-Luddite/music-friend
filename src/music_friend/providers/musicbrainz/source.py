@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Protocol
@@ -31,6 +32,8 @@ _URL_BATCH_SIZE = 100
 _DEFAULT_USER_AGENT = (
     f"music-friend/{__version__} (https://github.com/Galactic-Luddite/music-friend)"
 )
+
+_DEEZER_ARTIST_URL = re.compile(r"https://www\.deezer\.com/artist/(\d+)")
 
 
 def _url_entries(response: object) -> dict[str, Mapping[str, object]]:
@@ -172,6 +175,46 @@ class MusicBrainzSource:
                 entry = entries.get(url)
                 resolved[url] = None if entry is None else _single_artist_relation_mbid(entry)
         return resolved
+
+    def deezer_artist_id(self, mbid: str) -> str | None:
+        """Resolve one MusicBrainz artist's Deezer id from its url-rels (issue #42).
+
+        Calls ``GET /ws/2/artist/{mbid}?inc=url-rels``. Verified live against the
+        real MusicBrainz API on 2026-09-26: a public artist's ``relations`` list
+        includes entries shaped ``{"type": "free streaming", "url": {"resource":
+        "https://www.deezer.com/artist/<id>"}}`` alongside Spotify and Apple Music
+        links (73 total relations observed for one artist, including two distinct
+        Deezer artist links). Only one distinct Deezer id is accepted: an artist
+        with zero or with more than one distinct Deezer url-rel returns ``None``
+        rather than guessing, matching the ambiguity rule used for the Spotify-url
+        batch lookup above. There is no Deezer name-search fallback (see the
+        release-source design doc, section 4): an artist with no such url-rel is
+        simply uncovered by Deezer.
+        """
+        if not isinstance(mbid, str) or not mbid:
+            raise ValueError("mbid must be a non-empty string")
+        response = self._transport.get(f"artist/{mbid}", query={"inc": "url-rels"})
+        if not isinstance(response, Mapping):
+            raise InvalidSourceResponseError("musicbrainz artist lookup response must be an object")
+        relations = response.get("relations")
+        if not isinstance(relations, list):
+            raise InvalidSourceResponseError("musicbrainz artist lookup response missing relations")
+        deezer_ids: set[str] = set()
+        for relation in relations:
+            if not isinstance(relation, Mapping):
+                continue
+            url = relation.get("url")
+            if not isinstance(url, Mapping):
+                continue
+            resource = url.get("resource")
+            if not isinstance(resource, str):
+                continue
+            match = _DEEZER_ARTIST_URL.fullmatch(resource)
+            if match is not None:
+                deezer_ids.add(match.group(1))
+        if len(deezer_ids) == 1:
+            return next(iter(deezer_ids))
+        return None
 
     def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
         """Search for artists by name in MusicBrainz.

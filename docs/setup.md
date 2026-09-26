@@ -1,18 +1,32 @@
-# Spotify, release source, and optional event setup
+# Spotify, release sources, and optional event setup
 
-## Release source
+## Release sources
 
 Music Friend uses MusicBrainz for release discovery by default. It needs no API key and maps
-watched artists to MusicBrainz identities during `music-friend refresh releases`. Use Spotify as
-the release source only when its release catalog is preferable for your account:
+watched artists to MusicBrainz identities during `music-friend refresh releases`. `release_sources`
+is an ordered list: Music Friend tries each configured source in turn, and a source that is rate
+limited or unreachable never blocks the others. Choose any combination of `spotify`, `musicbrainz`,
+and `deezer`:
 
 ```bash
-music-friend setup --release-source musicbrainz
-music-friend setup --release-source spotify
+music-friend setup --release-sources musicbrainz
+music-friend setup --release-sources spotify
+music-friend setup --release-sources musicbrainz,deezer
 ```
 
-Interactive setup also asks for the release source; an empty response selects MusicBrainz unless a
-previous selection is already saved.
+Deezer is an optional timeliness layer on top of MusicBrainz, not a standalone source: its artist
+identities come only from the MusicBrainz url-relationship lookup Music Friend already performs
+(there is no Deezer name search), so an artist Music Friend hasn't mapped to MusicBrainz is never
+covered by Deezer either. Deezer's catalog reads are keyless today, but new app registration with
+Deezer has been frozen since 2025 -- treat it as layered and droppable, not load-bearing. Remove it
+from `release_sources` at any time with no data migration:
+
+```bash
+music-friend setup --release-sources musicbrainz
+```
+
+Interactive setup also asks for release sources as a comma-separated list; an empty response
+selects MusicBrainz alone unless a previous selection is already saved.
 
 ## Spotify
 

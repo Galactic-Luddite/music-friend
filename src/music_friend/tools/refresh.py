@@ -8,7 +8,7 @@ import random
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -105,6 +105,11 @@ class _RefreshCounts:
     limit_pauses: int = 0
     partial: bool = False
     events_skip_reason: str | None = None
+    #: Names of additional release sources (see ``additional_release_sources``)
+    #: that were rate-limited, unreachable, or otherwise partial this run. The
+    #: primary release source's partial state is still carried by ``partial``
+    #: alone, matching every other component.
+    partial_sources: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +219,13 @@ class _PacedSource:
         return self._request(
             lambda: self.source.search_artist_by_name(name, limit)  # type: ignore[attr-defined]
         )
+
+    def deezer_artist_id(self, mbid: str) -> str | None:
+        """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases."""
+        result: str | None = self._request(
+            lambda: self.source.deezer_artist_id(mbid)  # type: ignore[attr-defined]
+        )
+        return result
 
     def available_observation(self) -> SourceLimitObservation:
         return SourceLimitObservation(
@@ -377,6 +389,7 @@ def refresh_once(
     force: bool = False,
     release_source: MusicSource | None = None,
     release_source_name: str | None = None,
+    additional_release_sources: Sequence[tuple[str, MusicSource]] | None = None,
     monotonic: Callable[[], float] | object | None = None,
     lock_clock: Callable[[], float] | object | None = None,
     sleeper: Callable[[float], None] | object | None = None,
@@ -402,6 +415,20 @@ def refresh_once(
         raise ValueError("source is required for catalog refresh")
     if source is None and "releases" in components and release_source is None:
         raise ValueError("source or release_source is required for release refresh")
+    if additional_release_sources is not None:
+        if not isinstance(additional_release_sources, Sequence):
+            raise ValueError("additional_release_sources must be a sequence")
+        for entry in additional_release_sources:
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or type(entry[0]) is not str
+                or not entry[0]
+                or not isinstance(entry[1], MusicSource)
+            ):
+                raise ValueError(
+                    "additional_release_sources must contain (name, MusicSource) pairs"
+                )
     if "releases" in components:
         if release_source is None:
             release_source = source
@@ -499,6 +526,17 @@ def refresh_once(
                 )
                 if limited_release_source.stopped:
                     break
+                if additional_release_sources:
+                    _run_additional_release_sources(
+                        application,
+                        additional_release_sources,
+                        checked_at,
+                        counts,
+                        started_monotonic=started_monotonic,
+                        clock=clock,
+                        sleep=sleep,
+                        entropy=entropy,
+                    )
             else:
                 _run_events(application, config, limited_event_client, checked_at, counts)
         if limited_source is not None and (
@@ -724,6 +762,53 @@ def _run_releases(
         return
     application.remove_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
     application.put_source_limit(source.available_observation())
+
+
+def _run_additional_release_sources(
+    application: MusicFriendApplication,
+    additional_release_sources: Sequence[tuple[str, MusicSource]],
+    checked_at: datetime,
+    counts: _RefreshCounts,
+    *,
+    started_monotonic: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    entropy: random.Random,
+) -> None:
+    """Iterate additional configured release sources in order (issue #42).
+
+    Each source gets its own ``_PacedSource`` (independent pacing and cooldown
+    accounting) and its own release-discovery cursor, exactly like the primary
+    release source. A source that is rate-limited, unreachable, or otherwise
+    fails does not prevent the next configured source from running: its name is
+    recorded in ``counts.partial_sources`` and the run continues rather than
+    aborting, so e.g. a Deezer outage never blocks MusicBrainz results.
+    """
+    for extra_name, extra_source in additional_release_sources:
+        if clock() - started_monotonic >= _DEADLINE_SECONDS:
+            counts.partial_sources.append(extra_name)
+            return
+        paced_extra = _PacedSource(
+            extra_source,
+            source_name=extra_name,
+            started_at=started_monotonic,
+            checked_at=checked_at,
+            monotonic=clock,
+            sleeper=sleep,
+            saved_limit=application.get_source_limit(extra_name),
+            rng=entropy,
+        )
+        try:
+            _run_releases(application, extra_name, paced_extra, checked_at, counts)
+        except Exception:
+            counts.partial_sources.append(extra_name)
+            continue
+        if paced_extra.stopped:
+            counts.partial_sources.append(extra_name)
+        if paced_extra.limit_observation is not None:
+            application.put_source_limit(paced_extra.limit_observation)
+        else:
+            application.put_source_limit(paced_extra.current_observation())
 
 
 def _count_releases(

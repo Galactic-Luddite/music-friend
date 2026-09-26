@@ -299,12 +299,15 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
                 "enum": ["miles", "kilometers", None],
                 "type": ["string", "null"],
             },
-            "release_source": {
+            "release_sources": {
                 "description": (
-                    "Release discovery source: 'spotify' or 'musicbrainz' (default musicbrainz), or null to leave unchanged."
+                    "Ordered release discovery sources to enable, chosen from "
+                    "'spotify', 'musicbrainz', 'deezer' (default ['musicbrainz']), "
+                    "or null to leave unchanged."
                 ),
-                "enum": ["spotify", "musicbrainz", None],
-                "type": ["string", "null"],
+                "items": {"enum": ["spotify", "musicbrainz", "deezer"], "type": "string"},
+                "maxItems": 3,
+                "type": ["array", "null"],
             },
         },
         "type": "object",
@@ -478,6 +481,36 @@ def _update_setup_arguments(arguments: Mapping[str, Any]) -> None:
         if value is not None and value not in {"miles", "kilometers"}:
             raise _InvalidArguments("event_radius_unit must be 'miles', 'kilometers', or null")
 
+    if "release_sources" in arguments:
+        _release_sources_argument(arguments["release_sources"])
+
+
+_ALLOWED_RELEASE_SOURCES = frozenset({"spotify", "musicbrainz", "deezer"})
+
+
+def _release_sources_argument(value: object) -> None:
+    """Strictly validate update_setup's release_sources argument before the
+    handler runs (see catalog_server's argument-gate pattern): an unexpected
+    type, an unknown source string, an empty list, or a duplicate is rejected
+    here, never left to LocalConfig's own validation deeper in the call stack."""
+    if value is None:
+        return
+    if type(value) is not list:
+        raise _InvalidArguments("release_sources must be an array or null")
+    if not value:
+        raise _InvalidArguments("release_sources must contain at least one source")
+    if len(value) > len(_ALLOWED_RELEASE_SOURCES):
+        raise _InvalidArguments("release_sources must not contain duplicates")
+    seen: set[str] = set()
+    for entry in value:
+        if type(entry) is not str or entry not in _ALLOWED_RELEASE_SOURCES:
+            raise _InvalidArguments(
+                "release_sources must contain only 'spotify', 'musicbrainz', or 'deezer'"
+            )
+        if entry in seen:
+            raise _InvalidArguments("release_sources must not contain duplicates")
+        seen.add(entry)
+
 
 def _with_fixed_input_schema(tool: object) -> object:
     if not isinstance(tool, Mapping):
@@ -603,10 +636,10 @@ def create_music_server(
     )
     async def list_watchlist(limit: int) -> CallToolResult:
         def _build() -> dict[str, object]:
-            release_source = _effective_release_source()
+            release_sources = _effective_release_sources()
             return {
                 "items": [
-                    _watchlist(item, release_source)
+                    _watchlist(item, release_sources)
                     for item in application.list_watchlist(
                         limit=_limit(limit, maximum=100, field="limit")
                     )
@@ -827,7 +860,7 @@ def create_music_server(
                 "event_postal_code": config.event_postal_code,
                 "event_radius": config.event_radius,
                 "event_radius_unit": config.event_radius_unit,
-                "release_source": config.release_source or "musicbrainz",
+                "release_sources": list(config.release_sources),
                 "missing_fields": [
                     name
                     for name, value in [
@@ -862,7 +895,7 @@ def create_music_server(
         event_postal_code: str | None = None,
         event_radius: float | None = None,
         event_radius_unit: Literal["miles", "kilometers"] | None = None,
-        release_source: Literal["spotify", "musicbrainz"] | None = None,
+        release_sources: list[str] | None = None,
     ) -> CallToolResult:
         def action() -> dict[str, object]:
             store = make_config_store()
@@ -881,9 +914,9 @@ def create_music_server(
                 event_radius_unit=event_radius_unit
                 if event_radius_unit is not None
                 else config.event_radius_unit,
-                release_source=release_source
-                if release_source is not None
-                else config.release_source,
+                release_sources=tuple(release_sources)
+                if release_sources is not None
+                else config.release_sources,
             )
             store.save(updated_config)
 
@@ -894,7 +927,7 @@ def create_music_server(
                 "event_postal_code": updated_config.event_postal_code,
                 "event_radius": updated_config.event_radius,
                 "event_radius_unit": updated_config.event_radius_unit,
-                "release_source": updated_config.release_source or "musicbrainz",
+                "release_sources": list(updated_config.release_sources),
                 "note": "To set the Ticketmaster key, run: music-friend setup --ticketmaster-key-env VAR_NAME",
             }
 
@@ -1024,14 +1057,14 @@ def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[s
     latest = application.list_refresh_runs(limit=1)
     unread = application.list_inbox_entries(InboxState.UNREAD, limit=1)
 
-    # Check configured release_source and get identity status if using MusicBrainz
+    # Check configured release_sources and get identity status if using MusicBrainz
     from music_friend.configuration import LocalConfigStore
 
     try:
         config = LocalConfigStore().load()
     except ValueError:
         config = LocalConfig()
-    release_source = config.release_source or "musicbrainz"
+    release_sources = config.release_sources
 
     status_dict: dict[str, object] = {
         "status": "ready",
@@ -1041,7 +1074,7 @@ def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[s
     }
 
     # Add MusicBrainz identity mapping status if configured
-    if release_source == "musicbrainz":
+    if "musicbrainz" in release_sources:
         watchlist = application.list_watchlist(limit=500)
         mapped_count = 0
         unmapped_count = 0
@@ -1141,17 +1174,17 @@ def _artist(value: Artist) -> dict[str, object]:
     }
 
 
-def _effective_release_source() -> str:
+def _effective_release_sources() -> tuple[str, ...]:
     from music_friend.configuration import LocalConfigStore
 
     try:
         config = LocalConfigStore().load()
     except ValueError:
         config = LocalConfig()
-    return config.release_source or "musicbrainz"
+    return config.release_sources
 
 
-def _watchlist(value: WatchlistEntry, release_source: str) -> dict[str, object]:
+def _watchlist(value: WatchlistEntry, release_sources: tuple[str, ...]) -> dict[str, object]:
     result: dict[str, object] = {
         "artist": _artist(value.artist),
         "inclusion_reason": value.inclusion_reason.value,
@@ -1161,12 +1194,15 @@ def _watchlist(value: WatchlistEntry, release_source: str) -> dict[str, object]:
         },
     }
 
-    # Determine release_source_status based on whether the artist has the
-    # configured source identity. Only musicbrainz has an identity-mapping
-    # concept today; spotify is always the library source of record.
-    if release_source == "musicbrainz":
-        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.source_refs)
-        result["release_source_status"] = "mapped" if has_musicbrainz else "unmapped"
+    # Determine release_source_status from the first configured source that has
+    # an identity-mapping concept (musicbrainz or deezer); spotify is always
+    # the library source of record and has none. Preserves the pre-#42 single
+    # string shape for the common single-identity-source case.
+    for source in release_sources:
+        if source in {"musicbrainz", "deezer"}:
+            has_identity = any(ref.source == source for ref in value.artist.source_refs)
+            result["release_source_status"] = "mapped" if has_identity else "unmapped"
+            break
 
     return result
 

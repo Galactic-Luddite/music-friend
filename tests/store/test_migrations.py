@@ -376,6 +376,7 @@ def test_existing_database_is_never_deleted_when_migration_fails(
             (10,),
             (11,),
             (12,),
+            (13,),
         ]
 
 

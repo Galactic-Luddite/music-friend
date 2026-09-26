@@ -14,6 +14,7 @@ from music_friend.domain import (
     WatchlistAction,
     WatchlistOverride,
 )
+from music_friend.errors import InvalidSourceResponseError
 from music_friend.store import Catalog
 from music_friend.tools.identity_mapping import (
     MAPPING_RETRY_INTERVAL,
@@ -54,13 +55,18 @@ class FakeMusicBrainzSource:
         name_hits: list[dict[str, object]] | None = None,
         raise_on_url: Exception | None = None,
         raise_on_name: Exception | None = None,
+        deezer_hits: dict[str, str | None] | None = None,
+        raise_on_deezer: Exception | None = None,
     ) -> None:
         self._url_hits = url_hits or {}
         self._name_hits = name_hits or []
         self._raise_on_url = raise_on_url
         self._raise_on_name = raise_on_name
+        self._deezer_hits = deezer_hits or {}
+        self._raise_on_deezer = raise_on_deezer
         self.url_calls: list[tuple[str, ...]] = []
         self.name_calls: list[str] = []
+        self.deezer_calls: list[str] = []
 
     def lookup_artists_by_spotify_urls(self, urls: object) -> dict[str, str | None]:
         self.url_calls.append(tuple(urls))  # type: ignore[arg-type]
@@ -73,6 +79,12 @@ class FakeMusicBrainzSource:
         if self._raise_on_name is not None:
             raise self._raise_on_name
         return self._name_hits
+
+    def deezer_artist_id(self, mbid: str) -> str | None:
+        self.deezer_calls.append(mbid)
+        if self._raise_on_deezer is not None:
+            raise self._raise_on_deezer
+        return self._deezer_hits.get(mbid)
 
 
 @pytest.fixture
@@ -323,3 +335,109 @@ def test_artists_already_mapped_are_excluded_from_the_candidate_set(catalog: Cat
 
     assert source.url_calls == []
     assert source.name_calls == []
+
+
+def _mb_mapped_artist(local_id: str, name: str) -> Artist:
+    """An artist already mapped to musicbrainz, eligible for deezer url-rel mapping."""
+    return Artist(
+        local_id,
+        name,
+        (
+            SourceReference(
+                source="musicbrainz",
+                native_id=MBID,
+                canonical_url=f"https://musicbrainz.org/artist/{MBID}",
+                observed_at=NOW,
+                confidence=IdentityConfidence.EXTERNAL_ID,
+            ),
+        ),
+        IdentityConfidence.EXTERNAL_ID,
+        NOW,
+    )
+
+
+def test_deezer_url_rel_mapping_records_a_deezer_source_reference(catalog: Catalog) -> None:
+    """AC: Deezer artist ids come only from the MusicBrainz url-rels batch (#42)."""
+    artist = _mb_mapped_artist("artist-deezer-1", "Synthetic Artist")
+    _watchlist(catalog, artist)
+    source = FakeMusicBrainzSource(deezer_hits={MBID: "1000001"})
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    assert source.deezer_calls == [MBID]
+    mapped = catalog.get_artist(artist.local_id)
+    assert mapped is not None
+    deezer_refs = [ref for ref in mapped.source_refs if ref.source == "deezer"]
+    assert len(deezer_refs) == 1
+    assert deezer_refs[0].native_id == "1000001"
+    assert deezer_refs[0].canonical_url == "https://www.deezer.com/artist/1000001"
+
+
+def test_deezer_url_rel_mapping_leaves_artist_unmapped_when_no_relation_exists(
+    catalog: Catalog,
+) -> None:
+    """An artist with no Deezer url-rel is simply uncovered by Deezer, no name search."""
+    artist = _mb_mapped_artist("artist-deezer-2", "Synthetic Artist")
+    _watchlist(catalog, artist)
+    source = FakeMusicBrainzSource(deezer_hits={MBID: None})
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    mapped = catalog.get_artist(artist.local_id)
+    assert mapped is not None
+    assert not any(ref.source == "deezer" for ref in mapped.source_refs)
+
+
+def test_deezer_url_rel_mapping_skips_artists_without_a_musicbrainz_identity(
+    catalog: Catalog,
+) -> None:
+    """No musicbrainz mbid means no deezer lookup is even attempted."""
+    artist = _artist("artist-deezer-3", "Synthetic Artist")
+    _watchlist(catalog, artist)
+    source = FakeMusicBrainzSource()
+
+    run_identity_mapping(catalog, source, "spotify", NOW)
+
+    assert source.deezer_calls == []
+
+
+def test_deezer_url_rel_mapping_skips_an_artist_already_mapped_to_deezer(
+    catalog: Catalog,
+) -> None:
+    """An artist that already carries a deezer SourceReference is not re-queried."""
+    artist = _mb_mapped_artist("artist-deezer-4", "Synthetic Artist")
+    with_deezer = Artist(
+        artist.local_id,
+        artist.display_name,
+        artist.source_refs
+        + (
+            SourceReference(
+                source="deezer",
+                native_id="1000001",
+                canonical_url="https://www.deezer.com/artist/1000001",
+                observed_at=NOW,
+                confidence=IdentityConfidence.EXTERNAL_ID,
+            ),
+        ),
+        artist.identity_confidence,
+        NOW,
+    )
+    _watchlist(catalog, with_deezer)
+    source = FakeMusicBrainzSource()
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    assert source.deezer_calls == []
+
+
+def test_deezer_url_rel_mapping_error_marks_unmapped_and_continues(catalog: Catalog) -> None:
+    """A per-artist url-rels failure records unmapped rather than aborting the pass."""
+    artist = _mb_mapped_artist("artist-deezer-5", "Synthetic Artist")
+    _watchlist(catalog, artist)
+    source = FakeMusicBrainzSource(raise_on_deezer=InvalidSourceResponseError())
+
+    run_identity_mapping(catalog, source, "musicbrainz", NOW)
+
+    mapped = catalog.get_artist(artist.local_id)
+    assert mapped is not None
+    assert not any(ref.source == "deezer" for ref in mapped.source_refs)
