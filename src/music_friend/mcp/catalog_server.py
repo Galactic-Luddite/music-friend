@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, cast
@@ -29,6 +30,15 @@ from music_friend.domain.text import sanitize_display_name
 from music_friend.store.spotify_history import HistoryArgumentError
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import update_inbox_state
+
+#: Matches a well-formed MBID with no anchors: used only with re.fullmatch(),
+#: which (unlike a pattern containing an explicit ^...$) never accepts a
+#: trailing newline or any other stray character.
+_MBID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+#: The only source_ids key update_watchlist accepts; the design and issue #41
+#: only ever specify a user-confirmed identity via a MusicBrainz MBID here.
+_ALLOWED_SOURCE_IDS_KEYS = frozenset({"musicbrainz"})
 
 _INVALID_ARGUMENTS: dict[str, object] = {
     "category": "invalid_arguments",
@@ -151,6 +161,26 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
                 "enum": ["add", "pin", "mute", "remove"],
                 "type": "string",
             },
+            "source_ids": {
+                "description": (
+                    "Optional object with at most one 'musicbrainz' entry giving a "
+                    "user-confirmed MusicBrainz identifier (MBID UUID) for this "
+                    "artist. When supplied, overwrites any prior automated mapping "
+                    "with this user-confirmed identity. No other source name is "
+                    "accepted here."
+                ),
+                "type": ["object", "null"],
+                "properties": {
+                    "musicbrainz": {
+                        "type": "string",
+                        "pattern": (
+                            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                        ),
+                    }
+                },
+                "additionalProperties": False,
+            },
         },
         "required": ["artist_id", "action"],
         "type": "object",
@@ -269,6 +299,13 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
                 "enum": ["miles", "kilometers", None],
                 "type": ["string", "null"],
             },
+            "release_source": {
+                "description": (
+                    "Release discovery source: 'spotify' or 'musicbrainz' (default musicbrainz), or null to leave unchanged."
+                ),
+                "enum": ["spotify", "musicbrainz", None],
+                "type": ["string", "null"],
+            },
         },
         "type": "object",
     },
@@ -357,6 +394,8 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
         elif name == "update_watchlist":
             _local_id(arguments["artist_id"], field="artist_id")
             _watchlist_action(arguments["action"])
+            if "source_ids" in arguments:
+                _source_ids(arguments["source_ids"])
         elif name == "update_inbox_item":
             _local_id(arguments["inbox_id"], field="inbox_id")
             _inbox_state(arguments["state"], required=True)
@@ -371,6 +410,41 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
     except _InvalidArguments as error:
         return error
     return None
+
+
+def _canonical_mbid(value: object) -> str:
+    """Validate and return a canonical (lowercased) MBID, or raise.
+
+    Uses ``re.fullmatch`` against an unanchored pattern (never ``^...$``, which
+    would let a trailing newline slip through) and rejects any leading or
+    trailing whitespace outright rather than stripping and accepting it.
+    """
+    if not isinstance(value, str):
+        raise _InvalidArguments("source_ids.musicbrainz must be a MusicBrainz identifier")
+    canonical = value.lower()
+    if not _MBID_PATTERN.fullmatch(canonical):
+        raise _InvalidArguments("source_ids.musicbrainz must be a MusicBrainz identifier")
+    return canonical
+
+
+def _source_ids(value: object) -> None:
+    """Validate update_watchlist's optional source_ids argument.
+
+    Runs in the argument gate, before any handler sees the value: an unknown
+    source key, more than one entry, or a malformed identifier is rejected
+    here so it never reaches the handler. Error messages never reflect the
+    caller's raw input.
+    """
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise _InvalidArguments("source_ids must be an object")
+    if len(value) > 1:
+        raise _InvalidArguments("source_ids must contain at most one entry")
+    if not set(value).issubset(_ALLOWED_SOURCE_IDS_KEYS):
+        raise _InvalidArguments("source_ids may only contain a 'musicbrainz' entry")
+    if "musicbrainz" in value:
+        _canonical_mbid(value["musicbrainz"])
 
 
 def _update_setup_arguments(arguments: Mapping[str, Any]) -> None:
@@ -528,16 +602,18 @@ def create_music_server(
         annotations=_READ_ONLY,
     )
     async def list_watchlist(limit: int) -> CallToolResult:
-        return _safe_call(
-            lambda: {
+        def _build() -> dict[str, object]:
+            release_source = _effective_release_source()
+            return {
                 "items": [
-                    _watchlist(item)
+                    _watchlist(item, release_source)
                     for item in application.list_watchlist(
                         limit=_limit(limit, maximum=100, field="limit")
                     )
                 ]
             }
-        )
+
+        return _safe_call(_build)
 
     @server.tool(
         name="update_watchlist",
@@ -555,14 +631,30 @@ def create_music_server(
         annotations=_DESTRUCTIVE_MUTATING,
     )
     async def update_watchlist(
-        artist_id: str, action: Literal["add", "pin", "mute", "remove"]
+        artist_id: str,
+        action: Literal["add", "pin", "mute", "remove"],
+        source_ids: dict[str, str] | None = None,
     ) -> CallToolResult:
         def action_result() -> dict[str, object]:
             local_id = _local_id(artist_id, field="artist_id")
             selected = _watchlist_action(action)
-            if application.get_artist(local_id) is None:
+            artist = application.get_artist(local_id)
+            if artist is None:
                 return dict(_NOT_FOUND)
             updated_at = _now(clock)
+
+            # source_ids is already validated by the argument gate (_source_ids):
+            # at most one entry, key must be "musicbrainz", value must be a
+            # well-formed MBID. Re-derive the canonical (lowercased) MBID here
+            # rather than trust the raw argument, and commit the identity write
+            # and its mapping-table row in one transaction.
+            if source_ids is not None and "musicbrainz" in source_ids:
+                mbid = _canonical_mbid(source_ids["musicbrainz"])
+                application.confirm_artist_identity(
+                    artist, source="musicbrainz", native_id=mbid, at=updated_at
+                )
+                artist = application.get_artist(local_id) or artist
+
             if selected is WatchlistAction.ADD:
                 application.set_watchlist_add(local_id, updated_at=updated_at)
             elif selected is WatchlistAction.PIN:
@@ -735,6 +827,7 @@ def create_music_server(
                 "event_postal_code": config.event_postal_code,
                 "event_radius": config.event_radius,
                 "event_radius_unit": config.event_radius_unit,
+                "release_source": config.release_source or "musicbrainz",
                 "missing_fields": [
                     name
                     for name, value in [
@@ -769,6 +862,7 @@ def create_music_server(
         event_postal_code: str | None = None,
         event_radius: float | None = None,
         event_radius_unit: Literal["miles", "kilometers"] | None = None,
+        release_source: Literal["spotify", "musicbrainz"] | None = None,
     ) -> CallToolResult:
         def action() -> dict[str, object]:
             store = make_config_store()
@@ -787,6 +881,9 @@ def create_music_server(
                 event_radius_unit=event_radius_unit
                 if event_radius_unit is not None
                 else config.event_radius_unit,
+                release_source=release_source
+                if release_source is not None
+                else config.release_source,
             )
             store.save(updated_config)
 
@@ -797,6 +894,7 @@ def create_music_server(
                 "event_postal_code": updated_config.event_postal_code,
                 "event_radius": updated_config.event_radius,
                 "event_radius_unit": updated_config.event_radius_unit,
+                "release_source": updated_config.release_source or "musicbrainz",
                 "note": "To set the Ticketmaster key, run: music-friend setup --ticketmaster-key-env VAR_NAME",
             }
 
@@ -925,12 +1023,48 @@ def _now(clock: Clock) -> datetime:
 def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[str, object]:
     latest = application.list_refresh_runs(limit=1)
     unread = application.list_inbox_entries(InboxState.UNREAD, limit=1)
-    return {
+
+    # Check configured release_source and get identity status if using MusicBrainz
+    from music_friend.configuration import LocalConfigStore
+
+    try:
+        config = LocalConfigStore().load()
+    except ValueError:
+        config = LocalConfig()
+    release_source = config.release_source or "musicbrainz"
+
+    status_dict: dict[str, object] = {
         "status": "ready",
         "inbox": {"has_unread": bool(unread)},
         "latest_refresh": None if not latest else _refresh_run(latest[0]),
         "source_limits": {"spotify": _source_limit_status(application, "spotify", checked_at)},
     }
+
+    # Add MusicBrainz identity mapping status if configured
+    if release_source == "musicbrainz":
+        watchlist = application.list_watchlist(limit=500)
+        mapped_count = 0
+        unmapped_count = 0
+
+        for entry in watchlist:
+            artist = application.get_artist(entry.artist.local_id)
+            if artist is None:
+                continue
+
+            # Check if artist has musicbrainz ref
+            has_musicbrainz = any(ref.source == "musicbrainz" for ref in artist.source_refs)
+            if has_musicbrainz:
+                mapped_count += 1
+            else:
+                unmapped_count += 1
+
+        status_dict["identity"] = {
+            "source": "musicbrainz",
+            "mapped": mapped_count,
+            "unmapped": unmapped_count,
+        }
+
+    return status_dict
 
 
 def _source_limit_status(
@@ -1007,8 +1141,18 @@ def _artist(value: Artist) -> dict[str, object]:
     }
 
 
-def _watchlist(value: WatchlistEntry) -> dict[str, object]:
-    return {
+def _effective_release_source() -> str:
+    from music_friend.configuration import LocalConfigStore
+
+    try:
+        config = LocalConfigStore().load()
+    except ValueError:
+        config = LocalConfig()
+    return config.release_source or "musicbrainz"
+
+
+def _watchlist(value: WatchlistEntry, release_source: str) -> dict[str, object]:
+    result: dict[str, object] = {
         "artist": _artist(value.artist),
         "inclusion_reason": value.inclusion_reason.value,
         "affinity": {
@@ -1016,6 +1160,15 @@ def _watchlist(value: WatchlistEntry) -> dict[str, object]:
             "saved_track_count": value.affinity.saved_track_count,
         },
     }
+
+    # Determine release_source_status based on whether the artist has the
+    # configured source identity. Only musicbrainz has an identity-mapping
+    # concept today; spotify is always the library source of record.
+    if release_source == "musicbrainz":
+        has_musicbrainz = any(ref.source == "musicbrainz" for ref in value.artist.source_refs)
+        result["release_source_status"] = "mapped" if has_musicbrainz else "unmapped"
+
+    return result
 
 
 def _inbox(application: MusicFriendApplication, value: InboxEntry) -> dict[str, object]:

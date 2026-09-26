@@ -32,6 +32,7 @@ from music_friend.domain import (
     WatchlistOverride,
 )
 from music_friend.store import Catalog
+from music_friend.store.migrations import bundled_migrations
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 LATER = NOW + timedelta(minutes=5)
@@ -122,7 +123,7 @@ def test_migration_three_creates_only_the_v1_application_state_tables(catalog: C
     } <= names
     assert connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+    ).fetchall() == [(migration.version,) for migration in bundled_migrations()]
 
 
 def test_affinity_replacement_is_idempotent_atomic_and_capability_scoped(

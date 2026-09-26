@@ -713,7 +713,9 @@ def test_cli_setup_is_interactive_and_unknown_or_sensitive_arguments_are_not_ref
     assert setup_result == 0
     assert setup_stdout == "Music Friend setup complete.\n"
     assert setup_stderr == ""
-    assert config.saved == [LocalConfig(spotify_client_id="public-client-id")]
+    assert config.saved == [
+        LocalConfig(spotify_client_id="public-client-id", release_source="musicbrainz")
+    ]
     assert invalid_result == 2
     assert invalid_stdout == ""
     assert "private-secret-canary" not in invalid_stderr
@@ -756,6 +758,7 @@ def test_cli_setup_enrolls_event_area_and_ticketmaster_key_in_protected_store(
         event_postal_code="94103",
         event_radius=50,
         event_radius_unit="miles",
+        release_source="musicbrainz",
     )
     assert credentials.saves == [(CredentialKey("ticketmaster", "discovery"), secret)]
     assert secret not in stdout.getvalue() + stderr.getvalue() + repr(config.config)
@@ -964,7 +967,9 @@ def test_cli_setup_blank_preserves_and_dash_clears_optional_event_enrollment(
     assert blank_stderr.getvalue() == clear_stderr.getvalue() == ""
     assert credentials.saves == []
     assert credentials.deletes == [key]
-    assert config.config == LocalConfig(spotify_client_id="public-client-id")
+    assert config.config == LocalConfig(
+        spotify_client_id="public-client-id", release_source="musicbrainz"
+    )
     application.close()
 
 

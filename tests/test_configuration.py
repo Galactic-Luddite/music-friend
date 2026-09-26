@@ -12,7 +12,7 @@ import music_friend._local_files as local_files
 from music_friend.configuration import LocalConfig, LocalConfigStore
 
 
-def test_local_config_round_trips_only_v2_nonsecret_location_settings(tmp_path: Path) -> None:
+def test_local_config_round_trips_only_v3_nonsecret_location_settings(tmp_path: Path) -> None:
     """Adding arbitrary fields would permit plaintext credential persistence."""
     store = LocalConfigStore(config_dir=tmp_path)
     config = LocalConfig(
@@ -21,6 +21,7 @@ def test_local_config_round_trips_only_v2_nonsecret_location_settings(tmp_path: 
         event_postal_code="94000",
         event_radius=20,
         event_radius_unit="miles",
+        release_source=None,
     )
 
     store.save(config)
@@ -31,10 +32,50 @@ def test_local_config_round_trips_only_v2_nonsecret_location_settings(tmp_path: 
         "event_postal_code": "94000",
         "event_radius": 20,
         "event_radius_unit": "miles",
+        "release_source": None,
         "spotify_client_id": "public-client-id",
-        "version": 2,
+        "version": 3,
     }
     assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_v2_config_loads_and_is_rewritten_as_v3(tmp_path: Path) -> None:
+    """A version-2 file should load with release_source=None and be upgraded to v3."""
+    store = LocalConfigStore(config_dir=tmp_path)
+    # Write a v2 config directly
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "event_country_code": "US",
+                "event_postal_code": "94000",
+                "event_radius": 20,
+                "event_radius_unit": "miles",
+                "spotify_client_id": "public-client-id",
+                "version": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Load should work and return with release_source=None
+    loaded = store.load()
+    assert loaded.release_source is None
+    assert loaded.spotify_client_id == "public-client-id"
+
+    # Save should upgrade to v3
+    store.save(loaded)
+    saved_json = json.loads(store.path.read_text(encoding="utf-8"))
+    assert saved_json["version"] == 3
+    assert "release_source" in saved_json
+    assert saved_json["release_source"] is None
+
+
+def test_local_config_rejects_unknown_release_source() -> None:
+    """Unknown release_source values must be rejected."""
+    with pytest.raises(ValueError) as raised:
+        LocalConfig(release_source="deezer")  # type: ignore[arg-type]
+    assert "release_source must be spotify or musicbrainz" in str(raised.value)
 
 
 def test_legacy_v1_config_is_rejected_without_echoing_its_contents(tmp_path: Path) -> None:

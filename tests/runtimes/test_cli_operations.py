@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -597,3 +598,89 @@ def test_checked_at_requires_an_aware_datetime_and_normalizes_to_utc() -> None:
     for value in ("not-a-date", datetime(2026, 9, 2)):
         with pytest.raises(ValueError, match="clock is invalid"):
             cli._checked_at(lambda value=value: value)  # type: ignore[arg-type]
+
+
+def test_refresh_releases_uses_musicbrainz_and_never_opens_a_spotify_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC: `music-friend refresh releases` (release_source=musicbrainz, the
+    default) drives the real cli.main()/run_cli entry point through to
+    MusicBrainz and never opens a Spotify token session at all."""
+    import httpx
+
+    from music_friend.store import Catalog
+    from music_friend.tools import MusicFriendApplication
+
+    @contextmanager
+    def _refuse_spotify_source(**kwargs: object) -> object:
+        raise AssertionError("a musicbrainz-only releases refresh must not open Spotify")
+        yield  # pragma: no cover
+
+    musicbrainz_calls: list[httpx.Request] = []
+
+    def _musicbrainz_response(request: httpx.Request) -> httpx.Response:
+        musicbrainz_calls.append(request)
+        assert request.url.host == "musicbrainz.org"
+        return httpx.Response(200, json={"urls": [], "url-count": 0, "url-offset": 0})
+
+    def connector_factory() -> httpx.BaseTransport:
+        return httpx.MockTransport(_musicbrainz_response)
+
+    class _EventStore:
+        def save(self, _key: object, _value: str) -> None:
+            raise AssertionError("unused")
+
+        def load(self, _key: object) -> str | None:
+            return None
+
+        def delete(self, _key: object) -> None:
+            raise AssertionError("unused")
+
+    monkeypatch.setattr(cli, "_spotify_source", _refuse_spotify_source)
+    # refresh_once() acquires a real lock file at the lock_path _refresh() builds
+    # from user_data_path(); redirect that to this test's own isolated tmp_path
+    # so the run never touches the real platform user-data directory.
+    monkeypatch.setattr(cli, "user_data_path", lambda *_args, **_kwargs: tmp_path)
+
+    from music_friend.domain import (
+        Artist,
+        IdentityConfidence,
+        SourceReference,
+        WatchlistAction,
+        WatchlistOverride,
+    )
+
+    application = MusicFriendApplication(Catalog.open(tmp_path / "catalog.sqlite3"))
+    artist = Artist(
+        "artist-1",
+        "Artist One",
+        (SourceReference("spotify", "artist-native", None, NOW),),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+    application.put_artist(artist)
+    application.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.ADD, NOW))
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        result = cli.run_cli(
+            ["refresh", "releases", "--json"],
+            stdout=stdout,
+            stderr=stderr,
+            application=application,
+            config_store=_ConfigStore(LocalConfig()),
+            secret_prompt=lambda _message: "",
+            connector_factory=connector_factory,
+            credential_store_factory=lambda: _EventStore(),  # type: ignore[arg-type]
+        )
+    finally:
+        application.close()
+
+    assert result == 0
+    payload = json.loads(stdout.getvalue())
+    assert payload["status"] == "succeeded"
+    assert stderr.getvalue() == ""
+    # The watchlisted artist's identity mapping step made a real MusicBrainz
+    # request (proving MusicBrainz is actually in play, not just configured),
+    # and _refuse_spotify_source never fired (proving Spotify was never
+    # touched for this musicbrainz-only releases refresh).
+    assert musicbrainz_calls

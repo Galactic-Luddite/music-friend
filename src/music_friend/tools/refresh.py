@@ -52,12 +52,14 @@ from music_friend.domain import (
 )
 from music_friend.errors import QuotaExhaustedError, RateLimitedError
 from music_friend.providers import MusicSource, Page, ProviderCapabilities, ProviderHealth
+from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.ticketmaster import (
     TicketmasterAttraction,
     TicketmasterClient,
     TicketmasterEvent,
 )
 from music_friend.tools.application import MusicFriendApplication
+from music_friend.tools.identity_mapping import run_identity_mapping
 from music_friend.tools.release_discovery import (
     _ReleaseDiscoveryInterrupted,
     _SourceCallStopped,
@@ -195,6 +197,23 @@ class _PacedSource:
         cursor: str | None = None,
     ) -> Page[Release]:
         return self._request(lambda: self.source.recent_releases(artist_refs, since, cursor))
+
+    def lookup_artists_by_spotify_urls(self, spotify_urls: Sequence[str]) -> dict[str, str | None]:
+        """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases.
+
+        Identity mapping is not part of the ``MusicSource`` protocol, but the design
+        requires its requests to count toward the same MusicBrainz pacing/cooldown
+        budget as release discovery, so this goes through ``_request`` too.
+        """
+        return self._request(
+            lambda: self.source.lookup_artists_by_spotify_urls(spotify_urls)  # type: ignore[attr-defined]
+        )
+
+    def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
+        """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases."""
+        return self._request(
+            lambda: self.source.search_artist_by_name(name, limit)  # type: ignore[attr-defined]
+        )
 
     def available_observation(self) -> SourceLimitObservation:
         return SourceLimitObservation(
@@ -356,6 +375,8 @@ def refresh_once(
     checked_at: datetime,
     lock_path: Path,
     force: bool = False,
+    release_source: MusicSource | None = None,
+    release_source_name: str | None = None,
     monotonic: Callable[[], float] | object | None = None,
     lock_clock: Callable[[], float] | object | None = None,
     sleeper: Callable[[float], None] | object | None = None,
@@ -371,8 +392,21 @@ def refresh_once(
     components = _components(selected_kind)
     if source is not None and not isinstance(source, MusicSource):
         raise ValueError("source must implement the music source contract")
-    if source is None and any(component in {"catalog", "releases"} for component in components):
-        raise ValueError("source is required for catalog and release refresh")
+    if release_source is not None and not isinstance(release_source, MusicSource):
+        raise ValueError("release_source must implement the music source contract")
+    if release_source_name is not None and (
+        type(release_source_name) is not str or not release_source_name
+    ):
+        raise ValueError("release_source_name must be text")
+    if source is None and "catalog" in components:
+        raise ValueError("source is required for catalog refresh")
+    if source is None and "releases" in components and release_source is None:
+        raise ValueError("source or release_source is required for release refresh")
+    if "releases" in components:
+        if release_source is None:
+            release_source = source
+        if release_source_name is None:
+            release_source_name = source_name
     if type(config) is not LocalConfig:
         raise ValueError("config must be LocalConfig")
     if not isinstance(checked_at, datetime) or checked_at.tzinfo is None:
@@ -416,6 +450,28 @@ def refresh_once(
                 rng=entropy,
             )
         )
+        shares_paced_source = (
+            limited_source is not None
+            and release_source is source
+            and release_source_name == source_name
+        )
+        limited_release_source: _PacedSource | None
+        if shares_paced_source:
+            limited_release_source = limited_source
+        elif release_source is None:
+            limited_release_source = None
+        else:
+            assert release_source_name is not None  # set together with release_source above
+            limited_release_source = _PacedSource(
+                release_source,
+                source_name=release_source_name,
+                started_at=started_monotonic,
+                checked_at=checked_at,
+                monotonic=clock,
+                sleeper=sleep,
+                saved_limit=application.get_source_limit(release_source_name),
+                rng=entropy,
+            )
         limited_event_client = (
             None
             if event_client is None
@@ -436,19 +492,29 @@ def refresh_once(
                     raise AssertionError("catalog refresh requires a source")
                 _run_catalog(application, source_name, limited_source, checked_at, counts, force)
             elif component == "releases":
-                if limited_source is None:
-                    raise AssertionError("release refresh requires a source")
-                _run_releases(application, source_name, limited_source, checked_at, counts)
-                if limited_source.stopped:
+                if limited_release_source is None or release_source_name is None:
+                    raise AssertionError("release refresh requires a release_source")
+                _run_releases(
+                    application, release_source_name, limited_release_source, checked_at, counts
+                )
+                if limited_release_source.stopped:
                     break
             else:
                 _run_events(application, config, limited_event_client, checked_at, counts)
-        if limited_source is not None:
+        if limited_source is not None and (
+            "catalog" in components or limited_source is limited_release_source
+        ):
             counts.source_requests = limited_source.requests
             counts.limit_pauses = limited_source.pauses
             # Persist the learned pacing rate (and any cooldown) so the next invocation
             # starts from where this one left off, whether it hit a limit or recovered.
+            # Gated on the catalog component actually running (or the release source
+            # sharing this same paced wrapper): a musicbrainz-only release refresh must
+            # never touch Spotify's source_limits row just because a `source` argument
+            # was supplied for it, since that argument may go entirely unused.
             application.put_source_limit(limited_source.current_observation())
+        if limited_release_source is not None and limited_release_source is not limited_source:
+            application.put_source_limit(limited_release_source.current_observation())
         if (
             selected_kind is RefreshKind.EVENTS
             and counts.events_skip_reason is not None
@@ -592,6 +658,34 @@ def _run_releases(
     checked_at: datetime,
     counts: _RefreshCounts,
 ) -> None:
+    # Run identity mapping before release discovery if using MusicBrainz, through the
+    # same paced wrapper as recent_releases so mapping requests count toward the same
+    # pacing/cooldown budget. Per-artist network failures are handled inside
+    # run_identity_mapping itself (that artist is recorded unmapped and the pass
+    # continues); a rate limit that exhausts _PacedSource's own retry/pause budget
+    # surfaces as _SourceCallStopped (not RateLimitedError -- _request() retries a
+    # RateLimitedError internally up to its pause budget before giving up), and by
+    # then _request() has already built and stored a proper COOLING_DOWN
+    # limit_observation for it.
+    if source_name == "musicbrainz" and isinstance(source.source, MusicBrainzSource):
+        try:
+            run_identity_mapping(
+                application._catalog,
+                source,
+                source_name,
+                checked_at,
+            )
+        except _SourceCallStopped:
+            # A rate limit is recoverable next run, not a hard failure: mark the run
+            # partial, matching how the same error is classified when it happens
+            # during release discovery itself (see the design doc's error-handling
+            # section: "marks the run partial with reason=rate_limited").
+            counts.failures += 1
+            counts.partial = True
+            if source.limit_observation is not None:
+                application.put_source_limit(source.limit_observation)
+            return
+
     checkpoint = application.get_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
     try:
         result = application.discover_releases(

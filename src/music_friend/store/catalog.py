@@ -589,17 +589,19 @@ class Catalog:
         for position, reference in enumerate(references):
             connection.execute(
                 """
-                INSERT INTO source_references (source, native_id, canonical_url, observed_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO source_references (source, native_id, canonical_url, observed_at, confidence)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (source, native_id) DO UPDATE SET
                     canonical_url = excluded.canonical_url,
-                    observed_at = excluded.observed_at
+                    observed_at = excluded.observed_at,
+                    confidence = excluded.confidence
                 """,
                 (
                     reference.source,
                     reference.native_id,
                     reference.canonical_url,
                     _datetime_text(reference.observed_at),
+                    reference.confidence.value,
                 ),
             )
             source_row = connection.execute(
@@ -659,7 +661,7 @@ class Catalog:
             .execute(
                 """
             SELECT reference.source, reference.native_id, reference.canonical_url,
-                   reference.observed_at
+                   reference.observed_at, reference.confidence
             FROM record_sources AS mapping
             JOIN source_references AS reference ON reference.id = mapping.source_reference_id
             WHERE mapping.record_kind = ? AND mapping.record_local_id = ?
@@ -669,12 +671,17 @@ class Catalog:
             )
             .fetchall()
         )
+        from music_friend.domain import IdentityConfidence
+
         return tuple(
             SourceReference(
                 source=str(row[0]),
                 native_id=str(row[1]),
                 canonical_url=None if row[2] is None else str(row[2]),
                 observed_at=datetime.fromisoformat(str(row[3])),
+                confidence=IdentityConfidence(str(row[4]))
+                if row[4]
+                else IdentityConfidence.SOURCE_ONLY,
             )
             for row in rows
         )
@@ -2397,6 +2404,70 @@ class Catalog:
                 """,
                 (source_name,),
             )
+
+    def put_artist_identity_mapping(
+        self,
+        artist_local_id: str,
+        source: str,
+        status: str,
+        method: str,
+        attempted_at: datetime,
+    ) -> None:
+        """Insert or update an artist identity mapping."""
+        with self.transaction():
+            self._require_connection().execute(
+                """
+                INSERT INTO artist_identity_mappings
+                    (artist_local_id, source, status, method, attempted_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (artist_local_id, source) DO UPDATE SET
+                    status = excluded.status,
+                    method = excluded.method,
+                    attempted_at = excluded.attempted_at
+                """,
+                (artist_local_id, source, status, method, _datetime_text(attempted_at)),
+            )
+
+    def get_artist_identity_mapping(
+        self, artist_local_id: str, source: str
+    ) -> dict[str, object] | None:
+        """Retrieve an artist identity mapping."""
+        row = (
+            self._require_connection()
+            .execute(
+                """
+            SELECT status, method, attempted_at
+            FROM artist_identity_mappings
+            WHERE artist_local_id = ? AND source = ?
+            """,
+                (artist_local_id, source),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return {
+            "status": str(row[0]),
+            "method": str(row[1]),
+            "attempted_at": str(row[2]),
+        }
+
+    def get_unmapped_artists_since(self, source: str, before_attempted_at: datetime) -> list[str]:
+        """Get artists marked unmapped before a certain time (eligible for retry)."""
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+            SELECT DISTINCT artist_local_id
+            FROM artist_identity_mappings
+            WHERE source = ? AND status = 'unmapped' AND attempted_at < ?
+            ORDER BY artist_local_id
+            """,
+                (source, _datetime_text(before_attempted_at)),
+            )
+            .fetchall()
+        )
+        return [str(row[0]) for row in rows]
 
 
 __all__ = ["Catalog"]

@@ -140,9 +140,58 @@ def source_context(**kwargs: object):
     yield Source()
 
 
+class FakeMusicBrainzSource:
+    """Synthetic musicbrainz release source: no real network, no keyless API call."""
+
+    def __init__(self, *, transport: object = None, clock: object = None) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            supported=frozenset({Capability.RECENT_RELEASES}),
+            granted=frozenset({Capability.RECENT_RELEASES}),
+        )
+
+    def health(self) -> ProviderHealth:
+        return ProviderHealth(HealthStatus.HEALTHY, self.capabilities())
+
+    def search_artists(self, query: str, limit: int) -> Page[Artist]:
+        raise AssertionError("unused")
+
+    def followed_artists(self, cursor: str | None = None) -> Page[Artist]:
+        raise AssertionError("unused")
+
+    def saved_items(self, cursor: str | None = None) -> CatalogItemBatch:
+        raise AssertionError("unused")
+
+    def top_items(self, time_range: str, limit: int) -> CatalogItemBatch:
+        raise AssertionError("unused")
+
+    def top_artists(self, time_range: str, limit: int) -> Page[Artist]:
+        raise AssertionError("unused")
+
+    def recent_releases(
+        self,
+        artist_refs: tuple[SourceReference, ...],
+        since: datetime,
+        cursor: str | None = None,
+    ) -> Page[Release]:
+        return Page((), None)
+
+    def lookup_artists_by_spotify_urls(self, spotify_urls: object) -> dict[str, str | None]:
+        return {url: None for url in spotify_urls}  # type: ignore[union-attr]
+
+    def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
+        return []
+
+
 def main() -> None:
     mcp_stdio.spotify_source = source_context  # type: ignore[assignment]
     mcp_stdio.TicketmasterDiscoveryClient = lambda *args, **kwargs: Events()  # type: ignore[assignment]
+    mcp_stdio.MusicBrainzSource = FakeMusicBrainzSource  # type: ignore[misc]
     try:
         mcp_stdio.run_catalog_stdio_session(
             config=LocalConfig(

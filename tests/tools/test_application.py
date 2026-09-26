@@ -176,3 +176,57 @@ def test_application_delegates_purge_source(tmp_path: Path) -> None:
         application = MusicFriendApplication(catalog)
         result = application.purge_source("spotify")
         assert result is not None
+
+
+def test_confirm_artist_identity_sets_user_confirmed_source_reference(tmp_path: Path) -> None:
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist()
+        application.put_artist(artist)
+
+        application.confirm_artist_identity(
+            artist, source="musicbrainz", native_id="11111111-1111-1111-1111-111111111111", at=NOW
+        )
+
+        updated = application.get_artist("artist-1")
+        assert updated is not None
+        mb_refs = [ref for ref in updated.source_refs if ref.source == "musicbrainz"]
+        assert len(mb_refs) == 1
+        assert mb_refs[0].confidence == IdentityConfidence.USER_CONFIRMED
+        mapping = catalog.get_artist_identity_mapping("artist-1", "musicbrainz")
+        assert mapping is not None
+        assert mapping["status"] == "mapped"
+        assert mapping["method"] == "user"
+
+
+def test_confirm_artist_identity_rolls_back_both_writes_on_partial_failure(
+    tmp_path: Path,
+) -> None:
+    """Catches the artist write and the mapping-table write committing independently:
+    if either fails, neither must be visible afterward."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist()
+        application.put_artist(artist)
+
+        original_put = catalog.put_artist_identity_mapping
+
+        def failing_put(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("synthetic failure after put_artist")
+
+        catalog.put_artist_identity_mapping = failing_put  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError):
+                application.confirm_artist_identity(
+                    artist,
+                    source="musicbrainz",
+                    native_id="11111111-1111-1111-1111-111111111111",
+                    at=NOW,
+                )
+        finally:
+            catalog.put_artist_identity_mapping = original_put  # type: ignore[method-assign]
+
+        unchanged = application.get_artist("artist-1")
+        assert unchanged is not None
+        assert not any(ref.source == "musicbrainz" for ref in unchanged.source_refs)
+        assert catalog.get_artist_identity_mapping("artist-1", "musicbrainz") is None

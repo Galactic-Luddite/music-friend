@@ -20,8 +20,10 @@ a provider-specific MCP tool (see: docs/design/product-design.md).
   flow that both runtimes call (see: tests/tools/).
 - `src/music_friend/store/` is the SQLite catalog, schema migrations, and the Spotify history
   importer (see: tests/store/).
-- `src/music_friend/providers/` contains the Spotify and Ticketmaster adapters, transports, and
-  credential stores. Provider code never imports MCP or runtime modules (see: tests/architecture/test_dependencies.py).
+- `src/music_friend/providers/` contains the Spotify, MusicBrainz, and Ticketmaster adapters,
+  transports, and credential stores. MusicBrainz is keyless and is the default release-discovery
+  source (see: docs/setup.md); Spotify remains the library/watchlist source. Provider code never
+  imports MCP or runtime modules (see: tests/architecture/test_dependencies.py).
 - `src/music_friend/domain/` defines the provider-neutral models and enums (see: tests/domain/).
 - `skills/music-friend/` is the optional runtime skill packaged unchanged in the wheel (see: docs/install.md).
 - `tests/` mirrors the source layout and adds `tests/docs/` (public documentation contracts),

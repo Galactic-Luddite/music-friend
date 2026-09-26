@@ -294,6 +294,7 @@ class SourceReference:
     native_id: str
     canonical_url: str | None
     observed_at: datetime
+    confidence: IdentityConfidence = IdentityConfidence.SOURCE_ONLY
 
     def __post_init__(self) -> None:
         _require_text(self.source, "source")
@@ -301,6 +302,7 @@ class SourceReference:
         if self.canonical_url is not None:
             _require_https_url(self.canonical_url, "canonical_url")
         _require_aware_datetime(self.observed_at, "observed_at")
+        _require_enum(self.confidence, IdentityConfidence, "confidence")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
