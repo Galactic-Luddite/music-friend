@@ -85,7 +85,8 @@ class MusicBrainzTransport:
         try:
             if len(response.content) > _MAX_BODY_BYTES:
                 raise InvalidSourceResponseError()
-            return json.loads(response.text)
+            result = json.loads(response.text)
+            return result  # type: ignore[no-any-return]
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise InvalidSourceResponseError() from error
 

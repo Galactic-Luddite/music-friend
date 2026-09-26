@@ -672,13 +672,16 @@ class Catalog:
             .fetchall()
         )
         from music_friend.domain import IdentityConfidence
+
         return tuple(
             SourceReference(
                 source=str(row[0]),
                 native_id=str(row[1]),
                 canonical_url=None if row[2] is None else str(row[2]),
                 observed_at=datetime.fromisoformat(str(row[3])),
-                confidence=IdentityConfidence(str(row[4])) if row[4] else IdentityConfidence.SOURCE_ONLY,
+                confidence=IdentityConfidence(str(row[4]))
+                if row[4]
+                else IdentityConfidence.SOURCE_ONLY,
             )
             for row in rows
         )

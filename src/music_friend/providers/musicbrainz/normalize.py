@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
 
 from music_friend.domain import IdentityConfidence, Release, ReleaseDatePrecision, SourceReference
@@ -13,14 +13,14 @@ def normalize_release_group(
     release_group: Mapping[str, object],
     *,
     artist_id_map: Mapping[str, str],
-    now_iso: str,
+    now: datetime,
 ) -> Release | None:
     """Convert a MusicBrainz release-group record to a Release, or None if invalid.
 
     Args:
         release_group: The release-group object from MusicBrainz API
         artist_id_map: Map from MBID to local artist_id for resolution
-        now_iso: ISO 8601 timestamp for observed_at
+        now: Observed timestamp for the Release and SourceReference
 
     Returns:
         A normalized Release or None if the record is incomplete/invalid.
@@ -41,7 +41,7 @@ def normalize_release_group(
             return None
 
         release_date, date_precision = _parse_date(first_release_date)
-        if release_date is None:
+        if release_date is None or date_precision is None:
             return None
 
         # Extract artist refs from artist-credit
@@ -74,7 +74,7 @@ def normalize_release_group(
                 source="musicbrainz",
                 native_id=rgid,
                 canonical_url=f"https://musicbrainz.org/release-group/{rgid}",
-                observed_at=now_iso,
+                observed_at=now,
                 confidence=IdentityConfidence.SOURCE_ONLY,
             ),
         )
@@ -87,7 +87,7 @@ def normalize_release_group(
             date_precision=date_precision,
             artist_refs=tuple(artist_refs),
             source_refs=source_refs,
-            observed_at=now_iso,
+            observed_at=now,
         )
     except (KeyError, TypeError, ValueError):
         return None

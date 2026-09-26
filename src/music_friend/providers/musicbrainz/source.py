@@ -31,8 +31,8 @@ class MusicBrainzSource:
             user_agent="music-friend/0.1.0 (https://github.com/Galactic-Luddite/music-friend)"
         )
         self._capabilities = ProviderCapabilities(
-            supported={Capability.RECENT_RELEASES},
-            granted={Capability.RECENT_RELEASES},
+            supported=frozenset({Capability.RECENT_RELEASES}),
+            granted=frozenset({Capability.RECENT_RELEASES}),
         )
 
     def capabilities(self) -> ProviderCapabilities:
@@ -127,7 +127,7 @@ class MusicBrainzSource:
         # Build artist ID map for the normalizer
         artist_id_map = {mbid: artist_ref.native_id}
 
-        now_iso = datetime.now().isoformat()
+        now = datetime.now()
         releases: list[Release] = []
         for rg in release_groups:
             if not isinstance(rg, Mapping):
@@ -135,7 +135,7 @@ class MusicBrainzSource:
             # Only include release-groups with a score field
             if "score" not in rg:
                 continue
-            normalized = normalize_release_group(rg, artist_id_map=artist_id_map, now_iso=now_iso)
+            normalized = normalize_release_group(rg, artist_id_map=artist_id_map, now=now)
             if normalized is not None:
                 releases.append(normalized)
 
@@ -150,7 +150,7 @@ class MusicBrainzSource:
             if next_offset < count:
                 next_cursor = str(next_offset)
 
-        return Page(items=tuple(releases), continuation=next_cursor)
+        return Page(items=tuple(releases), next_cursor=next_cursor)
 
     def close(self) -> None:
         """Clean up resources."""
