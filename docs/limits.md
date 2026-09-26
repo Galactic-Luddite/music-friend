@@ -21,6 +21,18 @@ MusicBrainz is the default release source. It requires no API key; Music Friend 
 requests at no more than one request per second and records bounded partial outcomes if a refresh
 cannot complete.
 
+Deezer is an optional, feature-flagged release source layered on top of MusicBrainz for
+timelier releases; enable it by adding `deezer` to `release_sources` (see docs/setup.md). It
+requires no API key; Music Friend spaces Deezer requests at no more than 10 requests per 5 seconds.
+Deezer artist identities come only from the MusicBrainz url-relationship lookup Music Friend
+already performs for identity mapping -- there is no Deezer name search, so an artist without a
+Deezer link on its MusicBrainz page is simply not covered by Deezer. When configured, `refresh_music`
+tries each configured release source in order; a Deezer rate limit or outage does not block
+MusicBrainz (or vice versa), and the refresh result reports which source, if any, was partial. The
+same release discovered through two different sources becomes one release with both sources'
+references attached, not two inbox items; a one-day difference in reported release date across
+sources is treated as the same release, but a different title is not.
+
 Ticketmaster is optional and does not establish a completeness guarantee for live events. Music
 Friend searches only an explicit country and postal-code area. It uses a default radius of 50 miles
 or 80 kilometers when a configured area omits a radius, searches the next 365 days, asks for up to

@@ -351,3 +351,316 @@ def test_discover_releases_treats_a_malformed_release_page_as_an_artist_failure(
         result = application.discover_releases("spotify", source, checked_at=NOW)
 
         assert result.artists[0].status is ReleaseDiscoveryStatus.FAILED
+
+
+def _multi_source_artist(mb_id: str, deezer_id: str, name: str = "Artist") -> Artist:
+    return Artist(
+        f"artist:{mb_id}",
+        name,
+        (
+            SourceReference("musicbrainz", mb_id, None, NOW),
+            SourceReference("deezer", deezer_id, None, NOW),
+        ),
+        IdentityConfidence.EXTERNAL_ID,
+        NOW,
+    )
+
+
+def _cross_source_release(
+    native_id: str,
+    source: str,
+    artist: Artist,
+    *,
+    title: str = "Shared Release",
+    release_date: date = date(2026, 8, 1),
+    date_precision: ReleaseDatePrecision = ReleaseDatePrecision.DAY,
+) -> Release:
+    return Release(
+        f"release:{source}:{native_id}",
+        title,
+        "album",
+        release_date,
+        date_precision,
+        (artist.local_id,),
+        (SourceReference(source, native_id, f"https://example.test/{source}/{native_id}", NOW),),
+        NOW,
+    )
+
+
+def test_cross_source_release_discovery_merges_into_one_release_with_two_source_refs(
+    tmp_path: Path,
+) -> None:
+    """AC: the same synthetic release discovered via MusicBrainz and Deezer
+    produces one release, two source refs, one inbox item."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-shared", "deezer-shared")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-shared", None)] = Page(
+            (_cross_source_release("rg-shared", "musicbrainz", artist),), None
+        )
+        first = application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+        assert len(first.artists[0].candidates) == 1
+        assert first.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-shared", None)] = Page(
+            (_cross_source_release("al-shared", "deezer", artist),), None
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        # A cross-source match creates no new inbox candidate.
+        assert second.artists[0].candidates == ()
+
+        stored_release = application.get_release("release:musicbrainz:rg-shared")
+        assert stored_release is not None
+        assert len(stored_release.source_refs) == 2
+        assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
+
+        # No second release was created for the Deezer discovery.
+        assert application.get_release("release:deezer:al-shared") is None
+
+
+def test_cross_source_dedupe_tolerates_a_one_day_date_offset(tmp_path: Path) -> None:
+    """AC: a one-day date-precision offset still matches."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-offset", "deezer-offset")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-offset", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-offset", "musicbrainz", artist, release_date=date(2026, 8, 1)
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-offset", None)] = Page(
+            (_cross_source_release("al-offset", "deezer", artist, release_date=date(2026, 8, 2)),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert second.artists[0].candidates == ()
+
+        stored_release = application.get_release("release:musicbrainz:rg-offset")
+        assert stored_release is not None
+        assert len(stored_release.source_refs) == 2
+        assert application.get_release("release:deezer:al-offset") is None
+
+
+def test_cross_source_dedupe_does_not_match_a_different_title(tmp_path: Path) -> None:
+    """AC: different titles do not match."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-distinct", "deezer-distinct")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-distinct", None)] = Page(
+            (_cross_source_release("rg-distinct", "musicbrainz", artist, title="Album One"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-distinct", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-distinct",
+                    "deezer",
+                    artist,
+                    title="A Completely Different Album",
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        # Different titles do not match: the second discovery is its own NEW candidate.
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-distinct")
+        deezer_release = application.get_release("release:deezer:al-distinct")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+def test_cross_source_dedupe_month_precision_stored_blocks_a_day_offset_match(
+    tmp_path: Path,
+) -> None:
+    """AC: the +/-1-day widening requires BOTH sides to be day-precision.
+
+    A month-precision stored release normalizes to the first of the month
+    (2026-08-01); a naive one-day widening against a day-precision incoming
+    candidate landing on 2026-08-02 would spuriously match an unrelated
+    release. Since the stored side is only month-precision, the two-source
+    resolution of issue #42 ("both", not "either") must NOT merge these.
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-month", "deezer-month")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-month", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-month",
+                    "musicbrainz",
+                    artist,
+                    release_date=date(2026, 8, 1),
+                    date_precision=ReleaseDatePrecision.MONTH,
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-month", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-month",
+                    "deezer",
+                    artist,
+                    release_date=date(2026, 8, 2),
+                    date_precision=ReleaseDatePrecision.DAY,
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        # The month-precision stored side blocks the widening: this is a new,
+        # separate release rather than a merge.
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-month")
+        deezer_release = application.get_release("release:deezer:al-month")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+def test_cross_source_dedupe_day_precision_stored_blocks_a_month_precision_offset_match(
+    tmp_path: Path,
+) -> None:
+    """AC: the reverse of the month-vs-day case -- a day-precision stored
+    release does not merge with a month-precision incoming candidate one day
+    off, because the incoming side is not day-precision."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-day-vs-month", "deezer-day-vs-month")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-day-vs-month", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-day-vs-month",
+                    "musicbrainz",
+                    artist,
+                    release_date=date(2026, 8, 2),
+                    date_precision=ReleaseDatePrecision.DAY,
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-day-vs-month", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-day-vs-month",
+                    "deezer",
+                    artist,
+                    release_date=date(2026, 8, 1),
+                    date_precision=ReleaseDatePrecision.MONTH,
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-day-vs-month")
+        deezer_release = application.get_release("release:deezer:al-day-vs-month")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+def test_cross_source_dedupe_different_titles_never_match_even_with_identical_dates(
+    tmp_path: Path,
+) -> None:
+    """AC: different titles never match regardless of precision, even when
+    the dates are identical (not just off-by-one)."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-title-month", "deezer-title-month")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-title-month", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-title-month",
+                    "musicbrainz",
+                    artist,
+                    title="Album One",
+                    release_date=date(2026, 8, 1),
+                    date_precision=ReleaseDatePrecision.MONTH,
+                ),
+            ),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-title-month", None)] = Page(
+            (
+                _cross_source_release(
+                    "al-title-month",
+                    "deezer",
+                    artist,
+                    title="A Completely Different Album",
+                    release_date=date(2026, 8, 1),
+                    date_precision=ReleaseDatePrecision.MONTH,
+                ),
+            ),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-title-month")
+        deezer_release = application.get_release("release:deezer:al-title-month")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1

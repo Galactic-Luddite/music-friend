@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import TextIO
 
 import httpx
 from platformdirs import user_data_path
@@ -21,7 +21,12 @@ from platformdirs import user_data_path
 from music_friend import __version__
 from music_friend.agent_skill import SkillInstallError
 from music_friend.agent_skill import install_skill as install_agent_skill
-from music_friend.configuration import LocalConfig, LocalConfigStore, RadiusUnit
+from music_friend.configuration import (
+    DEFAULT_RELEASE_SOURCES,
+    LocalConfig,
+    LocalConfigStore,
+    RadiusUnit,
+)
 from music_friend.domain import (
     DAILY_REFRESH_MINUTES,
     InboxEntry,
@@ -32,6 +37,8 @@ from music_friend.domain import (
 )
 from music_friend.providers import Capability, MusicSource
 from music_friend.providers.credentials import CredentialStore
+from music_friend.providers.deezer.source import DeezerSource
+from music_friend.providers.deezer.transport import DeezerTransport
 from music_friend.providers.keyring_store import KeyringCredentialStore
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.musicbrainz.transport import MusicBrainzTransport
@@ -70,7 +77,7 @@ AuthorizerFactory = Callable[
 ]
 
 _USAGE = (
-    "Usage: music-friend doctor | setup [--release-source spotify|musicbrainz] | connect spotify | disconnect spotify | status | "
+    "Usage: music-friend doctor | setup [--release-sources spotify,musicbrainz,deezer] | connect spotify | disconnect spotify | status | "
     "refresh catalog|releases|events|all [--force] | watchlist list | inbox list|show | "
     "data export|import|import-spotify|backup|restore|delete | diagnostics | "
     "schedule install|status|remove | version\n"
@@ -183,6 +190,21 @@ def _musicbrainz_source(
         yield source
     finally:
         source.close()
+
+
+@contextmanager
+def _deezer_source(*, connector_factory: ConnectorFactory, now: Clock) -> Iterator[MusicSource]:
+    """Deezer is keyless like MusicBrainz: same injectable connector, no credential store.
+
+    Deezer artist ids come only from the MusicBrainz url-rels batch (issue #42);
+    this source never resolves an artist by name.
+    """
+    transport = DeezerTransport(connector=connector_factory())
+    source = DeezerSource(transport=transport, clock=now)
+    try:
+        yield source
+    finally:
+        transport.close()
 
 
 @contextmanager
@@ -491,35 +513,45 @@ def _setup_config(prior: LocalConfig, prompt: Prompt) -> LocalConfig:
     )
     country, postal, radius, unit = _setup_event_area(prior, prompt)
     try:
-        release_source_input = prompt(
-            "Choose release source (default: musicbrainz): [spotify|musicbrainz] "
+        release_sources_input = prompt(
+            "Choose release sources, comma-separated (default: musicbrainz): "
+            "[spotify|musicbrainz|deezer] "
         )
     except StopIteration:
-        release_source_input = ""
-    release_source = _setup_release_source(prior.release_source, release_source_input)
+        release_sources_input = ""
+    release_sources = _setup_release_sources(prior.release_sources, release_sources_input)
     return LocalConfig(
         spotify_client_id=spotify_client_id,
         event_country_code=country,
         event_postal_code=postal,
         event_radius=radius,
         event_radius_unit=unit,
-        release_source=release_source,
+        release_sources=release_sources,
     )
 
 
-def _setup_release_source(
-    prior: Literal["spotify", "musicbrainz"] | None, value: str
-) -> Literal["spotify", "musicbrainz"]:
+_ALLOWED_RELEASE_SOURCE_TOKENS = frozenset({"spotify", "musicbrainz", "deezer"})
+
+
+def _setup_release_sources(prior: tuple[str, ...], value: str) -> tuple[str, ...]:
+    """Parse a comma-separated release-sources token list from a prompt or flag.
+
+    Blank input preserves ``prior``. Each token must be one of spotify,
+    musicbrainz, or deezer, with no duplicates.
+    """
     if type(value) is not str:
-        raise ValueError("release_source is invalid")
+        raise ValueError("release_sources is invalid")
     normalized = value.strip().lower()
     if not normalized:
-        return prior or "musicbrainz"
-    if normalized == "spotify":
-        return "spotify"
-    if normalized == "musicbrainz":
-        return "musicbrainz"
-    raise ValueError("release_source is invalid")
+        return prior
+    tokens = tuple(token.strip() for token in normalized.split(","))
+    if not tokens or any(not token for token in tokens):
+        raise ValueError("release_sources is invalid")
+    if len(set(tokens)) != len(tokens):
+        raise ValueError("release_sources is invalid")
+    if not all(token in _ALLOWED_RELEASE_SOURCE_TOKENS for token in tokens):
+        raise ValueError("release_sources is invalid")
+    return tokens
 
 
 def _setup_event_area(
@@ -790,11 +822,9 @@ def _doctor(
                 checks["ticketmaster_key"] = client.is_configured()
         except Exception:
             checks["ticketmaster_key"] = False
-    release_source = (
-        config.release_source if config is not None and config.release_source else "musicbrainz"
-    )
+    release_sources = config.release_sources if config is not None else DEFAULT_RELEASE_SOURCES
     unmapped_artists = 0
-    if release_source == "musicbrainz":
+    if "musicbrainz" in release_sources:
         unmapped_artists = sum(
             1
             for entry in application.list_watchlist(limit=500)
@@ -811,11 +841,12 @@ def _doctor(
             for name, value in checks.items()
         },
         "release_source": {
-            "source": release_source,
+            "sources": list(release_sources),
+            "source": release_sources[0] if release_sources else "musicbrainz",
             "unmapped_artists": unmapped_artists,
             "remedy": (
                 "Run 'music-friend refresh releases' to map artists"
-                if release_source == "musicbrainz" and unmapped_artists
+                if "musicbrainz" in release_sources and unmapped_artists
                 else None
             ),
         },
@@ -834,14 +865,16 @@ def _doctor_text(payload: dict[str, object]) -> str:
             lines.append(f"    {result['remedy']}")
     release_source = payload["release_source"]
     assert isinstance(release_source, dict)
-    if release_source["source"] == "musicbrainz":
+    sources = release_source["sources"]
+    assert isinstance(sources, list)
+    if "musicbrainz" in sources:
         lines.append(
             f"release_source: musicbrainz ({release_source['unmapped_artists']} artists unmapped)"
         )
         if release_source["remedy"] is not None:
             lines.append(f"    {release_source['remedy']}")
     else:
-        lines.append("release_source: spotify")
+        lines.append(f"release_source: {', '.join(sources) if sources else 'spotify'}")
     return "\n".join(lines)
 
 
@@ -859,10 +892,11 @@ def _refresh(
         return refresh_runner(kind)
     checked_at = _checked_at(now)
     lock_path = Path(user_data_path("music-friend", appauthor=False)) / "refresh.lock"
-    release_source_name = config.release_source or "musicbrainz"
+    release_sources = config.release_sources or DEFAULT_RELEASE_SOURCES
+    release_source_name = release_sources[0]
     needs_catalog = kind in ("catalog", "all")
     needs_releases = kind in ("releases", "all")
-    needs_spotify_source = needs_catalog or (needs_releases and release_source_name == "spotify")
+    needs_spotify_source = needs_catalog or (needs_releases and "spotify" in release_sources)
     with _ticketmaster_client(
         connector_factory=connector_factory,
         credential_store_factory=credential_store_factory,
@@ -893,18 +927,36 @@ def _refresh(
                     )
                 )
             release_source: MusicSource | None = None
+            additional_release_sources: list[tuple[str, MusicSource]] = []
             if needs_releases:
-                if release_source_name == "spotify":
-                    # Same source, same name: refresh_once shares one paced wrapper.
-                    release_source = source
-                else:
-                    # A musicbrainz-only or "all" refresh never needs a Spotify
-                    # token session just for release discovery: identity mapping
-                    # reads Spotify URLs already stored in the local catalog, it
-                    # never calls Spotify live.
-                    release_source = stack.enter_context(
-                        _musicbrainz_source(connector_factory=connector_factory, now=now)
-                    )
+                for index, name in enumerate(release_sources):
+                    if name == "spotify":
+                        # Same source, same name: refresh_once shares one paced wrapper
+                        # when spotify is the primary; when spotify is an *additional*
+                        # source it still reuses the one open session (opened above
+                        # because needs_spotify_source is true whenever "spotify" is in
+                        # release_sources), never a second live connection.
+                        built: MusicSource | None = source
+                    elif name == "musicbrainz":
+                        # A musicbrainz-only or "all" refresh never needs a Spotify
+                        # token session just for release discovery: identity mapping
+                        # reads Spotify URLs already stored in the local catalog, it
+                        # never calls Spotify live.
+                        built = stack.enter_context(
+                            _musicbrainz_source(connector_factory=connector_factory, now=now)
+                        )
+                    else:
+                        # Deezer (issue #42): keyless, like MusicBrainz -- artist ids
+                        # come only from the MusicBrainz url-rels batch, never a live
+                        # name search, so no credential store is needed here either.
+                        built = stack.enter_context(
+                            _deezer_source(connector_factory=connector_factory, now=now)
+                        )
+                    if index == 0:
+                        release_source = built
+                    else:
+                        assert built is not None  # spotify's session is opened above
+                        additional_release_sources.append((name, built))
             return refresh_once(
                 application,
                 kind=kind,
@@ -912,6 +964,7 @@ def _refresh(
                 source=source,
                 release_source=release_source,
                 release_source_name=release_source_name if needs_releases else None,
+                additional_release_sources=additional_release_sources if needs_releases else None,
                 config=config,
                 event_client=event_client,
                 checked_at=checked_at,
@@ -1350,7 +1403,7 @@ def _setup_command(
             "--event-radius",
             "--event-unit",
             "--spotify-client-id",
-            "--release-source",
+            "--release-sources",
         }:
             if i + 1 >= len(argv):
                 print(_USAGE, end="", file=stderr)
@@ -1435,7 +1488,7 @@ def _setup_command(
         "event_postal_code": configured.event_postal_code,
         "event_radius": configured.event_radius,
         "event_radius_unit": configured.event_radius_unit,
-        "release_source": configured.release_source or "musicbrainz",
+        "release_sources": list(configured.release_sources),
     }
     return _emit(result, structured, stdout, text="Music Friend setup complete.")
 
@@ -1447,7 +1500,7 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
     event_postal_code = prior.event_postal_code
     event_radius = prior.event_radius
     event_radius_unit = prior.event_radius_unit
-    release_source = prior.release_source
+    release_sources = prior.release_sources
 
     # Handle clears
     if flags.get("clear_spotify_client_id") == "true":
@@ -1468,8 +1521,8 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
             flags["spotify_client_id"],
             normalize=lambda value: value.strip(),
         )
-    if "release_source" in flags and flags["release_source"] is not None:
-        release_source = _setup_release_source(prior.release_source, flags["release_source"])
+    if "release_sources" in flags and flags["release_sources"] is not None:
+        release_sources = _setup_release_sources(prior.release_sources, flags["release_sources"])
 
     if (
         "event_country" in flags
@@ -1521,7 +1574,7 @@ def _setup_config_from_flags(prior: LocalConfig, flags: dict[str, str | None]) -
         event_postal_code=event_postal_code,
         event_radius=event_radius,
         event_radius_unit=event_radius_unit,
-        release_source=release_source,
+        release_sources=release_sources,
     )
 
 

@@ -684,3 +684,140 @@ def test_refresh_releases_uses_musicbrainz_and_never_opens_a_spotify_source(
     # and _refuse_spotify_source never fired (proving Spotify was never
     # touched for this musicbrainz-only releases refresh).
     assert musicbrainz_calls
+
+
+def test_refresh_releases_calls_musicbrainz_and_deezer_but_never_spotify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC (issue #42): with release_sources=("musicbrainz", "deezer"), a real
+    `music-friend refresh releases` run through cli.run_cli() actually opens and
+    calls both hosts (not just musicbrainz, the prior wiring's only source), and
+    never opens a Spotify token session, since "spotify" is not configured."""
+    import httpx
+
+    from music_friend.store import Catalog
+    from music_friend.tools import MusicFriendApplication
+
+    # Clean-room boundary: _refresh()'s lock_path is derived from user_data_path,
+    # which resolves to the real platform data directory unless patched. Keep the
+    # refresh lock inside pytest's tmp_path so this test never writes outside its
+    # declared roots (same fix pattern as #45's musicbrainz-only entry-point test).
+    monkeypatch.setattr(cli, "user_data_path", lambda *_args, **_kwargs: tmp_path)
+
+    @contextmanager
+    def _refuse_spotify_source(**kwargs: object) -> object:
+        raise AssertionError("spotify must not be opened when it is not a configured source")
+        yield  # pragma: no cover
+
+    musicbrainz_calls: list[httpx.Request] = []
+    deezer_calls: list[httpx.Request] = []
+    synthetic_mbid = "11111111-1111-1111-1111-111111111111"
+    synthetic_deezer_artist_id = "424242"
+
+    def _dispatch(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "musicbrainz.org":
+            musicbrainz_calls.append(request)
+            if request.url.path == "/ws/2/url":
+                # The Spotify-URL batch lookup: resolve artist-1's Spotify URL to a
+                # synthetic MBID via exactly one artist relation.
+                spotify_url = "https://open.spotify.com/artist/artist-native"
+                return httpx.Response(
+                    200,
+                    json={
+                        "url-count": 1,
+                        "url-offset": 0,
+                        "urls": [
+                            {
+                                "resource": spotify_url,
+                                "relations": [{"artist": {"id": synthetic_mbid}}],
+                            }
+                        ],
+                    },
+                )
+            if request.url.path == "/ws/2/release-group":
+                # Release-group search for musicbrainz's own recent_releases call.
+                return httpx.Response(200, json={"release-groups": []})
+            # The per-artist url-rels lookup used to resolve a Deezer artist id.
+            return httpx.Response(
+                200,
+                json={
+                    "relations": [
+                        {
+                            "type": "free streaming",
+                            "url": {
+                                "resource": (
+                                    f"https://www.deezer.com/artist/{synthetic_deezer_artist_id}"
+                                )
+                            },
+                        }
+                    ]
+                },
+            )
+        if request.url.host == "api.deezer.com":
+            deezer_calls.append(request)
+            return httpx.Response(200, json={"data": [], "total": 0})
+        raise AssertionError(f"unexpected host: {request.url.host}")
+
+    def connector_factory() -> httpx.BaseTransport:
+        return httpx.MockTransport(_dispatch)
+
+    class _EventStore:
+        def save(self, _key: object, _value: str) -> None:
+            raise AssertionError("unused")
+
+        def load(self, _key: object) -> str | None:
+            return None
+
+        def delete(self, _key: object) -> None:
+            raise AssertionError("unused")
+
+    monkeypatch.setattr(cli, "_spotify_source", _refuse_spotify_source)
+
+    from music_friend.domain import (
+        Artist,
+        IdentityConfidence,
+        SourceReference,
+        WatchlistAction,
+        WatchlistOverride,
+    )
+
+    application = MusicFriendApplication(Catalog.open(tmp_path / "catalog.sqlite3"))
+    # Pre-seed a musicbrainz identity (as an earlier musicbrainz-only refresh
+    # would have already resolved) so this run's deezer url-rel mapping step is
+    # eligible immediately, instead of requiring a second refresh cycle.
+    artist = Artist(
+        "artist-1",
+        "Artist One",
+        (
+            SourceReference("spotify", "artist-native", None, NOW),
+            SourceReference("musicbrainz", synthetic_mbid, None, NOW),
+        ),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+    application.put_artist(artist)
+    application.put_watchlist_override(WatchlistOverride("artist-1", WatchlistAction.ADD, NOW))
+    stdout, stderr = io.StringIO(), io.StringIO()
+    try:
+        result = cli.run_cli(
+            ["refresh", "releases", "--json"],
+            stdout=stdout,
+            stderr=stderr,
+            application=application,
+            config_store=_ConfigStore(LocalConfig(release_sources=("musicbrainz", "deezer"))),
+            secret_prompt=lambda _message: "",
+            connector_factory=connector_factory,
+            credential_store_factory=lambda: _EventStore(),  # type: ignore[arg-type]
+        )
+    finally:
+        application.close()
+
+    assert result == 0, f"stdout={stdout.getvalue()!r} stderr={stderr.getvalue()!r}"
+    payload = json.loads(stdout.getvalue())
+    assert payload["status"] == "succeeded"
+    assert stderr.getvalue() == ""
+    # Both configured sources were actually reached over the network (proving
+    # runtime wiring, not just config acceptance), and _refuse_spotify_source
+    # never fired (proving Spotify was never touched).
+    assert musicbrainz_calls
+    assert deezer_calls

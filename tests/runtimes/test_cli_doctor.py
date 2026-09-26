@@ -313,6 +313,7 @@ def test_doctor_reports_unmapped_artists_for_a_non_empty_watchlist_without_raisi
 
     payload = json.loads(stdout)
     assert payload["release_source"] == {
+        "sources": ["musicbrainz"],
         "source": "musicbrainz",
         "unmapped_artists": 1,
         "remedy": "Run 'music-friend refresh releases' to map artists",

@@ -21,7 +21,7 @@ import time
 import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
 from urllib.parse import quote
@@ -1875,27 +1875,78 @@ class Catalog:
         artist_local_id: str,
         normalized_title: str,
         release_date: date,
+        date_precision: ReleaseDatePrecision | None = None,
     ) -> ReleaseDiscovery | None:
-        """Find an obvious same-artist/title/date release variant without a new candidate."""
-        row = (
+        """Find an obvious same-artist/title/date release variant without a new candidate.
+
+        Source-agnostic (issue #42): a release discovered via one source and
+        later discovered again via a different source (e.g. MusicBrainz then
+        Deezer) is the same real-world release, so this no longer filters by
+        ``discovery.source`` -- the ``source`` argument is accepted for call-site
+        compatibility but unused for matching.
+
+        Also accepts a stored release date that differs by exactly one day
+        (either direction) from ``release_date``, since a day-precision
+        discrepancy between two independently-edited catalogs is exactly the
+        kind of variant this lookup exists to catch -- but only "when BOTH
+        sides have day precision" (issue #42's authoritative resolution of a
+        conflict with an earlier design-doc draft that said "either": a false
+        merge hides a real release from the inbox, which is worse than an
+        occasional duplicate, so the widening is deliberately conservative).
+        A year- or month-precision date is normalized to that period's first
+        day, so a naive one-day widening against it would spuriously match an
+        unrelated day-precision release landing on the 2nd of the same
+        period. ``date_precision`` is the incoming candidate's precision; the
+        stored side's precision is read from the ``releases`` table it points
+        at. The widening applies only when BOTH the incoming candidate and
+        the stored release are ``DAY`` precision; when ``date_precision`` is
+        omitted (legacy callers) or either side is not ``DAY``, only an exact
+        date match is considered. An exact match is always preferred and
+        returned first when both an exact and a one-day-off match exist.
+        """
+        _ = source  # unused: matching is source-agnostic, see docstring
+        one_day = timedelta(days=1)
+        incoming_is_day = date_precision is ReleaseDatePrecision.DAY
+        candidate_dates = (
+            (release_date, release_date - one_day, release_date + one_day)
+            if incoming_is_day
+            else (release_date,)
+        )
+        placeholders = ",".join("?" for _ in candidate_dates)
+        rows = (
             self._require_connection()
             .execute(
-                """
+                f"""
                 SELECT discovery.release_local_id, discovery.source, discovery.provider_native_id,
                        discovery.normalized_title, discovery.release_date, discovery.material_identity,
-                       discovery.first_seen_at, discovery.last_seen_at
+                       discovery.first_seen_at, discovery.last_seen_at, release.date_precision
                 FROM release_discoveries AS discovery
                 JOIN release_artists AS artist ON artist.release_id = discovery.release_local_id
-                WHERE discovery.source = ? AND artist.artist_id = ?
-                  AND discovery.normalized_title = ? AND discovery.release_date = ?
-                ORDER BY discovery.release_local_id
-                LIMIT 1
+                JOIN releases AS release ON release.local_id = discovery.release_local_id
+                WHERE artist.artist_id = ?
+                  AND discovery.normalized_title = ?
+                  AND discovery.release_date IN ({placeholders})
+                ORDER BY
+                    CASE WHEN discovery.release_date = ? THEN 0 ELSE 1 END,
+                    discovery.release_local_id
                 """,
-                (source, artist_local_id, normalized_title, release_date.isoformat()),
+                (
+                    artist_local_id,
+                    normalized_title,
+                    *(candidate.isoformat() for candidate in candidate_dates),
+                    release_date.isoformat(),
+                ),
             )
-            .fetchone()
+            .fetchall()
         )
-        return None if row is None else self._release_discovery_from_row(row)
+        for row in rows:
+            stored_date = date.fromisoformat(str(row[4]))
+            if stored_date == release_date:
+                return self._release_discovery_from_row(row[:8])
+            stored_is_day = ReleaseDatePrecision(str(row[8])) is ReleaseDatePrecision.DAY
+            if incoming_is_day and stored_is_day:
+                return self._release_discovery_from_row(row[:8])
+        return None
 
     @staticmethod
     def _release_discovery_from_row(row: tuple[object, ...]) -> ReleaseDiscovery:

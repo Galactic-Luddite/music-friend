@@ -12,7 +12,7 @@ import music_friend._local_files as local_files
 from music_friend.configuration import LocalConfig, LocalConfigStore
 
 
-def test_local_config_round_trips_only_v3_nonsecret_location_settings(tmp_path: Path) -> None:
+def test_local_config_round_trips_only_v4_nonsecret_location_settings(tmp_path: Path) -> None:
     """Adding arbitrary fields would permit plaintext credential persistence."""
     store = LocalConfigStore(config_dir=tmp_path)
     config = LocalConfig(
@@ -21,7 +21,7 @@ def test_local_config_round_trips_only_v3_nonsecret_location_settings(tmp_path: 
         event_postal_code="94000",
         event_radius=20,
         event_radius_unit="miles",
-        release_source=None,
+        release_sources=("musicbrainz", "deezer"),
     )
 
     store.save(config)
@@ -32,15 +32,15 @@ def test_local_config_round_trips_only_v3_nonsecret_location_settings(tmp_path: 
         "event_postal_code": "94000",
         "event_radius": 20,
         "event_radius_unit": "miles",
-        "release_source": None,
+        "release_sources": ["musicbrainz", "deezer"],
         "spotify_client_id": "public-client-id",
-        "version": 3,
+        "version": 4,
     }
     assert store.path.stat().st_mode & 0o777 == 0o600
 
 
-def test_v2_config_loads_and_is_rewritten_as_v3(tmp_path: Path) -> None:
-    """A version-2 file should load with release_source=None and be upgraded to v3."""
+def test_v2_config_loads_and_is_rewritten_as_v4(tmp_path: Path) -> None:
+    """A version-2 file should load with the default release_sources and be upgraded to v4."""
     store = LocalConfigStore(config_dir=tmp_path)
     # Write a v2 config directly
     store.path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,24 +58,105 @@ def test_v2_config_loads_and_is_rewritten_as_v3(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    # Load should work and return with release_source=None
     loaded = store.load()
-    assert loaded.release_source is None
+    assert loaded.release_sources == ("musicbrainz",)
     assert loaded.spotify_client_id == "public-client-id"
 
-    # Save should upgrade to v3
+    # Save should upgrade to v4
     store.save(loaded)
     saved_json = json.loads(store.path.read_text(encoding="utf-8"))
-    assert saved_json["version"] == 3
-    assert "release_source" in saved_json
-    assert saved_json["release_source"] is None
+    assert saved_json["version"] == 4
+    assert saved_json["release_sources"] == ["musicbrainz"]
+
+
+def test_v3_config_with_scalar_release_source_loads_and_is_rewritten_as_v4(
+    tmp_path: Path,
+) -> None:
+    """A version-3 file's scalar release_source becomes a one-element v4 tuple."""
+    store = LocalConfigStore(config_dir=tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "event_country_code": None,
+                "event_postal_code": None,
+                "event_radius": None,
+                "event_radius_unit": None,
+                "release_source": "spotify",
+                "spotify_client_id": None,
+                "version": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = store.load()
+    assert loaded.release_sources == ("spotify",)
+
+    store.save(loaded)
+    saved_json = json.loads(store.path.read_text(encoding="utf-8"))
+    assert saved_json["version"] == 4
+    assert saved_json["release_sources"] == ["spotify"]
+
+
+def test_v3_config_with_null_release_source_migrates_to_the_default(tmp_path: Path) -> None:
+    """A version-3 file with release_source=null becomes the v4 default tuple."""
+    store = LocalConfigStore(config_dir=tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "event_country_code": None,
+                "event_postal_code": None,
+                "event_radius": None,
+                "event_radius_unit": None,
+                "release_source": None,
+                "spotify_client_id": None,
+                "version": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert store.load().release_sources == ("musicbrainz",)
+
+
+def test_local_config_accepts_deezer_in_release_sources() -> None:
+    """Deezer is now an allowed release source (issue #42)."""
+    config = LocalConfig(release_sources=("musicbrainz", "deezer"))
+    assert config.release_sources == ("musicbrainz", "deezer")
 
 
 def test_local_config_rejects_unknown_release_source() -> None:
-    """Unknown release_source values must be rejected."""
+    """Unknown release_sources values must be rejected."""
     with pytest.raises(ValueError) as raised:
-        LocalConfig(release_source="deezer")  # type: ignore[arg-type]
-    assert "release_source must be spotify or musicbrainz" in str(raised.value)
+        LocalConfig(release_sources=("spotify", "not-a-source"))
+    assert "release_sources must contain only spotify, musicbrainz, or deezer" in str(raised.value)
+
+
+def test_local_config_rejects_empty_release_sources() -> None:
+    """An empty release_sources tuple would silently disable all release discovery."""
+    with pytest.raises(ValueError) as raised:
+        LocalConfig(release_sources=())
+    assert "release_sources must contain at least one source" in str(raised.value)
+
+
+def test_local_config_rejects_duplicate_release_sources() -> None:
+    """Duplicate entries would make refresh iterate the same source twice."""
+    with pytest.raises(ValueError) as raised:
+        LocalConfig(release_sources=("musicbrainz", "musicbrainz"))
+    assert "release_sources must not contain duplicates" in str(raised.value)
+
+
+def test_removing_deezer_from_release_sources_disables_it_with_no_migration(
+    tmp_path: Path,
+) -> None:
+    """Dropping deezer from the tuple is a plain config edit, not a schema change."""
+    store = LocalConfigStore(config_dir=tmp_path)
+    store.save(LocalConfig(release_sources=("musicbrainz", "deezer")))
+    store.save(LocalConfig(release_sources=("musicbrainz",)))
+
+    assert store.load().release_sources == ("musicbrainz",)
 
 
 def test_legacy_v1_config_is_rejected_without_echoing_its_contents(tmp_path: Path) -> None:

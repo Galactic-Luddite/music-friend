@@ -17,7 +17,8 @@ Music Friend is built to be used by an AI assistant, not through its own interfa
 (Claude Code, Claude Desktop, Codex, or another stdio client) starts `music-friend-mcp` as a child
 process on the same computer when a conversation needs it, calls its tools, and stops it when the
 session ends. There is no resident service, port, or hosted component: the assistant reads the
-local catalog directly, and only `refresh_music` reaches out to Spotify, MusicBrainz, or Ticketmaster, read-only.
+local catalog directly, and only `refresh_music` reaches out to Spotify, MusicBrainz, Deezer, or
+Ticketmaster, read-only.
 
 Because the server runs on your computer, register it on the machine that holds your Music Friend
 data and credentials. Run `music-friend doctor` there first; the server needs an approved native
@@ -32,21 +33,22 @@ tools and their schemas from the local server; it does not need provider-specifi
 
 Music Friend exposes exactly these eleven tools. Every tool works with local identifiers and bounded
 arguments, never raw provider identifiers. "Local write" means the tool changes only your local
-catalog; "provider contact" means it makes read-only network requests to Spotify, MusicBrainz, or Ticketmaster.
+catalog; "provider contact" means it makes read-only network requests to Spotify, MusicBrainz,
+Deezer, or Ticketmaster.
 
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
 | `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `source_limits.spotify` (`ready`, `state`, `retry_at`), and MusicBrainz `identity` mapping counts when configured | read-only, local |
 | `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all`; `force` (boolean, default `false`) | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
-| `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries; MusicBrainz entries include `release_source_status` (`mapped` or `unmapped`) | read-only, local |
+| `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries; entries include `release_source_status` (`mapped` or `unmapped`) for the first configured identity-mapped source (MusicBrainz or Deezer) | read-only, local |
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove`; optional `source_ids` mapping source names to user-confirmed identifiers | the applied decision, or `not_found` | local write |
 | `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries, each with a `summary` (`kind`, `title`, `artist_names`, `date`) so most requests need no follow-up call | read-only, local |
 | `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry (including its `summary`), or `not_found` | local write |
 | `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry` (with `summary`), `record` (with `artist_names` alongside `artist_ids`), and `reasons` (why it was included) | read-only, local |
 | `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
-| `get_setup` | Query Music Friend configuration state and completion status | none | configured fields (Spotify ID, event area fields, `release_source`), which fields are missing, whether setup is complete for MCP readiness | read-only, local |
-| `update_setup` | Update Music Friend configuration fields (non-secrets only) | `client_id`, `event_country_code`, `event_postal_code`, `event_radius`, `event_radius_unit`, `release_source` (all optional; pass null to leave unchanged) | updated configuration state, or instructions to use CLI for secrets | local write |
+| `get_setup` | Query Music Friend configuration state and completion status | none | configured fields (Spotify ID, event area fields, `release_sources`), which fields are missing, whether setup is complete for MCP readiness | read-only, local |
+| `update_setup` | Update Music Friend configuration fields (non-secrets only) | `client_id`, `event_country_code`, `event_postal_code`, `event_radius`, `event_radius_unit`, `release_sources` (an ordered array chosen from `spotify`, `musicbrainz`, `deezer`; all optional, pass null to leave unchanged) | updated configuration state, or instructions to use CLI for secrets | local write |
 
 A tool returns a `category` of `invalid_arguments`, `not_found`, or `internal_error` instead of a
 result when it cannot complete the request. Error messages are redacted and never include provider

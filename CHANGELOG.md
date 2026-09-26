@@ -2,7 +2,20 @@
 
 ## [Unreleased]
 
-- Added MusicBrainz as the default release source; use `--release-source` to configure it.
+- Added MusicBrainz as the default release source; use `--release-sources` to configure it.
+- `release_source` is now `release_sources`, an ordered tuple of `spotify`, `musicbrainz`, and/or
+  `deezer` (config version 3 -> 4; a version-3 file's scalar `release_source` migrates to a
+  one-element tuple, or the `musicbrainz` default when it was null). Added Deezer as an optional,
+  feature-flagged release-timeliness source layered on top of MusicBrainz: keyless, paced at 10
+  requests / 5 seconds, with artist identities resolved only from the MusicBrainz url-relationship
+  lookup (no Deezer name search). `refresh_music` now iterates every configured release source in
+  order with independent pacing, so a Deezer rate limit or outage never blocks MusicBrainz results,
+  and the refresh result reports which additional source, if any, was partial. Cross-source release
+  dedupe: the same release discovered via two different sources (matching artist, normalized title,
+  and release date within one day) becomes one release with both sources' references attached
+  instead of a duplicate release and inbox item. `--release-source` (singular) and the MCP
+  `update_setup`/`get_setup` `release_source` field are replaced by `--release-sources` and
+  `release_sources` respectively.
 
 - Catalog sync (`refresh catalog` / `refresh all`, and the MCP `refresh_music` tool) now skips a
   capability (followed artists, saved items, each top-items time range) that completed

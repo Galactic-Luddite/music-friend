@@ -65,6 +65,12 @@ def bundled_migrations() -> tuple[Migration, ...]:
             12,
             schema.joinpath("012_source_reference_confidence.sql").read_text(encoding="utf-8"),
         ),
+        Migration(
+            13,
+            schema.joinpath("013_cross_source_release_variant_lookup.sql").read_text(
+                encoding="utf-8"
+            ),
+        ),
     )
 
 

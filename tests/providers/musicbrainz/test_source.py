@@ -520,3 +520,67 @@ def test_search_artist_by_name_propagates_rate_limited_error() -> None:
     source = _source(transport)
     with pytest.raises(RateLimitedError):
         source.search_artist_by_name("Synthetic Artist")
+
+
+def test_deezer_artist_id_extracts_a_single_relation() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue(
+        {
+            "relations": [
+                {
+                    "type": "free streaming",
+                    "url": {"resource": "https://open.spotify.com/artist/x"},
+                },
+                {
+                    "type": "free streaming",
+                    "url": {"resource": "https://www.deezer.com/artist/1000001"},
+                },
+            ]
+        }
+    )
+    source = _source(transport)
+    assert source.deezer_artist_id(mbid) == "1000001"
+    assert transport.calls[0][0] == f"artist/{mbid}"
+    assert transport.calls[0][1]["inc"] == "url-rels"
+
+
+def test_deezer_artist_id_returns_none_for_no_relation() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue({"relations": []})
+    source = _source(transport)
+    assert source.deezer_artist_id(mbid) is None
+
+
+def test_deezer_artist_id_returns_none_for_ambiguous_relations() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue(
+        {
+            "relations": [
+                {"type": "free streaming", "url": {"resource": "https://www.deezer.com/artist/1"}},
+                {"type": "free streaming", "url": {"resource": "https://www.deezer.com/artist/2"}},
+            ]
+        }
+    )
+    source = _source(transport)
+    assert source.deezer_artist_id(mbid) is None
+
+
+def test_deezer_artist_id_rejects_a_malformed_response() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.queue({"relations": "not-a-list"})
+    source = _source(transport)
+    with pytest.raises(InvalidSourceResponseError):
+        source.deezer_artist_id(mbid)
+
+
+def test_deezer_artist_id_propagates_rate_limited() -> None:
+    transport = FakeTransport()
+    mbid = "11111111-1111-1111-1111-111111111111"
+    transport.raise_next(RateLimitedError(30))
+    source = _source(transport)
+    with pytest.raises(RateLimitedError):
+        source.deezer_artist_id(mbid)

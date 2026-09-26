@@ -2291,3 +2291,259 @@ def test_musicbrainz_identity_mapping_rate_limit_records_cooldown_and_stops(
         musicbrainz_limit = application.get_source_limit("musicbrainz")
         assert musicbrainz_limit is not None
         assert musicbrainz_limit.state == SourceLimitState.COOLING_DOWN
+
+
+def _multi_source_artist(native_id: str, name: str = "Artist") -> Artist:
+    """A watchlisted artist carrying both musicbrainz and deezer identities."""
+    return Artist(
+        f"artist:{native_id}",
+        name,
+        (
+            SourceReference("musicbrainz", native_id, None, NOW),
+            SourceReference("deezer", f"deezer-{native_id}", None, NOW),
+        ),
+        IdentityConfidence.EXTERNAL_ID,
+        NOW,
+    )
+
+
+def test_additional_release_source_runs_after_the_primary_source(tmp_path: Path) -> None:
+    """AC: the releases component iterates configured sources in order (issue #42)."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-two", "Two")
+        application.put_artist(artist)
+        application.put_affinity_evidence(
+            AffinityEvidence(
+                f"evidence:{artist.local_id}",
+                artist.local_id,
+                "musicbrainz",
+                AffinityEvidenceKind.FOLLOWED,
+                "mb-two",
+                None,
+                NOW,
+            )
+        )
+        primary = FakeMusicSource()
+        primary.releases[("mb-two", None)] = Page((), None)
+        secondary = FakeMusicSource()
+        secondary.releases[("deezer-mb-two", None)] = Page(
+            (
+                Release(
+                    "release:deezer-mb-two",
+                    "Timely Album",
+                    "album",
+                    date(2026, 8, 15),
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (SourceReference("deezer", "deezer-mb-two", None, NOW),),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        spotify = _AssertNoCallsSource()
+        clock = FakeClock()
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=spotify,
+            release_source_name="musicbrainz",
+            release_source=primary,
+            additional_release_sources=(("deezer", secondary),),
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "succeeded"
+        assert secondary.release_calls == ["deezer-mb-two"]
+        inbox = tuple(application.list_inbox_entries(InboxState.UNREAD, limit=50))
+        assert len(inbox) == 1
+
+
+def test_additional_release_source_failure_does_not_block_the_primary_source(
+    tmp_path: Path,
+) -> None:
+    """AC: Deezer rate limit/outage leaves MusicBrainz results intact and the run
+    reports which source was partial."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-three", "Three")
+        application.put_artist(artist)
+        application.put_affinity_evidence(
+            AffinityEvidence(
+                f"evidence:{artist.local_id}",
+                artist.local_id,
+                "musicbrainz",
+                AffinityEvidenceKind.FOLLOWED,
+                "mb-three",
+                None,
+                NOW,
+            )
+        )
+        primary = FakeMusicSource()
+        primary.releases[("mb-three", None)] = Page(
+            (
+                Release(
+                    "release:mb-three",
+                    "MusicBrainz Album",
+                    "album",
+                    date(2026, 8, 1),
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (SourceReference("musicbrainz", "rg-three", None, NOW),),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        secondary = FakeMusicSource()
+        secondary.releases[("deezer-mb-three", None)] = RateLimitedError(60)
+        spotify = _AssertNoCallsSource()
+        clock = FakeClock()
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=spotify,
+            release_source_name="musicbrainz",
+            release_source=primary,
+            additional_release_sources=(("deezer", secondary),),
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        # MusicBrainz's own inbox item still exists even though Deezer failed.
+        inbox = tuple(application.list_inbox_entries(InboxState.UNREAD, limit=50))
+        assert len(inbox) == 1
+        assert result.run.status.value == "partial"
+        deezer_limit = application.get_source_limit("deezer")
+        assert deezer_limit is not None
+        assert deezer_limit.state == SourceLimitState.COOLING_DOWN
+
+
+def test_additional_release_source_same_release_produces_exactly_one_inbox_entry(
+    tmp_path: Path,
+) -> None:
+    """AC: the same release discovered via MusicBrainz and Deezer in one refresh
+    run produces exactly one inbox entry -- counted from the actual inbox, not
+    from internal ReleaseCandidate objects."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-shared-one", "SharedOne")
+        application.put_artist(artist)
+        application.put_affinity_evidence(
+            AffinityEvidence(
+                f"evidence:{artist.local_id}",
+                artist.local_id,
+                "musicbrainz",
+                AffinityEvidenceKind.FOLLOWED,
+                "mb-shared-one",
+                None,
+                NOW,
+            )
+        )
+        shared_title = "Shared Timely Album"
+        shared_date = date(2026, 8, 15)
+        primary = FakeMusicSource()
+        primary.releases[("mb-shared-one", None)] = Page(
+            (
+                Release(
+                    "release:musicbrainz:rg-shared-one",
+                    shared_title,
+                    "album",
+                    shared_date,
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (SourceReference("musicbrainz", "rg-shared-one", None, NOW),),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        secondary = FakeMusicSource()
+        secondary.releases[("deezer-mb-shared-one", None)] = Page(
+            (
+                Release(
+                    "release:deezer:al-shared-one",
+                    shared_title,
+                    "album",
+                    shared_date,
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (SourceReference("deezer", "al-shared-one", None, NOW),),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        spotify = _AssertNoCallsSource()
+        clock = FakeClock()
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=spotify,
+            release_source_name="musicbrainz",
+            release_source=primary,
+            additional_release_sources=(("deezer", secondary),),
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "succeeded"
+        assert secondary.release_calls == ["deezer-mb-shared-one"]
+
+        # Exactly one inbox entry -- count real inbox entries, not the internal
+        # ReleaseCandidate list, since the AC is about what actually reaches the
+        # user's inbox.
+        inbox = tuple(application.list_inbox_entries(InboxState.UNREAD, limit=50))
+        assert len(inbox) == 1
+
+        stored_release = application.get_release("release:musicbrainz:rg-shared-one")
+        assert stored_release is not None
+        assert len(stored_release.source_refs) == 2
+        assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
+        assert application.get_release("release:deezer:al-shared-one") is None
+
+
+def test_additional_release_sources_rejects_a_malformed_entry(tmp_path: Path) -> None:
+    """A malformed additional_release_sources entry must be rejected before any I/O."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        with pytest.raises(ValueError):
+            refresh_once(
+                application,
+                kind="releases",
+                source_name="spotify",
+                source=_AssertNoCallsSource(),
+                release_source_name="musicbrainz",
+                release_source=FakeMusicSource(),
+                additional_release_sources=[("deezer", object())],  # type: ignore[list-item]
+                config=_config(),
+                event_client=None,
+                checked_at=NOW,
+                lock_path=tmp_path / "lock",
+            )
