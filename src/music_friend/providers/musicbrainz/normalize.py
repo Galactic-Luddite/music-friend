@@ -7,6 +7,9 @@ from datetime import date, datetime
 from hashlib import sha256
 
 from music_friend.domain import IdentityConfidence, Release, ReleaseDatePrecision, SourceReference
+from music_friend.domain.text import sanitize_display_name
+
+_TEXT_LIMIT = 96
 
 
 def normalize_release_group(
@@ -28,7 +31,7 @@ def normalize_release_group(
     try:
         # Extract required fields
         rgid = _require_text(release_group.get("id"), "id")
-        title = _require_text(release_group.get("title"), "title")
+        title = _require_display_text(release_group.get("title"), "title")
         primary_type = release_group.get("primary-type")
         if not primary_type or not isinstance(primary_type, str):
             return None
@@ -134,6 +137,16 @@ def _require_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _require_display_text(value: object, field: str) -> str:
+    """Require non-empty provider display text, sanitized against untrusted framing."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a non-empty string")
+    sanitized = sanitize_display_name(value, limit=_TEXT_LIMIT)
+    if not sanitized.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return sanitized
 
 
 def _local_id_for(domain: str, kind: str, native_id: str) -> str:
