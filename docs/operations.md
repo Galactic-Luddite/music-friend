@@ -104,12 +104,13 @@ it; a later refresh resumes where it stopped. See [provider limits](limits.md).
 
 ### Adaptive request pacing
 
-Each source has a learned per-window request rate, stored locally and carried from run to run. A
-429 halves it; a streak of successful requests slowly grows it back, up to the built-in ceiling.
+Spotify's request rate is learned per 30-second window, stored locally and carried from run to
+run. A 429 halves it; a streak of successful requests slowly grows it back, up to the built-in ceiling.
 This means a large library converges on the fastest rate Spotify will accept instead of retrying
 at a fixed pace every run. When a fallback delay is estimated (no exact `Retry-After` from the
 provider), it is jittered within its ladder step so multiple installs recovering at the same time
-do not retry in lockstep.
+do not retry in lockstep. MusicBrainz is not learned: it always runs at its documented one request
+per second, and a stored rate from an earlier version never slows it down.
 
 Release discovery also skips an artist entirely -- no source request -- when its releases were
 successfully checked within the last 20 hours, so a second full refresh soon after the first makes
@@ -138,7 +139,9 @@ requests because it failed early".
 
 A `partial` refresh result includes three extra fields when the cause is known:
 
-- `reason`: `rate_limited`, `quota_exhausted`, or `deadline`.
+- `reason`: `rate_limited`, `quota_exhausted`, `deadline` (the ten-minute refresh deadline was
+  reached), or `source_errors` (some artists or capabilities failed while others succeeded). Every
+  `partial` result carries a `reason`.
 - `retry_after`: an ISO-8601 timestamp for when the source is expected to be ready again (only for
   `rate_limited`; omitted for `quota_exhausted`, which has no known reset time, and `deadline`).
 - `remaining`: how many records this run skipped rather than completing.
@@ -148,6 +151,17 @@ The text (non-`--json`) output appends them to the summary line, for example:
 ```text
 Refresh releases: partial. reason=rate_limited retry_after=2026-09-24T18:05:00+00:00 remaining=6
 ```
+
+A refresh started while another one holds the local refresh lock makes no provider request and
+reports `{"status": "partial", "reason": "already_running", "retry_after": "..."}`, where
+`retry_after` is when the held lock becomes stale and can be taken over (omitted if the lock file
+is unreadable).
+
+The `source_requests` metric counts every provider request the run made -- Spotify, MusicBrainz
+(identity mapping included), Deezer, and Ticketmaster. `signals_repaired` counts inbox signals
+reconstructed at the start of a run for discoveries an earlier, interrupted run committed without
+their signal; they are reported separately so `signals_created` counts only the current run's own
+findings.
 
 `status --json` and the MCP `music_status` tool both report a `source_limits.spotify` block so a
 caller can tell whether the source is ready now or when it will be, without starting a refresh.

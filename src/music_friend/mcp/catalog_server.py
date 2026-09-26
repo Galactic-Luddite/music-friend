@@ -1132,7 +1132,10 @@ def _refresh_result(value: object) -> dict[str, object]:
     remaining = getattr(value, "remaining", None)
     if type(already_running) is bool:
         if already_running:
-            return {"status": "partial"}
+            busy: dict[str, object] = {"status": "partial", "reason": "already_running"}
+            if retry_after is not None:
+                busy["retry_after"] = retry_after
+            return busy
         if run is None and skip_reason is not None:
             return {"status": "skipped", "reason": skip_reason}
         if isinstance(run, RefreshRun):

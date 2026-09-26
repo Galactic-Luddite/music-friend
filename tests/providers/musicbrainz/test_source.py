@@ -15,6 +15,10 @@ from music_friend.errors import (
 )
 from music_friend.providers import Capability
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
+from tests.providers.musicbrainz.live_fixtures import (
+    LIVE_SEARCH_ARTIST_MBID,
+    load_live_release_group_search,
+)
 
 FIXED_NOW = datetime(2026, 9, 26, tzinfo=timezone.utc)
 
@@ -342,27 +346,29 @@ def test_recent_releases_falls_back_to_offset_zero_for_a_malformed_cursor() -> N
     assert transport.calls[0][1]["offset"] == "0"
 
 
-def test_recent_releases_emits_a_next_cursor_when_more_results_remain() -> None:
+def test_recent_releases_emits_a_next_cursor_from_the_live_search_count() -> None:
+    """Issue #49: the /ws/2/release-group search response carries its total in
+    ``count``, not ``release-group-count``. The page below is a verbatim live
+    response (2 of 196 rows), so the next cursor must be the next offset."""
+    live = load_live_release_group_search()
+    assert "release-group-count" not in live
+    assert live["count"] > len(live["release-groups"])
     transport = FakeTransport()
-    mbid = "11111111-1111-1111-1111-111111111111"
-    transport.queue(
-        {
-            "release-groups": [
-                {
-                    "id": "rg-1",
-                    "title": "Album One",
-                    "primary-type": "Album",
-                    "first-release-date": "2026-05-01",
-                    "score": 100,
-                    "artist-credit": [{"artist": {"id": mbid}}],
-                }
-            ],
-            "release-group-count": 5,
-        }
-    )
+    transport.queue(live)
     source = _source(transport)
-    page = source.recent_releases((_mb_ref(mbid),), FIXED_NOW)
-    assert page.next_cursor == "1"
+    page = source.recent_releases((_mb_ref(LIVE_SEARCH_ARTIST_MBID),), FIXED_NOW)
+    assert page.next_cursor == str(len(live["release-groups"]))
+    assert transport.calls[0][1]["limit"] == "100"
+
+
+def test_recent_releases_stops_on_an_empty_page_even_when_count_claims_more() -> None:
+    live = load_live_release_group_search()
+    transport = FakeTransport()
+    transport.queue({**live, "offset": 2, "release-groups": []})
+    source = _source(transport)
+    page = source.recent_releases((_mb_ref(LIVE_SEARCH_ARTIST_MBID),), FIXED_NOW, cursor="2")
+    assert page.items == ()
+    assert page.next_cursor is None
 
 
 def test_recent_releases_rejects_a_non_list_release_groups_field() -> None:

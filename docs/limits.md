@@ -17,9 +17,15 @@ expire before resuming. If the artist is no longer on the watchlist, discovery r
 current watchlist. Completing the watchlist clears the interrupted state. Source-limit state is
 included in exports and imports.
 
-MusicBrainz is the default release source. It requires no API key; Music Friend spaces MusicBrainz
-requests at no more than one request per second and records bounded partial outcomes if a refresh
-cannot complete.
+MusicBrainz is the default release source. It requires no API key; Music Friend paces MusicBrainz
+at a steady one request per second, its documented rate, and records bounded partial outcomes if a
+refresh cannot complete. A MusicBrainz `503` pauses for its `Retry-After` or ends the run with a
+recorded cooldown, but never lowers the steady rate for the rest of the run or for later runs.
+Release discovery reads at most five result pages per artist per run, whether or not their rows are
+kept, and resumes from where it stopped on the next run.
+
+Every refresh, of any kind, ends within a ten-minute deadline measured on a clock that keeps
+counting while the computer sleeps.
 
 Deezer is an optional, feature-flagged release source layered on top of MusicBrainz for
 timelier releases; enable it by adding `deezer` to `release_sources` (see docs/setup.md). It

@@ -343,10 +343,14 @@ class MusicBrainzSource:
         # Sort by first-release-date descending (client-side)
         releases.sort(key=lambda r: r.release_date, reverse=True)
 
-        # Determine if there's a next page
+        # Determine if there's a next page. The /ws/2/release-group *search* response
+        # carries its total in "count" (verified against a live response recorded in
+        # tests/providers/musicbrainz/fixtures/); "release-group-count" is the key of
+        # the browse endpoint, which this query does not use. An empty page never
+        # continues, so a total that disagrees with the rows served cannot loop.
         next_cursor = None
-        count = response.get("release-group-count")
-        if isinstance(count, int):
+        count = response.get("count")
+        if isinstance(count, int) and release_groups:
             next_offset = offset + len(release_groups)
             if next_offset < count:
                 next_cursor = str(next_offset)

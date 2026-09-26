@@ -35,15 +35,15 @@ class MusicBrainzTransport:
         *,
         user_agent: str,
         connector: httpx.BaseTransport | None = None,
-        clock: Callable[[], float] = time.monotonic,
-        sleeper: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         if type(user_agent) is not str or not user_agent.strip():
             raise ValueError("user_agent must be a non-empty string")
         self._user_agent = user_agent.strip()
         self._pacing: _PacingState | None = None
-        self._clock = clock
-        self._sleep = sleeper
+        self._clock = time.monotonic if clock is None else clock
+        self._sleep = time.sleep if sleeper is None else sleeper
         self._client = (
             httpx.Client(timeout=_MAX_CALL_SECONDS)
             if connector is None

@@ -1239,7 +1239,10 @@ def _refresh_payload(value: object) -> dict[str, object]:
         return dict(value)
     if isinstance(value, RefreshInvocation):
         if value.already_running:
-            return {"status": "partial"}
+            busy: dict[str, object] = {"status": "partial", "reason": "already_running"}
+            if value.retry_after is not None:
+                busy["retry_after"] = value.retry_after
+            return busy
         if value.run is None and value.skip_reason is not None:
             return {"status": "skipped", "reason": value.skip_reason}
         if value.run is not None:
