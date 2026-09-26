@@ -69,11 +69,19 @@ from music_friend.tools.release_discovery import (
 
 _DEADLINE_SECONDS = 600
 _LOCK_STALE_AFTER = timedelta(seconds=_DEADLINE_SECONDS)
+#: Spotify's pause budget: an adaptive source that keeps hitting limits after two
+#: short pauses is treated as genuinely rate-limited for this run, not transiently
+#: shedding load, so it stops and persists a cooldown instead of spinning further.
 _MAX_LIMIT_PAUSES = 2
 #: AIMD recovery: this many consecutive successful requests earns back one call
 #: per window, up to the profile's maximum.
 _RECOVERY_STREAK = 5
 _FALLBACK_LADDER = (60, 120, 240, 480, 900)
+#: MusicBrainz's own docs describe a 503 as transient load shedding at the documented
+#: 1 req/s pace, not a signal to back off further: a short, capped ladder keeps retries
+#: brief so an unbounded pause budget (see ``_PacingProfile.max_pauses``) still finishes
+#: a normal watchlist inside the refresh deadline instead of idling on a long sleep.
+_MUSICBRAINZ_FALLBACK_LADDER = (2, 4, 8)
 #: Tolerance for comparing monotonic timestamps, so a sleep that lands a hair short of
 #: a window boundary (float rounding) never turns into a zero-length sleep loop.
 _CLOCK_EPSILON = 1e-6
@@ -87,19 +95,52 @@ class _PacingProfile:
     grown back after a success streak) and persists it for the next run. A fixed
     profile always runs at ``max_calls`` per window: a limit response still pauses or
     stops the run and records the cooldown, but never lowers the steady rate.
+
+    ``max_pauses`` bounds how many times a single limit response may pause-and-retry
+    before the source gives up and stops for the run; ``None`` means the pause budget
+    is unlimited (bounded only by the shared refresh deadline and ``pause_delay_cap``).
+    ``pause_delay_cap`` is the longest single pause this profile will sleep through
+    before treating the delay as a real stop instead of a retryable pause.
+    ``fallback_ladder`` is the escalating backoff used when a limit response carries
+    no exact retry-after.
     """
 
     window_seconds: float
     min_calls: int
     max_calls: int
     adaptive: bool
+    max_pauses: int | None
+    pause_delay_cap: float
+    fallback_ladder: tuple[int, ...]
 
 
-#: Spotify publishes no fixed rate, so its budget is learned per 30-second window.
-_ADAPTIVE_PROFILE = _PacingProfile(30.0, MIN_SOURCE_WINDOW_CALLS, MAX_SOURCE_WINDOW_CALLS, True)
+#: Spotify publishes no fixed rate, so its budget is learned per 30-second window. It
+#: keeps the historical two-pause budget: repeated limits past that mean it is really
+#: rate-limited this run, not transiently shedding load.
+_ADAPTIVE_PROFILE = _PacingProfile(
+    30.0,
+    MIN_SOURCE_WINDOW_CALLS,
+    MAX_SOURCE_WINDOW_CALLS,
+    True,
+    max_pauses=_MAX_LIMIT_PAUSES,
+    pause_delay_cap=60.0,
+    fallback_ladder=_FALLBACK_LADDER,
+)
 #: MusicBrainz documents a steady 1 request per second per client; pacing below that
-#: only makes a normal daily run miss the refresh deadline.
-_MUSICBRAINZ_PROFILE = _PacingProfile(1.0, 1, 1, False)
+#: only makes a normal daily run miss the refresh deadline. A 503 there is documented,
+#: transient load shedding meant to be retried at the same 1 req/s pace, so this
+#: profile's pause budget is unbounded (see ``_PacingProfile.max_pauses``): it keeps
+#: pausing and retrying, honoring an exact Retry-After when the server sends one, until
+#: either the whole watchlist is checked or the shared refresh deadline arrives.
+_MUSICBRAINZ_PROFILE = _PacingProfile(
+    1.0,
+    1,
+    1,
+    False,
+    max_pauses=None,
+    pause_delay_cap=30.0,
+    fallback_ladder=_MUSICBRAINZ_FALLBACK_LADDER,
+)
 
 
 def _pacing_profile(source_name: str) -> _PacingProfile:
@@ -345,7 +386,8 @@ class _PacedSource:
                     delay = float(error.retry_after_seconds)
                 else:
                     self._estimated_limits += 1
-                    base = _FALLBACK_LADDER[min(self._estimated_limits - 1, 4)]
+                    ladder = self.profile.fallback_ladder
+                    base = ladder[min(self._estimated_limits - 1, len(ladder) - 1)]
                     delay = _jittered_delay(base, self.rng)
                 self.limit_observation = SourceLimitObservation(
                     self.source_name,
@@ -357,7 +399,13 @@ class _PacedSource:
                     self.window_calls,
                 )
                 remaining = _DEADLINE_SECONDS - (self.monotonic() - self.started_at)
-                if delay <= 60 and self.pauses < _MAX_LIMIT_PAUSES and delay < remaining:
+                max_pauses = self.profile.max_pauses
+                within_pause_budget = max_pauses is None or self.pauses < max_pauses
+                if (
+                    delay <= self.profile.pause_delay_cap
+                    and within_pause_budget
+                    and delay < remaining
+                ):
                     self.pauses += 1
                     self.sleeper(float(delay))
                     continue

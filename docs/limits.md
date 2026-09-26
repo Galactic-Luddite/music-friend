@@ -8,9 +8,13 @@ artist; any remaining work is reported as partial rather than complete.
 Music Friend spaces music-source requests across a rolling window and records request and
 rate-limit pause counts in each refresh summary. When a source asks for a short pause, the refresh
 may retry the same request within its ten-minute budget. Missing or invalid retry guidance uses a
-bounded exponential estimate of 60, 120, 240, 480, and then 900 seconds. A refresh pauses at most
-twice; longer waits, exhausted pause allowance, quota exhaustion, or an insufficient remaining
-budget return a partial result.
+bounded exponential estimate. For Spotify, that estimate is 60, 120, 240, 480, and then 900
+seconds, and a refresh pauses for it at most twice; longer waits, an exhausted pause allowance,
+quota exhaustion, or an insufficient remaining budget return a partial result. MusicBrainz's own
+documented `503` behavior is different: its pause budget is not capped by count, only by the
+ten-minute deadline and a short per-pause ceiling, so a run keeps retrying at the steady one
+request per second until either the watchlist finishes or the deadline arrives (see the
+MusicBrainz paragraph below).
 
 Release refreshes remember an interrupted artist. A later refresh waits for an active cooldown to
 expire before resuming. If the artist is no longer on the watchlist, discovery restarts with the
@@ -19,10 +23,17 @@ included in exports and imports.
 
 MusicBrainz is the default release source. It requires no API key; Music Friend paces MusicBrainz
 at a steady one request per second, its documented rate, and records bounded partial outcomes if a
-refresh cannot complete. A MusicBrainz `503` pauses for its `Retry-After` or ends the run with a
-recorded cooldown, but never lowers the steady rate for the rest of the run or for later runs.
-Release discovery reads at most five result pages per artist per run, whether or not their rows are
-kept, and resumes from where it stopped on the next run.
+refresh cannot complete. A MusicBrainz `503` is treated as the transient load shedding MusicBrainz
+documents it to be: the refresh pauses and retries at the same steady rate, honoring an exact
+`Retry-After` when the response carries one, for as many pauses as it takes -- there is no fixed
+pause-count cap -- until either the run finishes or the ten-minute deadline arrives. A single pause
+longer than 30 seconds, or one that would not finish before the deadline, ends the run with a
+recorded cooldown instead. Mapping (resolving a watchlisted artist's MusicBrainz identity) and
+release discovery share this same pacing state within one run, so their requests are never paced
+independently and never combine to exceed one request per second. None of this ever lowers the
+steady rate for the rest of the run or for later runs. Release discovery reads at most five result
+pages per artist per run, whether or not their rows are kept, and resumes from where it stopped on
+the next run.
 
 Every refresh, of any kind, ends within a ten-minute deadline measured on a clock that keeps
 counting while the computer sleeps.

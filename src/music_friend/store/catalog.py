@@ -117,25 +117,33 @@ def _normalize_for_match(text: str) -> str:
 
 _SINGLE_SUFFIX = re.compile(r"^(?P<base>.+?)\s*-\s*single\Z")
 _FEAT_CREDIT = re.compile(r"^(?P<base>.+?)\s*\(feat\.?\s+[^()]*\)\Z")
+#: A soundtrack/compilation attribution tag such as "(from Some Film: The Album)" or
+#: "[from Some Film: The Album]" (issue #54): it names where the same recording also
+#: appears, never a different edition of the recording itself, so it is folded away
+#: entirely like a "- Single" suffix or a "(feat. ...)" credit. Requires the literal
+#: "from " lead-in inside the brackets so a "(Deluxe)", "(Live)", "(Acoustic)", or
+#: "(20th Anniversary Edition)" tag -- none of which say "from" -- never matches.
+_FROM_CREDIT = re.compile(r"^(?P<base>.+?)\s*[(\[]from\s+[^()\[\]]*[)\]]\Z", re.IGNORECASE)
 _REMIX_QUALIFIER = re.compile(r"^(?P<base>.+?)\s*\((?P<remixer>[^()]*?)\s*remix\)\Z")
 
 
 def _release_title_variant_key(normalized_title: str) -> tuple[str, str | None]:
-    """Fold decorations that never distinguish genuinely different releases (issue #50).
+    """Fold decorations that never distinguish genuinely different releases (issue #50, #54).
 
     Returns ``(base_title, remixer)``. ``remixer`` is ``None`` when the title carries no
     remix qualifier, the empty string when it carries a *bare* ``(Remix)`` qualifier (a
     wildcard -- see ``_release_title_variants_compatible``), or the named remixer's text
-    otherwise. A trailing ``- Single`` suffix and a ``(feat. ...)`` credit list are folded
-    away entirely first since they never distinguish one release from another with the
-    same base title; deluxe/anniversary/edition tags are deliberately left untouched so a
-    deluxe edition's key stays distinct from the plain release's key.
+    otherwise. A trailing ``- Single`` suffix, a ``(feat. ...)`` credit list, and a
+    ``(from ...)``/``[from ...]`` soundtrack attribution tag are folded away entirely
+    first since none of them ever distinguish one release from another with the same
+    base title; deluxe/anniversary/edition, live, and acoustic tags are deliberately
+    left untouched so those editions' keys stay distinct from the plain release's key.
     """
     folded = normalized_title
     changed = True
     while changed:
         changed = False
-        for pattern in (_SINGLE_SUFFIX, _FEAT_CREDIT):
+        for pattern in (_SINGLE_SUFFIX, _FEAT_CREDIT, _FROM_CREDIT):
             match = pattern.match(folded)
             if match is not None:
                 folded = match.group("base").strip()
