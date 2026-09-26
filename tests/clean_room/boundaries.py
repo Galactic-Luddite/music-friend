@@ -227,6 +227,13 @@ def _artifact_smoke_code(cwd: Path) -> str | None:
     if len(wheels) != 1:
         return None
     database = cwd / "installed" / "catalog.sqlite3"
+    # Imported here (in the test-runner process, from the dev checkout) rather than inside the
+    # generated code, which only has the built wheel on sys.path -- this keeps the expected
+    # migration-version tuple derived from the single bundled_migrations() source of truth
+    # instead of a second hardcoded copy that can drift when a migration is added.
+    from music_friend.store.migrations import bundled_migrations
+
+    expected_versions = [(migration.version,) for migration in bundled_migrations()]
     return (
         "import sys; from pathlib import Path; "
         f"sys.path.insert(0, {str(wheels[0])!r}); "
@@ -234,7 +241,7 @@ def _artifact_smoke_code(cwd: Path) -> str | None:
         f"catalog = Catalog.open(Path({str(database)!r})); "
         "assert catalog._connection.execute("
         "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-        "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]; "
+        f"== {expected_versions!r}; "
         "catalog.close()"
     )
 

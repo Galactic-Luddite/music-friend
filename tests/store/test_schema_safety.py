@@ -15,6 +15,7 @@ from typing import Any, cast
 import pytest
 
 from music_friend.store import Catalog
+from music_friend.store.migrations import bundled_migrations
 
 
 def test_schema_has_no_sensitive_or_raw_content_columns(catalog: Catalog) -> None:
@@ -137,6 +138,9 @@ def test_built_artifacts_contain_and_execute_initial_migration(tmp_path: Path) -
         )
 
     database = tmp_path / "installed" / "catalog.sqlite3"
+    # Derived from bundled_migrations(), the single source of truth for the migration set, so
+    # this expectation can't drift from the actual bundled schema when a migration is added.
+    expected_versions = [(migration.version,) for migration in bundled_migrations()]
     smoke = subprocess.run(
         [
             sys.executable,
@@ -149,7 +153,7 @@ def test_built_artifacts_contain_and_execute_initial_migration(tmp_path: Path) -
                 f"catalog = Catalog.open(Path({str(database)!r})); "
                 "assert catalog._connection.execute("
                 "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-                "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]; "
+                f"== {expected_versions!r}; "
                 "catalog.close()"
             ),
         ],
