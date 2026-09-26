@@ -5,17 +5,17 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import partial
 from hashlib import sha256
 
 from music_friend.domain import (
-    DAILY_REFRESH_MINUTES,
     AffinityEvidence,
     AffinityEvidenceKind,
     Artist,
     CatalogItem,
     CatalogItemBatch,
+    CatalogSyncCursor,
     CatalogSyncResult,
     SourceCapability,
     SourceReference,
@@ -24,14 +24,11 @@ from music_friend.domain import (
 )
 from music_friend.providers import MusicSource, Page
 from music_friend.store import Catalog
+from music_friend.tools.release_discovery import FRESHNESS_TTL
 
-#: An capability that completed successfully within this window makes zero source
-#: requests on a later full run (unless force=True), cutting requests per refresh.
-#: Derived from the scheduled full-refresh cadence with a 4-hour margin so a scheduled run
-#: that starts slightly earlier than the previous interval still treats every capability as
-#: due, instead of silently skipping a whole cycle.
-FRESHNESS_TTL = timedelta(minutes=DAILY_REFRESH_MINUTES) - timedelta(hours=4)
-
+#: A capability that completed successfully within FRESHNESS_TTL (imported from
+#: release_discovery so both refresh steps share exactly one TTL constant derived from
+#: DAILY_REFRESH_MINUTES) makes zero source requests on a later full run, unless force=True.
 _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_SYNC_COUNT = 100_000
 _EVIDENCE_ID_DOMAIN = "music-friend-affinity-evidence-v1"
@@ -144,10 +141,8 @@ def _run_capability(
     checked_at: datetime | None = None,
     force: bool = False,
 ) -> SyncCapabilityResult:
-    # Check if this capability is fresh within the TTL window
+    # Skip the capability entirely when it completed successfully within the TTL.
     if checked_at is not None and not force:
-        from music_friend.domain import CatalogSyncCursor
-
         cursor = catalog.get_catalog_sync_cursor(source_name, capability.value)
         if (
             isinstance(cursor, CatalogSyncCursor)
@@ -169,12 +164,11 @@ def _run_capability(
         status = SyncCapabilityStatus.FAILED
     else:
         status = SyncCapabilityStatus.SUCCESS
-        # Only update cursor on SUCCESS
+        # Only a full success advances the freshness cursor; a failed run must be retried.
         if checked_at is not None:
-            from music_friend.domain import CatalogSyncCursor
-
-            cursor = CatalogSyncCursor(source_name, capability.value, checked_at)
-            catalog.put_catalog_sync_cursor(cursor)
+            catalog.put_catalog_sync_cursor(
+                CatalogSyncCursor(source_name, capability.value, checked_at)
+            )
 
     return SyncCapabilityResult(
         capability,

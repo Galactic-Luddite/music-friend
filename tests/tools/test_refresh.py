@@ -12,11 +12,13 @@ from music_friend.domain import (
     AffinityEvidence,
     AffinityEvidenceKind,
     Artist,
+    CatalogItemBatch,
     Explanation,
     ExplanationReason,
     ExplanationReasonKind,
     IdentityConfidence,
     InboxState,
+    RefreshMetricKind,
     Release,
     ReleaseDatePrecision,
     Signal,
@@ -560,6 +562,73 @@ def test_all_refresh_runs_catalog_before_release_and_event_checks(tmp_path: Path
         assert source.calls[5] == "releases"
         assert events.calls[-1] == "events"
         assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 2
+
+
+def _metric(run: object, kind: RefreshMetricKind) -> int:
+    for metric in run.summary.metrics:  # type: ignore[attr-defined]
+        if metric.kind is kind:
+            return metric.count
+    return 0
+
+
+def test_catalog_refresh_within_ttl_skips_fresh_capabilities_and_reports_the_skip_count(
+    tmp_path: Path,
+) -> None:
+    """A second catalog refresh within the TTL skips every capability and surfaces the count."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        source = FakeMusicSource()
+        source.saved = CatalogItemBatch((), (), None)
+        lock_path = tmp_path / "lock"
+
+        first = _refresh(application, source, kind="catalog", lock_path=lock_path)
+        assert first.run is not None
+        assert _metric(first.run, RefreshMetricKind.CATALOG_SKIPPED_FRESH) == 0
+        first_calls = len(source.calls)
+        assert first_calls == 5  # followed, saved, short/medium/long top-artists
+
+        second = _refresh(
+            application,
+            source,
+            kind="catalog",
+            lock_path=lock_path,
+            checked_at=NOW + timedelta(minutes=5),
+        )
+
+        assert second.run is not None
+        # No new source calls: every capability was fresh and skipped.
+        assert len(source.calls) == first_calls
+        assert _metric(second.run, RefreshMetricKind.CATALOG_SKIPPED_FRESH) == 5
+
+
+def test_catalog_refresh_force_bypasses_the_freshness_skip(tmp_path: Path) -> None:
+    """``force=True`` re-paginates every catalog capability even within the TTL."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        source = FakeMusicSource()
+        source.saved = CatalogItemBatch((), (), None)
+        lock_path = tmp_path / "lock"
+
+        first = _refresh(application, source, kind="catalog", lock_path=lock_path)
+        assert first.run is not None
+        first_calls = len(source.calls)
+
+        second = refresh_once(
+            application,
+            kind="catalog",
+            source_name="spotify",
+            source=source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW + timedelta(minutes=5),
+            lock_path=lock_path,
+            force=True,
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert second.run is not None
+        assert len(source.calls) == first_calls * 2
+        assert _metric(second.run, RefreshMetricKind.CATALOG_SKIPPED_FRESH) == 0
 
 
 def test_refresh_records_partial_success_and_a_redacted_deterministic_summary(

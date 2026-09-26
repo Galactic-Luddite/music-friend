@@ -978,6 +978,7 @@ def _summary(counts: _RefreshCounts) -> RefreshSummary:
         RefreshMetricKind.RECORDS_SKIPPED: counts.records_skipped,
         RefreshMetricKind.SIGNALS_CREATED: counts.signals_created,
         RefreshMetricKind.FAILURES: counts.failures,
+        RefreshMetricKind.CATALOG_SKIPPED_FRESH: counts.catalog_skipped_fresh,
         RefreshMetricKind.LIMIT_PAUSES: counts.limit_pauses,
         RefreshMetricKind.SOURCE_REQUESTS: counts.source_requests,
     }

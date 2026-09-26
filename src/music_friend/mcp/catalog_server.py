@@ -274,7 +274,11 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     },
 }
 
-RefreshCallback = Callable[..., object]  # Accepts (kind) or (kind, force=bool)
+#: A refresh callback takes the selected kind and, optionally, a positional-or-keyword
+#: ``force`` flag. Test doubles in this module's tests commonly pass a single-argument
+#: lambda, so the wider ``Callable[..., object]`` shape stays accurate; ``refresh_music``
+#: calls with ``force`` first and falls back to the one-argument shape on ``TypeError``.
+RefreshCallback = Callable[..., object]
 Clock = Callable[[], datetime]
 
 

@@ -31,6 +31,7 @@ from music_friend.domain import (
     AffinityEvidenceKind,
     AffinityScore,
     Artist,
+    CatalogSyncCursor,
     Event,
     EventDiscovery,
     Explanation,
@@ -1707,10 +1708,8 @@ class Catalog:
                 (source, artist_local_id),
             )
 
-    def put_catalog_sync_cursor(self, cursor: object) -> None:
+    def put_catalog_sync_cursor(self, cursor: CatalogSyncCursor) -> None:
         """Record one capability's completed catalog-sync boundary."""
-        from music_friend.domain import CatalogSyncCursor
-
         if type(cursor) is not CatalogSyncCursor:
             raise ValueError("cursor must be a CatalogSyncCursor")
         with self.transaction():
@@ -1728,12 +1727,8 @@ class Catalog:
                 ),
             )
 
-    def get_catalog_sync_cursor(
-        self, source: str, capability: str
-    ) -> object:  # Returns CatalogSyncCursor | None
+    def get_catalog_sync_cursor(self, source: str, capability: str) -> CatalogSyncCursor | None:
         """Read one capability's last fully successful sync boundary."""
-        from music_friend.domain import CatalogSyncCursor
-
         row = (
             self._require_connection()
             .execute(

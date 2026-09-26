@@ -86,6 +86,7 @@ class RefreshMetricKind(str, Enum):
     RECORDS_SKIPPED = "records_skipped"
     SIGNALS_CREATED = "signals_created"
     FAILURES = "failures"
+    CATALOG_SKIPPED_FRESH = "catalog_skipped_fresh"
     LIMIT_PAUSES = "limit_pauses"
     SOURCE_REQUESTS = "source_requests"
 
