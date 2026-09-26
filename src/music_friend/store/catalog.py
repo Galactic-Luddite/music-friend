@@ -2405,5 +2405,59 @@ class Catalog:
                 (source_name,),
             )
 
+    def put_artist_identity_mapping(
+        self,
+        artist_local_id: str,
+        source: str,
+        status: str,
+        method: str,
+        attempted_at: datetime,
+    ) -> None:
+        """Insert or update an artist identity mapping."""
+        with self.transaction():
+            self._require_connection().execute(
+                """
+                INSERT INTO artist_identity_mappings
+                    (artist_local_id, source, status, method, attempted_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (artist_local_id, source) DO UPDATE SET
+                    status = excluded.status,
+                    method = excluded.method,
+                    attempted_at = excluded.attempted_at
+                """,
+                (artist_local_id, source, status, method, _datetime_text(attempted_at)),
+            )
+
+    def get_artist_identity_mapping(self, artist_local_id: str, source: str) -> dict[str, object] | None:
+        """Retrieve an artist identity mapping."""
+        row = self._require_connection().execute(
+            """
+            SELECT status, method, attempted_at
+            FROM artist_identity_mappings
+            WHERE artist_local_id = ? AND source = ?
+            """,
+            (artist_local_id, source),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": str(row[0]),
+            "method": str(row[1]),
+            "attempted_at": str(row[2]),
+        }
+
+    def get_unmapped_artists_since(self, source: str, before_attempted_at: datetime) -> list[str]:
+        """Get artists marked unmapped before a certain time (eligible for retry)."""
+        rows = self._require_connection().execute(
+            """
+            SELECT DISTINCT artist_local_id
+            FROM artist_identity_mappings
+            WHERE source = ? AND status = 'unmapped' AND attempted_at < ?
+            ORDER BY artist_local_id
+            """,
+            (source, _datetime_text(before_attempted_at)),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
 
 __all__ = ["Catalog"]
