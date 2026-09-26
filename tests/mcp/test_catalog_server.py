@@ -692,6 +692,52 @@ def test_catalog_server_supports_every_watchlist_action_and_missing_artist(tmp_p
     application.close()
 
 
+def test_update_watchlist_source_ids_confirms_musicbrainz_identity_canonically(
+    tmp_path: Path,
+) -> None:
+    """AC: update_watchlist.source_ids sets a USER_CONFIRMED musicbrainz identity
+    that always wins; an uppercase, well-formed MBID input is stored canonically
+    lowercased."""
+    application = _application(tmp_path)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
+    )
+    uppercase_mbid = "1E9C1CCA-8A0B-4C3D-9E7C-3D6D1D0E9F11"
+
+    result = _call(
+        server,
+        "update_watchlist",
+        {"artist_id": "artist-1", "action": "add", "source_ids": {"musicbrainz": uppercase_mbid}},
+    )
+    assert result == {"artist_id": "artist-1", "action": "add"}
+
+    updated = application.get_artist("artist-1")
+    assert updated is not None
+    mb_refs = [ref for ref in updated.source_refs if ref.source == "musicbrainz"]
+    assert len(mb_refs) == 1
+    assert mb_refs[0].native_id == uppercase_mbid.lower()
+    assert mb_refs[0].confidence == IdentityConfidence.USER_CONFIRMED
+    mapping = application._catalog.get_artist_identity_mapping("artist-1", "musicbrainz")
+    assert mapping is not None
+    assert mapping["status"] == "mapped"
+    assert mapping["method"] == "user"
+    application.close()
+
+
+def test_update_watchlist_rejects_a_null_source_ids_value_gracefully(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    server = create_music_server(
+        application, refresh=lambda _kind, force=False: {"status": "succeeded"}, now=lambda: NOW
+    )
+    result = _call(
+        server,
+        "update_watchlist",
+        {"artist_id": "artist-1", "action": "add", "source_ids": None},
+    )
+    assert result == {"artist_id": "artist-1", "action": "add"}
+    application.close()
+
+
 def test_catalog_server_filters_inbox_and_reports_missing_updates_and_explanations(
     tmp_path: Path,
 ) -> None:
@@ -795,6 +841,45 @@ def test_catalog_server_rejects_invalid_argument_shapes_before_application_work(
         ("list_inbox", {"state": "unknown", "limit": 10}),
         ("update_watchlist", {"artist_id": " ", "action": "pin"}),
         ("update_watchlist", {"artist_id": "artist-1", "action": "unknown"}),
+        (
+            "update_watchlist",
+            {
+                "artist_id": "artist-1",
+                "action": "add",
+                "source_ids": {"spotify": "11111111-1111-1111-1111-111111111111"},
+            },
+        ),
+        (
+            "update_watchlist",
+            {
+                "artist_id": "artist-1",
+                "action": "add",
+                "source_ids": {
+                    "musicbrainz": "11111111-1111-1111-1111-111111111111",
+                    "spotify": "spotify-id",
+                },
+            },
+        ),
+        (
+            "update_watchlist",
+            {"artist_id": "artist-1", "action": "add", "source_ids": {"musicbrainz": "\n"}},
+        ),
+        (
+            "update_watchlist",
+            {
+                "artist_id": "artist-1",
+                "action": "add",
+                "source_ids": {"musicbrainz": "11111111-1111-1111-1111-111111111111\n"},
+            },
+        ),
+        (
+            "update_watchlist",
+            {
+                "artist_id": "artist-1",
+                "action": "add",
+                "source_ids": {"musicbrainz": " 11111111-1111-1111-1111-111111111111"},
+            },
+        ),
         ("update_inbox_item", {"inbox_id": "inbox-1", "state": None}),
         ("explain_inbox_item", {"inbox_id": "inbox-1", "unexpected": True}),
     )

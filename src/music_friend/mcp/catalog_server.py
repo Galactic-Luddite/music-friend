@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, cast
@@ -22,7 +23,6 @@ from music_friend.domain import (
     Signal,
     SignalKind,
     SourceLimitState,
-    SourceReference,
     WatchlistAction,
     WatchlistEntry,
 )
@@ -30,6 +30,15 @@ from music_friend.domain.text import sanitize_display_name
 from music_friend.store.spotify_history import HistoryArgumentError
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.refresh import update_inbox_state
+
+#: Matches a well-formed MBID with no anchors: used only with re.fullmatch(),
+#: which (unlike a pattern containing an explicit ^...$) never accepts a
+#: trailing newline or any other stray character.
+_MBID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+#: The only source_ids key update_watchlist accepts; the design and issue #41
+#: only ever specify a user-confirmed identity via a MusicBrainz MBID here.
+_ALLOWED_SOURCE_IDS_KEYS = frozenset({"musicbrainz"})
 
 _INVALID_ARGUMENTS: dict[str, object] = {
     "category": "invalid_arguments",
@@ -154,13 +163,23 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
             },
             "source_ids": {
                 "description": (
-                    "Optional object mapping source names (e.g., 'musicbrainz') to "
-                    "provider-specific identity strings (e.g., MBID UUID). When "
-                    "supplied, overwrites any prior automated mapping for the "
-                    "artist with a user-confirmed identity."
+                    "Optional object with at most one 'musicbrainz' entry giving a "
+                    "user-confirmed MusicBrainz identifier (MBID UUID) for this "
+                    "artist. When supplied, overwrites any prior automated mapping "
+                    "with this user-confirmed identity. No other source name is "
+                    "accepted here."
                 ),
                 "type": ["object", "null"],
-                "additionalProperties": {"type": "string"},
+                "properties": {
+                    "musicbrainz": {
+                        "type": "string",
+                        "pattern": (
+                            r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                        ),
+                    }
+                },
+                "additionalProperties": False,
             },
         },
         "required": ["artist_id", "action"],
@@ -375,6 +394,8 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
         elif name == "update_watchlist":
             _local_id(arguments["artist_id"], field="artist_id")
             _watchlist_action(arguments["action"])
+            if "source_ids" in arguments:
+                _source_ids(arguments["source_ids"])
         elif name == "update_inbox_item":
             _local_id(arguments["inbox_id"], field="inbox_id")
             _inbox_state(arguments["state"], required=True)
@@ -389,6 +410,41 @@ def _invalid_tool_arguments(params: Mapping[str, Any] | None) -> _InvalidArgumen
     except _InvalidArguments as error:
         return error
     return None
+
+
+def _canonical_mbid(value: object) -> str:
+    """Validate and return a canonical (lowercased) MBID, or raise.
+
+    Uses ``re.fullmatch`` against an unanchored pattern (never ``^...$``, which
+    would let a trailing newline slip through) and rejects any leading or
+    trailing whitespace outright rather than stripping and accepting it.
+    """
+    if not isinstance(value, str):
+        raise _InvalidArguments("source_ids.musicbrainz must be a MusicBrainz identifier")
+    canonical = value.lower()
+    if not _MBID_PATTERN.fullmatch(canonical):
+        raise _InvalidArguments("source_ids.musicbrainz must be a MusicBrainz identifier")
+    return canonical
+
+
+def _source_ids(value: object) -> None:
+    """Validate update_watchlist's optional source_ids argument.
+
+    Runs in the argument gate, before any handler sees the value: an unknown
+    source key, more than one entry, or a malformed identifier is rejected
+    here so it never reaches the handler. Error messages never reflect the
+    caller's raw input.
+    """
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise _InvalidArguments("source_ids must be an object")
+    if len(value) > 1:
+        raise _InvalidArguments("source_ids must contain at most one entry")
+    if not set(value).issubset(_ALLOWED_SOURCE_IDS_KEYS):
+        raise _InvalidArguments("source_ids may only contain a 'musicbrainz' entry")
+    if "musicbrainz" in value:
+        _canonical_mbid(value["musicbrainz"])
 
 
 def _update_setup_arguments(arguments: Mapping[str, Any]) -> None:
@@ -587,58 +643,17 @@ def create_music_server(
                 return dict(_NOT_FOUND)
             updated_at = _now(clock)
 
-            # Handle source_ids if provided (user-confirmed identities)
-            if source_ids is not None:
-                from music_friend.domain import IdentityConfidence
-
-                updated_refs = list(artist.source_refs)
-                for source, identity_str in source_ids.items():
-                    if not isinstance(source, str) or not source:
-                        raise _InvalidArguments(f"source must be a non-empty string, got: {source}")
-                    if not isinstance(identity_str, str) or not identity_str:
-                        raise _InvalidArguments(
-                            f"identity for source {source} must be a non-empty string"
-                        )
-                    # For musicbrainz source, validate UUID format
-                    if source == "musicbrainz":
-                        # Basic UUID validation (8-4-4-4-12 hex digits)
-                        import re
-
-                        if not re.match(
-                            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                            identity_str.lower(),
-                        ):
-                            raise _InvalidArguments(
-                                f"musicbrainz identity must be a valid UUID, got: {identity_str}"
-                            )
-
-                    # Remove any prior ref for this source and add new one with USER_CONFIRMED confidence
-                    updated_refs = [r for r in updated_refs if r.source != source]
-                    updated_refs.append(
-                        SourceReference(
-                            source=source,
-                            native_id=identity_str,
-                            canonical_url=None,
-                            observed_at=updated_at,
-                            confidence=IdentityConfidence.USER_CONFIRMED,
-                        )
-                    )
-
-                # Record the mapping in artist_identity_mappings table
-                for source, identity_str in source_ids.items():
-                    application._catalog.put_artist_identity_mapping(
-                        local_id, source, "mapped", "user", updated_at
-                    )
-
-                # Update the artist with new refs
-                artist = Artist(
-                    local_id=artist.local_id,
-                    display_name=artist.display_name,
-                    source_refs=tuple(updated_refs),
-                    identity_confidence=IdentityConfidence.USER_CONFIRMED,
-                    observed_at=updated_at,
+            # source_ids is already validated by the argument gate (_source_ids):
+            # at most one entry, key must be "musicbrainz", value must be a
+            # well-formed MBID. Re-derive the canonical (lowercased) MBID here
+            # rather than trust the raw argument, and commit the identity write
+            # and its mapping-table row in one transaction.
+            if source_ids is not None and "musicbrainz" in source_ids:
+                mbid = _canonical_mbid(source_ids["musicbrainz"])
+                application.confirm_artist_identity(
+                    artist, source="musicbrainz", native_id=mbid, at=updated_at
                 )
-                application.put_artist(artist)
+                artist = application.get_artist(local_id) or artist
 
             if selected is WatchlistAction.ADD:
                 application.set_watchlist_add(local_id, updated_at=updated_at)

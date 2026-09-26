@@ -16,6 +16,7 @@ from music_friend.domain import (
     Event,
     EventDiscovery,
     EventDiscoveryResult,
+    IdentityConfidence,
     InboxEntry,
     InboxState,
     LocalPreference,
@@ -29,6 +30,7 @@ from music_friend.domain import (
     SourceCapability,
     SourceCursor,
     SourceLimitObservation,
+    SourceReference,
     WatchlistAction,
     WatchlistEntry,
     WatchlistOverride,
@@ -77,6 +79,41 @@ class MusicFriendApplication:
 
     def get_artist(self, local_id: str) -> Artist | None:
         return self._catalog.get_artist(local_id)
+
+    def confirm_artist_identity(
+        self,
+        artist: Artist,
+        *,
+        source: str,
+        native_id: str,
+        at: datetime,
+    ) -> None:
+        """Record a user-confirmed identity for one artist, atomically.
+
+        Replaces any existing ``SourceReference`` for ``source`` on ``artist``
+        with one at ``USER_CONFIRMED`` confidence, and records the matching
+        ``artist_identity_mappings`` row, in a single transaction -- both
+        writes commit together or neither does.
+        """
+        updated_refs = tuple(ref for ref in artist.source_refs if ref.source != source) + (
+            SourceReference(
+                source=source,
+                native_id=native_id,
+                canonical_url=None,
+                observed_at=at,
+                confidence=IdentityConfidence.USER_CONFIRMED,
+            ),
+        )
+        updated = Artist(
+            local_id=artist.local_id,
+            display_name=artist.display_name,
+            source_refs=updated_refs,
+            identity_confidence=IdentityConfidence.USER_CONFIRMED,
+            observed_at=at,
+        )
+        with self._catalog.transaction():
+            self._catalog.put_artist(updated)
+            self._catalog.put_artist_identity_mapping(artist.local_id, source, "mapped", "user", at)
 
     def search_artists(self, query: str, *, limit: int) -> tuple[Artist, ...]:
         return self._catalog.search_artists(query, limit=limit)
