@@ -62,7 +62,7 @@ def test_refresh_summary_keeps_zero_operational_limit_metrics() -> None:
 
 def test_catalog_and_event_runner_contain_source_failures() -> None:
     class Application:
-        def synchronize_catalog(self, *_args: object) -> object:
+        def synchronize_catalog(self, *_args: object, **_kwargs: object) -> object:
             raise RuntimeError
 
         def discover_ticketmaster_events(self, **_kwargs: object) -> object:
@@ -70,7 +70,7 @@ def test_catalog_and_event_runner_contain_source_failures() -> None:
 
     counts = refresh._RefreshCounts()
     source = SimpleNamespace(stopped=False, limit_observation=None)
-    refresh._run_catalog(Application(), "source", source, counts)  # type: ignore[arg-type]
+    refresh._run_catalog(Application(), "source", source, NOW, counts, force=False)  # type: ignore[arg-type]
     refresh._run_events(Application(), LocalConfig(), None, NOW, counts)  # type: ignore[arg-type]
     refresh._run_events(Application(), LocalConfig(), object(), NOW, counts)  # type: ignore[arg-type]
     assert counts.failures == 2

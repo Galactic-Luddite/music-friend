@@ -168,7 +168,7 @@ def run_catalog_stdio_session(
             now=_utc_now,
         )
 
-        def refresh(kind: str) -> object:
+        def refresh(kind: str, force: bool = False) -> object:
             if kind == "events":
                 return refresh_once(
                     application,
@@ -179,6 +179,7 @@ def run_catalog_stdio_session(
                     event_client=event_client,
                     checked_at=_utc_now(),
                     lock_path=catalog_path.with_name("refresh.lock"),
+                    force=force,
                     now=_utc_now,
                 )
             source_values = {
@@ -199,6 +200,7 @@ def run_catalog_stdio_session(
                     event_client=event_client,
                     checked_at=_utc_now(),
                     lock_path=catalog_path.with_name("refresh.lock"),
+                    force=force,
                     now=_utc_now,
                 )
 

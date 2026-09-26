@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from hashlib import sha256
 
 from music_friend.domain import (
+    DAILY_REFRESH_MINUTES,
     AffinityEvidence,
     AffinityEvidenceKind,
     Artist,
@@ -23,6 +24,13 @@ from music_friend.domain import (
 )
 from music_friend.providers import MusicSource, Page
 from music_friend.store import Catalog
+
+#: An capability that completed successfully within this window makes zero source
+#: requests on a later full run (unless force=True), cutting requests per refresh.
+#: Derived from the scheduled full-refresh cadence with a 4-hour margin so a scheduled run
+#: that starts slightly earlier than the previous interval still treats every capability as
+#: due, instead of silently skipping a whole cycle.
+FRESHNESS_TTL = timedelta(minutes=DAILY_REFRESH_MINUTES) - timedelta(hours=4)
 
 _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_SYNC_COUNT = 100_000
@@ -69,7 +77,12 @@ class _Progress:
 
 
 def synchronize_catalog(
-    catalog: Catalog, source_name: str, source: MusicSource
+    catalog: Catalog,
+    source_name: str,
+    source: MusicSource,
+    *,
+    checked_at: datetime | None = None,
+    force: bool = False,
 ) -> CatalogSyncResult:
     """Synchronize each catalog capability independently and return safe closed results."""
     if not isinstance(catalog, Catalog):
@@ -78,19 +91,33 @@ def synchronize_catalog(
         raise ValueError("source_name must be a bounded source identifier")
     if not isinstance(source, MusicSource):
         raise ValueError("source must implement the music source contract")
+    if checked_at is not None:
+        _require_aware(checked_at, "checked_at")
+    if type(force) is not bool:
+        raise ValueError("force must be a boolean")
 
     results = [
         _run_capability(
+            catalog,
+            source_name,
             SourceCapability.FOLLOWED_ARTISTS,
             lambda progress: _sync_followed(catalog, source_name, source, progress),
+            checked_at=checked_at,
+            force=force,
         ),
         _run_capability(
+            catalog,
+            source_name,
             SourceCapability.SAVED_ITEMS,
             lambda progress: _sync_saved(catalog, source_name, source, progress),
+            checked_at=checked_at,
+            force=force,
         ),
     ]
     results.extend(
         _run_capability(
+            catalog,
+            source_name,
             capability,
             partial(
                 _sync_top_artists,
@@ -100,6 +127,8 @@ def synchronize_catalog(
                 time_range,
                 kind,
             ),
+            checked_at=checked_at,
+            force=force,
         )
         for capability, time_range, kind in _TOP_CAPABILITIES
     )
@@ -107,9 +136,32 @@ def synchronize_catalog(
 
 
 def _run_capability(
+    catalog: Catalog,
+    source_name: str,
     capability: SourceCapability,
     operation: Callable[[_Progress], None],
+    *,
+    checked_at: datetime | None = None,
+    force: bool = False,
 ) -> SyncCapabilityResult:
+    # Check if this capability is fresh within the TTL window
+    if checked_at is not None and not force:
+        from music_friend.domain import CatalogSyncCursor
+
+        cursor = catalog.get_catalog_sync_cursor(source_name, capability.value)
+        if (
+            isinstance(cursor, CatalogSyncCursor)
+            and checked_at - cursor.last_successful_at < FRESHNESS_TTL
+        ):
+            # Fresh within TTL: skip the source entirely
+            return SyncCapabilityResult(
+                capability,
+                SyncCapabilityStatus.SKIPPED_FRESH,
+                0,
+                0,
+                0,
+            )
+
     progress = _Progress()
     try:
         operation(progress)
@@ -117,6 +169,13 @@ def _run_capability(
         status = SyncCapabilityStatus.FAILED
     else:
         status = SyncCapabilityStatus.SUCCESS
+        # Only update cursor on SUCCESS
+        if checked_at is not None:
+            from music_friend.domain import CatalogSyncCursor
+
+            cursor = CatalogSyncCursor(source_name, capability.value, checked_at)
+            catalog.put_catalog_sync_cursor(cursor)
+
     return SyncCapabilityResult(
         capability,
         status,
@@ -316,6 +375,11 @@ def _evidence(
         rank,
         observed_at,
     )
+
+
+def _require_aware(value: object, name: str) -> None:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
 
 
 __all__ = ["synchronize_catalog"]

@@ -79,7 +79,7 @@ def test_initial_migration_creates_complete_normalized_schema(catalog_path: Path
     } <= _tables(connection)
     assert connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
     catalog.close()
 
 
@@ -90,7 +90,7 @@ def test_migrations_are_idempotent(catalog_path: Path) -> None:
 
     assert reopened._connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
     reopened.close()
 
 
@@ -259,7 +259,7 @@ def test_concurrent_migration_callers_serialize_version_check(tmp_path: Path) ->
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
 
 def test_concurrent_catalog_openers_apply_initial_migration_once(catalog_path: Path) -> None:
@@ -284,7 +284,7 @@ def test_concurrent_catalog_openers_apply_initial_migration_once(catalog_path: P
     with closing(sqlite3.connect(catalog_path)) as connection:
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
 
 class _CommitFailureConnection:
@@ -360,6 +360,7 @@ def test_existing_database_is_never_deleted_when_migration_fails(
             (7,),
             (8,),
             (9,),
+            (10,),
         ]
 
 
@@ -373,7 +374,7 @@ def test_populated_v1_catalog_upgrades_to_v3_without_data_loss(catalog_path: Pat
         assert connection is not None
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
         artist = catalog.get_artist("legacy-artist-1")
         assert artist is not None
@@ -499,7 +500,7 @@ def test_populated_v1_catalog_upgrades_to_v3_without_data_loss(catalog_path: Pat
     with closing(sqlite3.connect(catalog_path)) as reopened:
         assert reopened.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
 
 @pytest.mark.parametrize(

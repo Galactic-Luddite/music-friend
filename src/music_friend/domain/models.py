@@ -93,6 +93,7 @@ class RefreshMetricKind(str, Enum):
 class SyncCapabilityStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
+    SKIPPED_FRESH = "skipped_fresh"
 
 
 class SourceCapability(str, Enum):
@@ -765,6 +766,18 @@ class ReleaseCheckCursor:
     def __post_init__(self) -> None:
         _require_text(self.source, "source")
         _require_record_id(self.artist_local_id, "artist_local_id")
+        _require_aware_datetime(self.last_successful_at, "last_successful_at")
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSyncCursor:
+    source: str
+    capability: str
+    last_successful_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_text(self.source, "source")
+        _require_text(self.capability, "capability")
         _require_aware_datetime(self.last_successful_at, "last_successful_at")
 
 

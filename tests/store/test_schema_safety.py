@@ -149,7 +149,7 @@ def test_built_artifacts_contain_and_execute_initial_migration(tmp_path: Path) -
                 f"catalog = Catalog.open(Path({str(database)!r})); "
                 "assert catalog._connection.execute("
                 "'SELECT version FROM schema_migrations ORDER BY version').fetchall() "
-                "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]; "
+                "== [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]; "
                 "catalog.close()"
             ),
         ],

@@ -53,6 +53,10 @@ def bundled_migrations() -> tuple[Migration, ...]:
             9,
             schema.joinpath("009_source_limit_pacing.sql").read_text(encoding="utf-8"),
         ),
+        Migration(
+            10,
+            schema.joinpath("010_catalog_sync_cursors.sql").read_text(encoding="utf-8"),
+        ),
     )
 
 

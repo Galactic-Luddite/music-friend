@@ -89,7 +89,15 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
                 ),
                 "enum": ["catalog", "releases", "events", "all"],
                 "type": "string",
-            }
+            },
+            "force": {
+                "description": (
+                    "If true, bypass the freshness check and refresh all capabilities "
+                    "even if they completed successfully within the TTL window. Default is false."
+                ),
+                "type": "boolean",
+                "default": False,
+            },
         },
         "required": ["kind"],
         "type": "object",
@@ -266,7 +274,7 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
     },
 }
 
-RefreshCallback = Callable[[Literal["catalog", "releases", "events", "all"]], object]
+RefreshCallback = Callable[..., object]  # Accepts (kind) or (kind, force=bool)
 Clock = Callable[[], datetime]
 
 
@@ -450,8 +458,18 @@ def create_music_server(
     )
     async def refresh_music(
         kind: Literal["catalog", "releases", "events", "all"],
+        force: bool = False,
     ) -> CallToolResult:
-        return _safe_call(lambda: _refresh_result(refresh(_refresh_kind(kind))))
+        def action() -> dict[str, object]:
+            kindval = _refresh_kind(kind)
+            try:
+                result = refresh(kindval, force=force)
+            except TypeError:
+                # Callback doesn't accept force parameter (backward compat)
+                result = refresh(kindval)
+            return _refresh_result(result)
+
+        return _safe_call(action)
 
     @server.tool(
         name="search_catalog",

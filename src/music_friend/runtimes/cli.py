@@ -69,7 +69,7 @@ AuthorizerFactory = Callable[
 
 _USAGE = (
     "Usage: music-friend doctor | setup | connect spotify | disconnect spotify | status | "
-    "refresh catalog|releases|events|all | watchlist list | inbox list|show | "
+    "refresh catalog|releases|events|all [--force] | watchlist list | inbox list|show | "
     "data export|import|import-spotify|backup|restore|delete | diagnostics | "
     "schedule install|status|remove | version\n"
     "       music-friend skill install (--client codex|claude | "
@@ -360,10 +360,12 @@ def _run_local_command(
             _load_config(config_store), stdout, stderr, connector_factory, credential_store_factory
         )
     if (
-        len(argv) == 2
+        len(argv) >= 2
         and argv[0] == "refresh"
         and argv[1] in {"catalog", "releases", "events", "all"}
+        and (len(argv) == 2 or (len(argv) == 3 and argv[2] == "--force"))
     ):
+        force = len(argv) == 3
         result = _refresh(
             argv[1],
             application,
@@ -372,6 +374,7 @@ def _run_local_command(
             connector_factory,
             credential_store_factory,
             now,
+            force=force,
         )
         return _emit_refresh(result, structured, stdout)
     if argv == ["watchlist", "list"]:
@@ -777,6 +780,7 @@ def _refresh(
     connector_factory: ConnectorFactory,
     credential_store_factory: CredentialStoreFactory,
     now: Clock,
+    force: bool = False,
 ) -> object:
     if refresh_runner is not None:
         return refresh_runner(kind)
@@ -797,6 +801,7 @@ def _refresh(
                 event_client=event_client,
                 checked_at=checked_at,
                 lock_path=lock_path,
+                force=force,
                 now=lambda: _checked_at(now),
             )
         with _spotify_source(
@@ -814,6 +819,7 @@ def _refresh(
                 event_client=event_client,
                 checked_at=checked_at,
                 lock_path=lock_path,
+                force=force,
                 now=lambda: _checked_at(now),
             )
 
