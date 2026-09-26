@@ -17,7 +17,7 @@ Music Friend is built to be used by an AI assistant, not through its own interfa
 (Claude Code, Claude Desktop, Codex, or another stdio client) starts `music-friend-mcp` as a child
 process on the same computer when a conversation needs it, calls its tools, and stops it when the
 session ends. There is no resident service, port, or hosted component: the assistant reads the
-local catalog directly, and only `refresh_music` reaches out to Spotify or Ticketmaster, read-only.
+local catalog directly, and only `refresh_music` reaches out to Spotify, MusicBrainz, or Ticketmaster, read-only.
 
 Because the server runs on your computer, register it on the machine that holds your Music Friend
 data and credentials. Run `music-friend doctor` there first; the server needs an approved native
@@ -32,7 +32,7 @@ tools and their schemas from the local server; it does not need provider-specifi
 
 Music Friend exposes exactly these eleven tools. Every tool works with local identifiers and bounded
 arguments, never raw provider identifiers. "Local write" means the tool changes only your local
-catalog; "provider contact" means it makes read-only network requests to Spotify or Ticketmaster.
+catalog; "provider contact" means it makes read-only network requests to Spotify, MusicBrainz, or Ticketmaster.
 
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
