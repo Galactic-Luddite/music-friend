@@ -339,7 +339,15 @@ def test_refresh_invocations_report_running_completed_and_invalid_results() -> N
     )
 
     assert cli._refresh_payload(RefreshInvocation(None, already_running=True)) == {
-        "status": "partial"
+        "status": "partial",
+        "reason": "already_running",
+    }
+    assert cli._refresh_payload(
+        RefreshInvocation(None, already_running=True, retry_after="2026-09-02T12:10:00+00:00")
+    ) == {
+        "status": "partial",
+        "reason": "already_running",
+        "retry_after": "2026-09-02T12:10:00+00:00",
     }
     assert cli._refresh_payload(RefreshInvocation(run, already_running=False)) == {
         "kind": "catalog",

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- MusicBrainz release refreshes run at MusicBrainz's documented steady one request per second
+  instead of the Spotify-tuned adaptive window: a `503` during identity mapping no longer ratchets
+  the run down to one request per 30 seconds, and a limit stored by an earlier version no longer
+  slows later runs. A normal daily refresh of a 50-artist watchlist now finishes well inside the
+  deadline.
+- The ten-minute refresh deadline is measured on a clock that keeps counting while the computer
+  sleeps, so a refresh on a laptop that suspends mid-run can no longer run on far past it.
+- MusicBrainz release discovery reads the search result total from `count` (the key the live
+  `/ws/2/release-group` search returns), so an artist with more than 100 matching release groups is
+  paged instead of silently truncated. Discovery reads at most five pages per artist per run even
+  when every row on a page is filtered out, and resumes from its continuation on the next run.
+- Every `partial` refresh result carries a `reason`: `rate_limited`, `quota_exhausted`, `deadline`,
+  `source_errors`, or `already_running` (a run blocked by another refresh's lock, with
+  `retry_after` set to when that lock goes stale).
+- The `source_requests` metric now counts every provider request in the run, including
+  MusicBrainz identity-mapping requests, additional release sources, and Ticketmaster; signals
+  repaired for an earlier interrupted run are reported as `signals_repaired` instead of being
+  folded into `signals_created`.
+
 - Added MusicBrainz as the default release source; use `--release-sources` to configure it.
 - `release_source` is now `release_sources`, an ordered tuple of `spotify`, `musicbrainz`, and/or
   `deezer` (config version 3 -> 4; a version-3 file's scalar `release_source` migrates to a

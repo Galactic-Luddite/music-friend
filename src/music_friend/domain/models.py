@@ -85,6 +85,7 @@ class RefreshMetricKind(str, Enum):
     RECORDS_UPDATED = "records_updated"
     RECORDS_SKIPPED = "records_skipped"
     SIGNALS_CREATED = "signals_created"
+    SIGNALS_REPAIRED = "signals_repaired"
     FAILURES = "failures"
     CATALOG_SKIPPED_FRESH = "catalog_skipped_fresh"
     LIMIT_PAUSES = "limit_pauses"
@@ -864,8 +865,8 @@ class ArtistReleaseDiscoveryResult:
         ):
             raise ValueError("continuation must be an opaque bounded token or None")
         if self.status is ReleaseDiscoveryStatus.PARTIAL:
-            if self.continuation is None or self.records_seen != 100:
-                raise ValueError("partial discovery must stop at the record bound")
+            if self.continuation is None:
+                raise ValueError("partial discovery must carry a continuation")
         elif self.continuation is not None:
             raise ValueError("only partial discovery may have a continuation")
 

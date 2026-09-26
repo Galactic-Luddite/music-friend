@@ -28,6 +28,10 @@ from music_friend.store import Catalog
 
 _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_RELEASES_PER_ARTIST = 100
+#: Pages fetched for one artist in one run, whatever the pages contain. A source may
+#: drop every row of a page (score or date filters), so the kept-record bound above
+#: alone never advances on such pages; this bound always does.
+_MAX_PAGES_PER_ARTIST = 5
 _FIRST_LOOKBACK = timedelta(days=30)
 _OVERLAP = timedelta(hours=48)
 #: An artist whose releases were successfully checked within this window makes zero source
@@ -187,8 +191,10 @@ def _collect_artist_releases(
     records_seen = 0
     seen_cursors = set() if cursor is None else {cursor}
     seen_native_ids: set[str] = set()
+    pages = 0
     while True:
         page = source.recent_releases((artist_reference,), since, cursor)
+        pages += 1
         if type(page) is not Page:
             raise ValueError("source returned an invalid release page")
         remaining = _MAX_RELEASES_PER_ARTIST - records_seen
@@ -204,7 +210,7 @@ def _collect_artist_releases(
             raise ValueError("release page exceeds the operational record bound")
         if page.next_cursor is None:
             return tuple(releases), records_seen, None
-        if records_seen == _MAX_RELEASES_PER_ARTIST:
+        if records_seen == _MAX_RELEASES_PER_ARTIST or pages >= _MAX_PAGES_PER_ARTIST:
             return tuple(releases), records_seen, page.next_cursor
         if page.next_cursor in seen_cursors:
             raise ValueError("source release pagination did not advance")

@@ -66,9 +66,12 @@ something to invent: `artist_id` comes from `search_catalog` or a `list_watchlis
 and imported-history names -- has bidirectional-override and other control characters removed; see
 [display-name sanitization](limits.md#display-name-sanitization) for the allowlist and rationale.
 
-A `partial` `refresh_music` result adds `reason` (`rate_limited`, `quota_exhausted`, or
-`deadline`), `retry_after` (an ISO-8601 timestamp, only present for `rate_limited`), and
-`remaining` (how many records this run skipped) when the cause is known. Call `music_status`
+Every `partial` `refresh_music` result adds a `reason` (`rate_limited`, `quota_exhausted`,
+`deadline`, `source_errors`, or `already_running`), `retry_after` (an ISO-8601 timestamp: when the
+source is ready again for `rate_limited`, or when another refresh's held lock goes stale for
+`already_running`), and, for a run that started, `remaining` (how many records this run skipped).
+The `source_requests` metric counts every provider request the run made, and `signals_repaired`
+counts signals rebuilt for an earlier interrupted run, separately from `signals_created`. Call `music_status`
 first, or read `retry_after` from a prior `partial` result, before starting another refresh during
 a cooldown -- see [adaptive request pacing](operations.md#adaptive-request-pacing).
 
