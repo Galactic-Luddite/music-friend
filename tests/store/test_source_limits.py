@@ -28,7 +28,7 @@ def test_source_limit_migration_and_catalog_round_trip(tmp_path: Path) -> None:
         ).fetchall()
         catalog.put_source_limit(expected)
 
-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
         assert catalog.get_source_limit("spotify") == expected
 
 

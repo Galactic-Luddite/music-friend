@@ -14,22 +14,24 @@ from platformdirs import user_config_path
 
 from music_friend._local_files import atomic_replace
 
-_VERSION = 2
+_VERSION = 3
 _MAX_FILE_BYTES = 65_536
 _COUNTRY_CODE = re.compile(r"[A-Z]{2}\Z")
 _POSTAL_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 -]{0,15}\Z")
 RadiusUnit = Literal["miles", "kilometers"]
+ReleaseSource = Literal["spotify", "musicbrainz"]
 
 
 @dataclass(frozen=True, slots=True)
 class LocalConfig:
-    """Closed v2 schema for public Spotify and optional event-discovery settings."""
+    """Closed v3 schema for public Spotify, optional event-discovery, and release-source settings."""
 
     spotify_client_id: str | None = None
     event_country_code: str | None = None
     event_postal_code: str | None = None
     event_radius: int | float | None = None
     event_radius_unit: RadiusUnit | None = None
+    release_source: ReleaseSource | None = None
 
     def __post_init__(self) -> None:
         if self.spotify_client_id is not None and not _is_client_id(self.spotify_client_id):
@@ -51,6 +53,11 @@ class LocalConfig:
             "kilometers",
         }:
             raise ValueError("event_radius_unit must be miles or kilometers")
+        if self.release_source is not None and self.release_source not in {
+            "spotify",
+            "musicbrainz",
+        }:
+            raise ValueError("release_source must be spotify or musicbrainz")
 
 
 class LocalConfigStore:
@@ -82,16 +89,40 @@ class LocalConfigStore:
             ):
                 raise ValueError
             decoded = json.loads(path.read_text(encoding="utf-8"))
-            if type(decoded) is not dict or set(decoded) != {
+            if type(decoded) is not dict:
+                raise ValueError
+            version = decoded.get("version")
+            if type(version) is not int or version not in {2, 3}:
+                raise ValueError
+            # Version 2 read path: 5 keys without release_source
+            if version == 2:
+                if set(decoded) != {
+                    "event_country_code",
+                    "event_postal_code",
+                    "event_radius",
+                    "event_radius_unit",
+                    "spotify_client_id",
+                    "version",
+                }:
+                    raise ValueError
+                return LocalConfig(
+                    spotify_client_id=decoded["spotify_client_id"],
+                    event_country_code=decoded["event_country_code"],
+                    event_postal_code=decoded["event_postal_code"],
+                    event_radius=decoded["event_radius"],
+                    event_radius_unit=decoded["event_radius_unit"],
+                    release_source=None,
+                )
+            # Version 3: 6 keys including release_source
+            if set(decoded) != {
                 "event_country_code",
                 "event_postal_code",
                 "event_radius",
                 "event_radius_unit",
+                "release_source",
                 "spotify_client_id",
                 "version",
             }:
-                raise ValueError
-            if type(decoded["version"]) is not int or decoded["version"] != _VERSION:
                 raise ValueError
             return LocalConfig(
                 spotify_client_id=decoded["spotify_client_id"],
@@ -99,6 +130,7 @@ class LocalConfigStore:
                 event_postal_code=decoded["event_postal_code"],
                 event_radius=decoded["event_radius"],
                 event_radius_unit=decoded["event_radius_unit"],
+                release_source=decoded["release_source"],
             )
         except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
             raise ValueError("local configuration is invalid") from None
@@ -113,6 +145,7 @@ class LocalConfigStore:
             event_postal_code=config.event_postal_code,
             event_radius=config.event_radius,
             event_radius_unit=config.event_radius_unit,
+            release_source=config.release_source,
         )
         encoded = json.dumps(
             {
@@ -120,6 +153,7 @@ class LocalConfigStore:
                 "event_postal_code": canonical.event_postal_code,
                 "event_radius": canonical.event_radius,
                 "event_radius_unit": canonical.event_radius_unit,
+                "release_source": canonical.release_source,
                 "spotify_client_id": canonical.spotify_client_id,
                 "version": _VERSION,
             },
@@ -144,4 +178,4 @@ def _is_radius(value: object) -> bool:
     return math.isfinite(radius) and 1 <= radius <= 100
 
 
-__all__ = ["LocalConfig", "LocalConfigStore", "RadiusUnit"]
+__all__ = ["LocalConfig", "LocalConfigStore", "RadiusUnit", "ReleaseSource"]

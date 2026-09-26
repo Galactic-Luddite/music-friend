@@ -57,6 +57,14 @@ def bundled_migrations() -> tuple[Migration, ...]:
             10,
             schema.joinpath("010_catalog_sync_cursors.sql").read_text(encoding="utf-8"),
         ),
+        Migration(
+            11,
+            schema.joinpath("011_artist_identity_mappings.sql").read_text(encoding="utf-8"),
+        ),
+        Migration(
+            12,
+            schema.joinpath("012_source_reference_confidence.sql").read_text(encoding="utf-8"),
+        ),
     )
 
 

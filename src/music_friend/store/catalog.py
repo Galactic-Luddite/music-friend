@@ -589,17 +589,19 @@ class Catalog:
         for position, reference in enumerate(references):
             connection.execute(
                 """
-                INSERT INTO source_references (source, native_id, canonical_url, observed_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO source_references (source, native_id, canonical_url, observed_at, confidence)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (source, native_id) DO UPDATE SET
                     canonical_url = excluded.canonical_url,
-                    observed_at = excluded.observed_at
+                    observed_at = excluded.observed_at,
+                    confidence = excluded.confidence
                 """,
                 (
                     reference.source,
                     reference.native_id,
                     reference.canonical_url,
                     _datetime_text(reference.observed_at),
+                    reference.confidence.value,
                 ),
             )
             source_row = connection.execute(
@@ -659,7 +661,7 @@ class Catalog:
             .execute(
                 """
             SELECT reference.source, reference.native_id, reference.canonical_url,
-                   reference.observed_at
+                   reference.observed_at, reference.confidence
             FROM record_sources AS mapping
             JOIN source_references AS reference ON reference.id = mapping.source_reference_id
             WHERE mapping.record_kind = ? AND mapping.record_local_id = ?
@@ -669,12 +671,14 @@ class Catalog:
             )
             .fetchall()
         )
+        from music_friend.domain import IdentityConfidence
         return tuple(
             SourceReference(
                 source=str(row[0]),
                 native_id=str(row[1]),
                 canonical_url=None if row[2] is None else str(row[2]),
                 observed_at=datetime.fromisoformat(str(row[3])),
+                confidence=IdentityConfidence(str(row[4])) if row[4] else IdentityConfidence.SOURCE_ONLY,
             )
             for row in rows
         )

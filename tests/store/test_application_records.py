@@ -122,7 +122,7 @@ def test_migration_three_creates_only_the_v1_application_state_tables(catalog: C
     } <= names
     assert connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
-    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+    ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
 
 
 def test_affinity_replacement_is_idempotent_atomic_and_capability_scoped(
