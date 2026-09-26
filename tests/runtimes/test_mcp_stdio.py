@@ -545,6 +545,7 @@ def _assert_catalog_stdio_flow(process: subprocess.Popen[str]) -> None:
                 "local_id": "artist-1",
             },
             "inclusion_reason": "automatic",
+            "release_source_status": "unmapped",
         }
     ]
     assert updated["result"]["structuredContent"]["state"] == "saved"  # type: ignore[index]

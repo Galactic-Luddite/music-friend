@@ -128,7 +128,8 @@ def test_catalog_server_exposes_only_the_stable_local_tool_inventory(tmp_path: P
 
     schemas = asyncio.run(listed_schemas())
     rendered = json.dumps(schemas, sort_keys=True)
-    for forbidden in ("spotify", "native_id", "source_refs", "credential", "path"):
+    # Note: "spotify" is allowed in release_source enum in update_setup for user-facing configuration
+    for forbidden in ("native_id", "source_refs", "credential", "path"):
         assert forbidden not in rendered
     assert schemas["search_catalog"]["properties"]["limit"] == {
         "description": "Maximum number of matching artists to return (1-50).",
@@ -548,6 +549,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
         "latest_refresh": None,
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
+        "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 1},
     }
     assert _call(server, "search_catalog", {"query": "Artist", "limit": 1}) == {
         "items": [
@@ -573,6 +575,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
                     "local_id": "artist-1",
                 },
                 "inclusion_reason": "pinned",
+                "release_source_status": "unmapped",
             }
         ]
     }
