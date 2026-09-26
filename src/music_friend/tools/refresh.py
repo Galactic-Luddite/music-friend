@@ -430,18 +430,27 @@ def refresh_once(
                 rng=entropy,
             )
         )
+        shares_paced_source = (
+            limited_source is not None
+            and release_source is source
+            and release_source_name == source_name
+        )
         limited_release_source = (
-            None
-            if release_source is None
-            else _PacedSource(
-                release_source,
-                source_name=release_source_name,
-                started_at=started_monotonic,
-                checked_at=checked_at,
-                monotonic=clock,
-                sleeper=sleep,
-                saved_limit=application.get_source_limit(release_source_name),
-                rng=entropy,
+            limited_source
+            if shares_paced_source
+            else (
+                None
+                if release_source is None
+                else _PacedSource(
+                    release_source,
+                    source_name=release_source_name,
+                    started_at=started_monotonic,
+                    checked_at=checked_at,
+                    monotonic=clock,
+                    sleeper=sleep,
+                    saved_limit=application.get_source_limit(release_source_name),
+                    rng=entropy,
+                )
             )
         )
         limited_event_client = (
