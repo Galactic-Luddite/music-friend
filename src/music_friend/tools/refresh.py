@@ -482,11 +482,17 @@ def refresh_once(
                     break
             else:
                 _run_events(application, config, limited_event_client, checked_at, counts)
-        if limited_source is not None:
+        if limited_source is not None and (
+            "catalog" in components or limited_source is limited_release_source
+        ):
             counts.source_requests = limited_source.requests
             counts.limit_pauses = limited_source.pauses
             # Persist the learned pacing rate (and any cooldown) so the next invocation
             # starts from where this one left off, whether it hit a limit or recovered.
+            # Gated on the catalog component actually running (or the release source
+            # sharing this same paced wrapper): a musicbrainz-only release refresh must
+            # never touch Spotify's source_limits row just because a `source` argument
+            # was supplied for it, since that argument may go entirely unused.
             application.put_source_limit(limited_source.current_observation())
         if limited_release_source is not None and limited_release_source is not limited_source:
             application.put_source_limit(limited_release_source.current_observation())

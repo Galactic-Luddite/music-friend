@@ -2075,3 +2075,169 @@ def test_acquire_lock_gives_up_when_a_stale_lock_reappears_after_release(
     _acquire_lock(path, lock_clock=lambda: 0.0)
     monkeypatch.setattr(refresh_module, "_release_lock", lambda lease: None)
     assert _acquire_lock(path, lock_clock=lambda: 10_000.0) is None
+
+
+class _AssertNoCallsSource:
+    """A MusicSource double whose every method fails the test if ever invoked."""
+
+    def capabilities(self) -> ProviderCapabilities:
+        allowed = frozenset(Capability)
+        return ProviderCapabilities(allowed, allowed)
+
+    def health(self) -> ProviderHealth:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+    def search_artists(self, _query: str, _limit: int) -> Page[Artist]:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+    def followed_artists(self, _cursor: str | None = None) -> Page[Artist]:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+    def saved_items(self, _cursor: str | None = None) -> object:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+    def top_items(self, _time_range: str, _limit: int) -> object:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+    def top_artists(self, _time_range: str, _limit: int) -> Page[Artist]:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+    def recent_releases(
+        self,
+        _artist_refs: Sequence[SourceReference],
+        _since: datetime,
+        _cursor: str | None = None,
+    ) -> Page[Release]:
+        raise AssertionError("Spotify must not be contacted for a musicbrainz release refresh")
+
+
+def _mb_artist(native_id: str, name: str = "Artist") -> Artist:
+    """A watchlisted artist carrying only a musicbrainz SourceReference."""
+    return Artist(
+        f"artist:{native_id}",
+        name,
+        (SourceReference("musicbrainz", native_id, None, NOW),),
+        IdentityConfidence.EXTERNAL_ID,
+        NOW,
+    )
+
+
+def test_musicbrainz_release_source_makes_zero_spotify_requests(tmp_path: Path) -> None:
+    """AC: release_source=musicbrainz produces inbox items without touching Spotify."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _mb_artist("mb-one", "One")
+        application.put_artist(artist)
+        application.put_affinity_evidence(
+            AffinityEvidence(
+                f"evidence:{artist.local_id}",
+                artist.local_id,
+                "musicbrainz",
+                AffinityEvidenceKind.FOLLOWED,
+                "mb-one",
+                None,
+                NOW,
+            )
+        )
+        release_source = FakeMusicSource()
+        release_source.releases[("mb-one", None)] = Page(
+            (
+                Release(
+                    "release:mb-one",
+                    "Synthetic Album",
+                    "album",
+                    date(2026, 8, 1),
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (SourceReference("musicbrainz", "rg-one", None, NOW),),
+                    NOW,
+                ),
+            ),
+            None,
+        )
+        spotify = _AssertNoCallsSource()
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=spotify,
+            release_source_name="musicbrainz",
+            release_source=release_source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "succeeded"
+        assert release_source.release_calls == ["mb-one"]
+        inbox = tuple(application.list_inbox_entries(InboxState.UNREAD, limit=50))
+        assert len(inbox) == 1
+
+
+def test_musicbrainz_cooldown_leaves_spotify_limit_state_untouched(tmp_path: Path) -> None:
+    """AC: a musicbrainz RateLimitedError records its own cooldown, not Spotify's."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _mb_artist("mb-one", "One")
+        application.put_artist(artist)
+        application.put_affinity_evidence(
+            AffinityEvidence(
+                f"evidence:{artist.local_id}",
+                artist.local_id,
+                "musicbrainz",
+                AffinityEvidenceKind.FOLLOWED,
+                "mb-one",
+                None,
+                NOW,
+            )
+        )
+        # A prior Spotify cooldown must survive untouched.
+        application.put_source_limit(
+            SourceLimitObservation(
+                "spotify",
+                SourceLimitState.AVAILABLE,
+                NOW - timedelta(hours=1),
+                None,
+                False,
+                0,
+            )
+        )
+        release_source = FakeMusicSource()
+        release_source.releases[("mb-one", None)] = RateLimitedError(60)
+        spotify = _AssertNoCallsSource()
+        clock = FakeClock()
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="spotify",
+            source=spotify,
+            release_source_name="musicbrainz",
+            release_source=release_source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        assert result.run.status.value == "partial"
+        musicbrainz_limit = application.get_source_limit("musicbrainz")
+        assert musicbrainz_limit is not None
+        assert musicbrainz_limit.state == SourceLimitState.COOLING_DOWN
+        spotify_limit = application.get_source_limit("spotify")
+        assert spotify_limit == SourceLimitObservation(
+            "spotify",
+            SourceLimitState.AVAILABLE,
+            NOW - timedelta(hours=1),
+            None,
+            False,
+            0,
+        )
