@@ -148,8 +148,9 @@ Package `providers/musicbrainz/` mirroring `providers/spotify/`: `transport.py`,
 - The `releases` component iterates configured sources in order, each with its own paced wrapper
   and cursors. A source that is rate-limited or unreachable does not block the next.
 - Cross-source dedupe: `find_release_discovery_variant` gains a source-agnostic form matching
-  `artist_local_id + normalized_title + release_date` (plus or minus one day when either side has
-  day precision and they differ by a day). On a match the existing release gains the second
+  `artist_local_id + normalized_title + release_date`, widened to plus or minus one day only when
+  both dates have day precision. A month- or year-precision date never matches a day inside that
+  period: a false merge hides a real release, which is worse than a duplicate. On a match the existing release gains the second
   `SourceReference`, `last_seen_at` updates, and no new inbox item is created. New index on
   `release_discoveries (normalized_title, release_date)`.
 
