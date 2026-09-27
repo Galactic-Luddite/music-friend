@@ -43,6 +43,7 @@ dev = [
     "mypy",
     "pytest",
     "pytest-cov",
+    "pytest-timeout",
     "ruff",
 ]
 
@@ -83,7 +84,13 @@ files = ["src/music_friend"]
 strict = true
 
 [tool.pytest.ini_options]
-addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--import-mode=importlib",
+    "--timeout=300",
+    "--timeout-method=thread",
+]
 testpaths = ["tests"]
 
 [tool.coverage.run]

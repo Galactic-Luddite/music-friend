@@ -556,28 +556,72 @@ def _policy() -> BoundaryPolicy:
 
 
 class GuardedSocket(_ORIGINAL_SOCKET):
+    """Reject outbound network operations, except on the process's own AF_UNIX
+    loopback plumbing.
+
+    ``asyncio``'s event loop wakes itself across threads (used by
+    ``run_in_executor``/``asyncio.to_thread``, and therefore by
+    ``refresh_music``'s off-event-loop refresh, issue #65) with an internal
+    self-pipe: a same-process ``socket.socketpair()`` whose sockets are
+    ``AF_UNIX`` on POSIX, never ``AF_INET``/``AF_INET6``. That pipe is local
+    interpreter plumbing, not the "network operation" this boundary exists to
+    certify (real egress to an external host) -- but because ``socket.socket``
+    is replaced process-wide for the whole pytest session (see
+    ``pytest_configure`` below), blocking every socket ``send``/``connect``
+    indiscriminately also blocks the self-pipe's wakeup write, which
+    ``asyncio`` cannot recover from: the exception is swallowed inside
+    ``Future._call_set_state``'s callback machinery, so the main loop's
+    selector never gets woken and hangs forever. Confirmed with a minimal
+    repro (a bare ``socket.socket`` subclass blocking ``send`` + one
+    ``asyncio.to_thread`` call) before this fix; every other socket-family
+    combination -- any real ``AF_INET``/``AF_INET6`` attempt -- is still
+    rejected exactly as before.
+    """
+
+    def _is_self_pipe(self) -> bool:
+        try:
+            return self.family == socket.AF_UNIX
+        except OSError:
+            return False
+
     def bind(self, address: Any) -> None:
+        if self._is_self_pipe():
+            return super().bind(address)
         _policy().reject_network("bind")
 
     def listen(self, backlog: int = 0) -> None:
+        if self._is_self_pipe():
+            return super().listen(backlog)
         _policy().reject_network("listen")
 
     def connect(self, address: Any) -> None:
+        if self._is_self_pipe():
+            return super().connect(address)
         _policy().reject_network("connect")
 
     def connect_ex(self, address: Any) -> int:
+        if self._is_self_pipe():
+            return super().connect_ex(address)
         _policy().reject_network("connect")
 
     def send(self, data: Any, flags: int = 0) -> int:
+        if self._is_self_pipe():
+            return super().send(data, flags)
         _policy().reject_network("send")
 
     def sendall(self, data: Any, flags: int = 0) -> None:
+        if self._is_self_pipe():
+            return super().sendall(data, flags)
         _policy().reject_network("sendall")
 
     def sendto(self, data: Any, *args: Any) -> int:
+        if self._is_self_pipe():
+            return super().sendto(data, *args)
         _policy().reject_network("sendto")
 
     def sendmsg(self, buffers: Any, *args: Any) -> int:
+        if self._is_self_pipe():
+            return super().sendmsg(buffers, *args)
         _policy().reject_network("sendmsg")
 
 

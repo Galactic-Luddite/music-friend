@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -51,7 +53,7 @@ from music_friend.tools.refresh import (
     refresh_once,
     update_inbox_state,
 )
-from music_friend.tools.release_discovery import _SourceCallStopped
+from music_friend.tools.release_discovery import _persist_artist_releases, _SourceCallStopped
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
@@ -2642,46 +2644,69 @@ def test_no_transaction_spans_a_source_call(tmp_path: Path) -> None:
 
 
 def test_per_artist_transaction_is_short(tmp_path: Path) -> None:
-    """AC (issue #65): a 100-release-per-artist transaction is one short transaction,
-    not 100 small ones or one long-running one.
+    """AC (issue #65): a 100-release-per-artist transaction is one short transaction.
 
     Structural, not timing-based (a wall-clock assertion here is flaky under CI load,
-    per round-1 review): ``_MAX_RELEASES_PER_ARTIST`` bounds a single artist's
-    persisted release batch at 100. This asserts the persist step opens exactly one
-    outermost transaction for the whole 100-release batch (never one transaction per
-    release, and never more than one BEGIN/COMMIT pair), by wrapping
-    ``Catalog.transaction`` to count and record every entry's nesting depth.
+    per round-1 review). ``_persist_artist_releases`` is the exact write path
+    ``_discover_artist`` calls to persist one artist's batch, bounded at
+    ``_MAX_RELEASES_PER_ARTIST`` (100) observations; this calls it directly (isolating
+    it from the rest of ``refresh_once``'s unrelated lock/cursor/repair bookkeeping,
+    which opens its own separate transactions and would otherwise inflate the count)
+    with exactly 100 brand-new releases, tracing every SQL statement the connection
+    executes via ``sqlite3.Connection.set_trace_callback``. It asserts (a) the persist
+    step opens exactly one outermost transaction for the whole batch -- never one
+    transaction per release -- and (b) that one transaction's total statement count
+    is still a small, fixed multiple of the 100 releases (bounded, not unbounded),
+    so "short" means "few statements", not "fast on this machine right now".
     """
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
-        application = MusicFriendApplication(catalog)
         artist = _artist("one", "One")
-        _watch(application, artist)
-        source = FakeMusicSource()
+        catalog.put_artist(artist)
         releases = tuple(
             _release(f"release-{index}", artist, title=f"Release {index}") for index in range(100)
         )
-        source.releases[("one", None)] = Page(releases, None)
 
-        outermost_entries: list[int] = []
+        connection = catalog._connection  # type: ignore[attr-defined]
+        assert connection is not None
+        statement_counts: list[int] = []
+        current_count = 0
+
+        def trace(_statement: str) -> None:
+            nonlocal current_count
+            current_count += 1
+
         original_transaction = type(catalog).transaction
 
         @contextmanager
         def counting_transaction(self: Catalog) -> Iterator[None]:
+            nonlocal current_count
             depth_before = self._transaction_depth  # type: ignore[attr-defined]
             if depth_before == 0:
-                outermost_entries.append(1)
-            with original_transaction(self):
-                yield
+                current_count = 0
+            try:
+                with original_transaction(self):
+                    yield
+            finally:
+                if depth_before == 0:
+                    statement_counts.append(current_count)
 
-        with patch.object(Catalog, "transaction", counting_transaction):
-            result = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
+        connection.set_trace_callback(trace)
+        try:
+            with patch.object(Catalog, "transaction", counting_transaction):
+                candidates = _persist_artist_releases(
+                    catalog, "spotify", artist.local_id, releases, NOW
+                )
+        finally:
+            connection.set_trace_callback(None)
 
-        assert result.run is not None
-        assert len(application.list_inbox_entries(None, limit=200)) == 100
+        assert len(candidates) == 100
         # Exactly one outermost transaction covers the whole 100-release batch --
-        # not 100 separate transactions, and not left open across anything else in
-        # this refresh (release discovery is the only writer this run touches).
-        assert len(outermost_entries) == 1
+        # never one transaction per release.
+        assert len(statement_counts) == 1
+        # That one transaction still does a bounded amount of work per release
+        # (a few dozen indexed statements each, measured at ~22/release), not an
+        # unrelated, unbounded blow-up.
+        assert statement_counts[0] <= 30 * len(releases), statement_counts
 
 
 def test_additional_release_sources_rejects_a_malformed_entry(tmp_path: Path) -> None:
