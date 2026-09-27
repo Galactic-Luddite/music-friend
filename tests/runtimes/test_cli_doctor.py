@@ -314,9 +314,39 @@ def test_doctor_reports_unmapped_artists_for_a_non_empty_watchlist_without_raisi
     payload = json.loads(stdout)
     assert payload["release_source"] == {
         "sources": ["musicbrainz"],
-        "source": "musicbrainz",
         "unmapped_artists": 1,
         "remedy": "Run 'music-friend refresh releases' to map artists",
     }
     assert stderr == ""
     assert result == 0
+
+
+def test_doctor_reports_every_configured_release_source_not_just_the_first(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #56 part 3): with two or more release sources configured,
+    `doctor`'s payload lists all of them, not only ``release_sources[0]``, and
+    carries no misleading singular "source" key -- reached through
+    `cli.run_cli(["doctor", ...])`, not the internal `_doctor` function alone."""
+    result, stdout, stderr = _run(
+        tmp_path,
+        ["doctor", "--json"],
+        config_store=_ConfigStore(
+            LocalConfig(
+                spotify_client_id="client-id",
+                event_country_code="US",
+                event_postal_code="94612",
+                event_radius=25,
+                event_radius_unit="miles",
+                release_sources=("musicbrainz", "deezer"),
+            )
+        ),
+        native=lambda: True,
+    )
+    assert stderr == ""
+    payload = json.loads(stdout)
+    release_source = payload["release_source"]
+    assert release_source["sources"] == ["musicbrainz", "deezer"]
+    assert "source" not in release_source
+    assert "musicbrainz" in stdout
+    assert "deezer" in stdout

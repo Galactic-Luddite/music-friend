@@ -26,6 +26,7 @@ from music_friend.providers import (
 )
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
+from music_friend.tools.release_discovery import _normalized_title
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 RAW_ERROR_CANARY = "raw-release-provider-canary"
@@ -1213,6 +1214,113 @@ def test_bare_remix_never_matches_the_plain_original_title(tmp_path: Path) -> No
 
         mb_release = application.get_release("release:musicbrainz:rg-plain-original")
         deezer_release = application.get_release("release:deezer:al-plain-original")
+        assert mb_release is not None
+        assert deezer_release is not None
+        assert len(mb_release.source_refs) == 1
+        assert len(deezer_release.source_refs) == 1
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        pytest.param("I Won’t Stop", "I Won't Stop", id="curly-vs-straight-apostrophe"),
+        pytest.param("Rock–Paper–Scissors", "Rock-Paper-Scissors", id="en-dash-vs-hyphen"),
+        pytest.param("Rock—Paper—Scissors", "Rock-Paper-Scissors", id="em-dash-vs-hyphen"),
+        pytest.param("Café Nights", "Café Nights", id="nfc-vs-nfd-accent"),
+        pytest.param("Wait…", "Wait...", id="ellipsis-character-vs-dots"),
+        pytest.param("Double  Space", "Double Space", id="doubled-whitespace"),
+        pytest.param("‘Quoted’ Title", "'Quoted' Title", id="curly-single-quote-pair"),
+        pytest.param("“Quoted” Title", '"Quoted" Title', id="curly-double-quote-pair"),
+    ],
+)
+def test_normalized_title_folds_typographic_variants_to_the_same_key(left: str, right: str) -> None:
+    """AC (issue #56): titles differing only by typographic punctuation, Unicode
+    form, or whitespace collapse to the same comparison key."""
+    assert _normalized_title(left) == _normalized_title(right)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        pytest.param("Stop", "Stops", id="different-real-word"),
+        pytest.param("Cafe", "Café", id="different-accented-letter"),
+        pytest.param("Niño", "Nino", id="tilde-n-vs-plain-n"),
+    ],
+)
+def test_normalized_title_keeps_real_differences_distinct(left: str, right: str) -> None:
+    """Negative test (issue #56): titles differing by real characters, including a
+    different accented letter, must not collapse to the same comparison key."""
+    assert _normalized_title(left) != _normalized_title(right)
+
+
+def test_cross_source_dedupe_merges_titles_differing_only_by_typographic_apostrophe(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #56): a cross-source pair differing only by a curly vs. straight
+    apostrophe, same artist and date, gives one inbox item with two source refs."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-apostrophe", "deezer-apostrophe")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-apostrophe", None)] = Page(
+            (_cross_source_release("rg-apostrophe", "musicbrainz", artist, title="I Won't Stop"),),
+            None,
+        )
+        first = application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+        assert len(first.artists[0].candidates) == 1
+        assert first.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-apostrophe", None)] = Page(
+            (_cross_source_release("al-apostrophe", "deezer", artist, title="I Won’t Stop"),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        # A cross-source match creates no new inbox candidate: one inbox item total.
+        assert second.artists[0].candidates == ()
+
+        stored_release = application.get_release("release:musicbrainz:rg-apostrophe")
+        assert stored_release is not None
+        assert len(stored_release.source_refs) == 2
+        assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
+        assert application.get_release("release:deezer:al-apostrophe") is None
+
+
+def test_cross_source_dedupe_does_not_merge_titles_differing_by_a_real_character(
+    tmp_path: Path,
+) -> None:
+    """Negative test (issue #56): "Stop" vs. "Stops" must stay separate even with
+    the same artist and date -- typographic normalization must not widen matching
+    to real word differences."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-real-diff", "deezer-real-diff")
+        _watch(application, artist)
+
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-real-diff", None)] = Page(
+            (_cross_source_release("rg-real-diff", "musicbrainz", artist, title="Stop"),),
+            None,
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-real-diff", None)] = Page(
+            (_cross_source_release("al-real-diff", "deezer", artist, title="Stops"),),
+            None,
+        )
+        second = application.discover_releases(
+            "deezer", deezer_source, checked_at=NOW + timedelta(hours=1)
+        )
+        assert len(second.artists[0].candidates) == 1
+        assert second.artists[0].candidates[0].kind is ReleaseCandidateKind.NEW
+
+        mb_release = application.get_release("release:musicbrainz:rg-real-diff")
+        deezer_release = application.get_release("release:deezer:al-real-diff")
         assert mb_release is not None
         assert deezer_release is not None
         assert len(mb_release.source_refs) == 1

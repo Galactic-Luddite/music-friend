@@ -385,8 +385,50 @@ def _candidate_artist_local_ids(release: Release, artist_local_id: str) -> tuple
     return tuple(seen)
 
 
+#: Typographic quote/apostrophe variants folded to the ASCII form they stand in for
+#: (issue #56): a curly single quote/apostrophe/reversed-9-quote/prime maps to ``'``,
+#: and a curly double quote/double-prime maps to ``"``.
+_TITLE_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "‘": "'",  # LEFT SINGLE QUOTATION MARK
+        "’": "'",  # RIGHT SINGLE QUOTATION MARK
+        "‛": "'",  # SINGLE HIGH-REVERSED-9 QUOTATION MARK
+        "′": "'",  # PRIME
+        "“": '"',  # LEFT DOUBLE QUOTATION MARK
+        "”": '"',  # RIGHT DOUBLE QUOTATION MARK
+        "″": '"',  # DOUBLE PRIME
+    }
+)
+#: Dash variants (hyphen through horizontal bar, plus minus sign) folded to ``-``,
+#: and the ellipsis character folded to three literal periods (issue #56).
+_TITLE_DASH_TRANSLATION = str.maketrans(
+    {
+        "‐": "-",  # HYPHEN
+        "‑": "-",  # NON-BREAKING HYPHEN
+        "‒": "-",  # FIGURE DASH
+        "–": "-",  # EN DASH
+        "—": "-",  # EM DASH
+        "―": "-",  # HORIZONTAL BAR
+        "−": "-",  # MINUS SIGN
+        "…": "...",  # HORIZONTAL ELLIPSIS
+    }
+)
+
+
 def _normalized_title(title: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", title).casefold().split())
+    """Fold a release title to a cross-source comparison key (issue #56).
+
+    Applies Unicode NFKC normalization, maps typographic quote and dash variants to
+    their ASCII equivalents, case-folds, and collapses whitespace, so titles that
+    differ only in typographic punctuation or Unicode form (curly vs. straight
+    apostrophe, en/em dash vs. hyphen, NFD vs. NFC accents, doubled spaces) compare
+    equal across sources. The stored display title is never altered -- only this
+    comparison key.
+    """
+    normalized = unicodedata.normalize("NFKC", title)
+    normalized = normalized.translate(_TITLE_QUOTE_TRANSLATION)
+    normalized = normalized.translate(_TITLE_DASH_TRANSLATION)
+    return " ".join(normalized.casefold().split())
 
 
 def _material_identity(release: Release, source_name: str, native_id: str) -> str:

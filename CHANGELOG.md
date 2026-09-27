@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Fixed cross-source dedupe missing titles that differ only in typographic punctuation or Unicode
+  form (issue #56): a curly apostrophe/quote, an en/em dash, an NFD-decomposed accent, or doubled
+  whitespace no longer produces a second inbox item for a release already reported under the ASCII
+  or NFC-normalized spelling by another source. Only the comparison key is normalized; the stored
+  display title is unchanged, and titles differing by a real character (for example "Stop" vs.
+  "Stops", or a genuinely different accented letter) still stay separate. Added
+  `music-friend data dedupe-inbox [--apply]` to find and, on request, dismiss existing inbox rows
+  created before this fix that the same normalized key now treats as duplicates; dry-run by
+  default, and dismissal is reversible (it marks the row `dismissed`, the same state
+  `update_inbox_item` uses, rather than deleting it).
+- Fixed `doctor` reporting only the first configured release source (`release_sources[0]`) instead
+  of every source when two or more are configured; the existing `sources` list already reported
+  them all correctly, so the misleading singular `source` key is dropped rather than duplicated.
 - Fixed `update_setup`'s `event_radius` MCP argument silently accepting `true`/`false` as a valid
   radius (Python's `bool` is a subclass of `int`, so the prior `isinstance` check let a boolean
   through and stored it as radius `1`). `event_radius` now uses the same strict `type(value)`
