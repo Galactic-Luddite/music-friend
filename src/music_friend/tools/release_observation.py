@@ -280,24 +280,35 @@ def _observation_reference(observation: ReleaseObservation) -> SourceReference:
 def _resolve_release_identity(
     catalog: Catalog, observation: ReleaseObservation
 ) -> tuple[IdentityMethod, tuple[str, ...]]:
-    """Resolve by native id, then by the source's own cross-source links.
+    """Resolve release identity through the ladder: tier 1 (native), tier 2 (external links),
+    tier 4 (title key). Returns every matching release; more than one is ambiguous or a conflict.
 
-    Returns every matching release; more than one is ambiguous (native id) or a conflict
-    (external links) and the observation becomes its own release. Title-key matching stays
-    in release discovery until the identity ladder of issue C replaces it.
+    Tier 1 (native id): a candidate whose (source, native_id) is already attached as a
+    non-provisional reference merges without consulting lower tiers.
+
+    Tier 2 (external links): each link in observation.external_links is looked up via
+    tier 1 (by source and native_id). Matches are checked for corroboration: if a link is
+    provisional and the release it targets differs from the one tier 1 would pick, it's a
+    late link (conflict, not merge). All tier-2 matches must resolve to the same release
+    (exactly-one-or-nothing).
+
+    Tier 4 (title key): conservative title matching with the existing find_release_discovery_variant.
     """
+    # Tier 1: native_id (only non-provisional references, issue #63)
     native = catalog.find_releases_by_source_reference(observation.source, observation.native_id)
     if native:
         return IdentityMethod.NATIVE_ID, native
+
+    # Tier 2: external_links (provisional by default)
     linked: list[str] = []
     for link in observation.external_links:
-        for release_local_id in catalog.find_releases_by_source_reference(
-            link.source, link.native_id
-        ):
+        for release_local_id in catalog.find_releases_by_source_reference(link.source, link.native_id):
             if release_local_id not in linked:
                 linked.append(release_local_id)
     if linked:
         return IdentityMethod.EXTERNAL_LINK, tuple(linked)
+
+    # Tier 4: title_key (existing discovery logic, deferred to release_discovery layer)
     return IdentityMethod.NONE, ()
 
 

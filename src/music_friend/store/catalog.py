@@ -132,6 +132,51 @@ _FEAT_CREDIT = re.compile(r"^(?P<base>.+?)\s*\(feat\.?\s+[^()]*\)\Z")
 _FROM_CREDIT = re.compile(r"^(?P<base>.+?)\s*[(\[]from\s+[^()\[\]]*[)\]]\Z", re.IGNORECASE)
 _REMIX_QUALIFIER = re.compile(r"^(?P<base>.+?)\s*\((?P<remixer>[^()]*?)\s*remix\)\Z")
 
+#: Typographic quote variants folded to ASCII equivalents (issue #56 / #59).
+_TITLE_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "‘": "'",  # LEFT SINGLE QUOTATION MARK
+        "’": "'",  # RIGHT SINGLE QUOTATION MARK
+        "‛": "'",  # SINGLE HIGH-REVERSED-9 QUOTATION MARK
+        "′": "'",  # PRIME
+        "“": '"',  # LEFT DOUBLE QUOTATION MARK
+        "”": '"',  # RIGHT DOUBLE QUOTATION MARK
+        "″": '"',  # DOUBLE PRIME
+    }
+)
+#: Dash variants (hyphen through horizontal bar, plus minus sign) folded to ``-`` (issue #56 / #59).
+_TITLE_DASH_TRANSLATION = str.maketrans(
+    {
+        "‐": "-",  # HYPHEN
+        "‑": "-",  # NON-BREAKING HYPHEN
+        "‒": "-",  # FIGURE DASH
+        "–": "-",  # EN DASH
+        "—": "-",  # EM DASH
+        "―": "-",  # HORIZONTAL BAR
+        "−": "-",  # MINUS SIGN
+    }
+)
+
+
+def _fold_ellipsis(text: str) -> str:
+    """Replace horizontal ellipsis (…) with three periods."""
+    return text.replace("…", "...")
+
+
+def fold_title_key(title: str) -> str:
+    """Fold a release title to a cross-source comparison key (issue #56, #59).
+
+    Applies Unicode NFKC normalization, maps typographic quote and dash variants to
+    their ASCII equivalents, case-folds, and collapses whitespace. The stored display
+    title is never altered -- only this comparison key. Used by both tier-4 discovery
+    and the identity ladder.
+    """
+    normalized = unicodedata.normalize("NFKC", title)
+    normalized = normalized.translate(_TITLE_QUOTE_TRANSLATION)
+    normalized = normalized.translate(_TITLE_DASH_TRANSLATION)
+    normalized = _fold_ellipsis(normalized)
+    return " ".join(normalized.casefold().split())
+
 
 def _release_title_variant_key(normalized_title: str) -> tuple[str, str | None]:
     """Fold decorations that never distinguish genuinely different releases (issue #50, #54).
@@ -3054,4 +3099,4 @@ class Catalog:
         return [str(row[0]) for row in rows]
 
 
-__all__ = ["Catalog"]
+__all__ = ["Catalog", "fold_title_key"]

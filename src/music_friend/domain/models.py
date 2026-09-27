@@ -16,6 +16,7 @@ RecordId = str
 
 class IdentityConfidence(str, Enum):
     SOURCE_ONLY = "source_only"
+    PROVISIONAL = "provisional"
     EXTERNAL_ID = "external_id"
     USER_CONFIRMED = "user_confirmed"
 

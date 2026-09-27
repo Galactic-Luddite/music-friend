@@ -28,7 +28,6 @@ from uuid import uuid4
 from music_friend.domain import InboxEntry, InboxState, Release, Signal, SignalKind
 from music_friend.store.catalog import InboxEntrySnapshotRecord
 from music_friend.tools.application import MusicFriendApplication
-from music_friend.tools.release_discovery import _normalized_title
 
 #: The only detection tier currently implemented; see the module docstring's narrowing note.
 TIER_TITLE_KEY = "title_key"
@@ -70,7 +69,7 @@ def find_duplicate_pairs(application: MusicFriendApplication) -> tuple[Duplicate
     groups: dict[tuple[str, frozenset[str], str], list[Release]] = {}
     for release in application._catalog.list_releases():
         key = (
-            _normalized_title(release.title),
+            fold_title_key(release.title),
             frozenset(release.artist_refs),
             release.release_date.isoformat(),
         )

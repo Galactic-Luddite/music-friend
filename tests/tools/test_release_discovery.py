@@ -24,9 +24,8 @@ from music_friend.providers import (
     ProviderCapabilities,
     ProviderHealth,
 )
-from music_friend.store import Catalog
+from music_friend.store import Catalog, fold_title_key
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.release_discovery import _normalized_title
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 RAW_ERROR_CANARY = "raw-release-provider-canary"
@@ -1236,7 +1235,7 @@ def test_bare_remix_never_matches_the_plain_original_title(tmp_path: Path) -> No
 def test_normalized_title_folds_typographic_variants_to_the_same_key(left: str, right: str) -> None:
     """AC (issue #56): titles differing only by typographic punctuation, Unicode
     form, or whitespace collapse to the same comparison key."""
-    assert _normalized_title(left) == _normalized_title(right)
+    assert fold_title_key(left) == fold_title_key(right)
 
 
 @pytest.mark.parametrize(
@@ -1250,7 +1249,7 @@ def test_normalized_title_folds_typographic_variants_to_the_same_key(left: str, 
 def test_normalized_title_keeps_real_differences_distinct(left: str, right: str) -> None:
     """Negative test (issue #56): titles differing by real characters, including a
     different accented letter, must not collapse to the same comparison key."""
-    assert _normalized_title(left) != _normalized_title(right)
+    assert fold_title_key(left) != fold_title_key(right)
 
 
 def test_cross_source_dedupe_merges_titles_differing_only_by_typographic_apostrophe(

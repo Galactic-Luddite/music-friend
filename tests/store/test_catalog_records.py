@@ -655,3 +655,32 @@ def test_releases_map_many_to_one_onto_subjects(catalog: Catalog) -> None:
         )
         assert found is not None
         assert found.local_id == "entry-shared"
+
+
+
+
+def test_title_key_folds_typographic_punctuation() -> None:
+    """fold_title_key() normalizes typographic variants and punctuation (issue #56, #59)."""
+    from music_friend.store.catalog import fold_title_key
+
+    # Test various typographic replacements
+    assert fold_title_key("Artist – Album") == "artist - album"  # en-dash to hyphen
+    assert fold_title_key("Mix—Remaster") == "mix-remaster"  # em-dash to hyphen
+    assert fold_title_key("It's a Track") == "it's a track"  # curly apostrophe to straight
+    assert fold_title_key("Song (Remix)") == "song (remix)"  # parentheses unchanged
+    assert fold_title_key("The QUICK Brown") == "the quick brown"  # case folding
+    assert fold_title_key("Double  Spaced") == "double spaced"  # whitespace collapse
+
+
+def test_title_key_keeps_real_differences() -> None:
+    """fold_title_key() preserves meaningful differences in titles (issue #50, #56)."""
+    from music_friend.store.catalog import fold_title_key
+
+    # Titles that should remain different after folding
+    key1 = fold_title_key("Album")
+    key2 = fold_title_key("Album Deluxe")
+    assert key1 != key2
+
+    key1 = fold_title_key("Song A")
+    key2 = fold_title_key("Song B")
+    assert key1 != key2
