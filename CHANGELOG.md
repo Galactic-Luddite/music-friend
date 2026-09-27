@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Added `music-friend data inbox duplicates [--merge --yes]` and
+  `music-friend data inbox unmerge MERGE_ID --yes` (issue #64) to find, merge, and reversibly
+  unmerge cross-subject duplicate releases -- two releases that ended up in different inbox
+  subjects for the same real-world release, typically because they arrived from different
+  sources or predate a title-normalization fix. `data inbox duplicates` is dry-run by default and
+  makes no network request; `--merge --yes` re-points the later release's subject onto the
+  earlier one's and collapses the two inbox entries (the more-decided one wins), recording an
+  audit trail that `data inbox unmerge` can undo via compare-and-swap -- it restores the
+  pre-merge state only if nothing has changed the merge's winning entry since, and otherwise
+  reports why it left the newer decision alone. **Removes `music-friend data dedupe-inbox`**
+  (added below for issue #56 AC 3; superseded once migration 014 made cross-source duplicates a
+  cross-subject problem the new commands solve directly) -- run `data inbox duplicates --merge
+  --yes` instead of `dedupe-inbox --apply`.
 - Fixed cross-source dedupe missing titles that differ only in typographic punctuation or Unicode
   form (issue #56): a curly apostrophe/quote, an en/em dash, an NFD-decomposed accent, or doubled
   whitespace no longer produces a second inbox item for a release already reported under the ASCII

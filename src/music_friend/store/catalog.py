@@ -21,6 +21,7 @@ import time
 import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
@@ -185,6 +186,22 @@ def _release_title_variants_compatible(
 
 def _datetime_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True, slots=True)
+class InboxEntrySnapshotRecord:
+    """One pre-merge inbox row as recorded by a subject merge (issue D CAS ``unmerge``)."""
+
+    role: str
+    local_id: str
+    kind: SignalKind
+    subject_local_id: str
+    signal_local_id: str
+    state: InboxState
+    created_at: datetime
+    updated_at: datetime
+    winner_local_id: str
+    winner_updated_at_after: datetime
 
 
 def _summary_json(summary: RefreshSummary) -> str:
@@ -2628,6 +2645,214 @@ class Catalog:
                 raise sqlite3.IntegrityError("inbox entry disappeared during list")
             records.append(entry)
         return tuple(records)
+
+    def list_releases(self) -> tuple[Release, ...]:
+        """List every canonical release, oldest-first (issue D duplicate scanning)."""
+        rows = (
+            self._require_connection()
+            .execute("SELECT local_id FROM releases ORDER BY observed_at ASC, local_id ASC")
+            .fetchall()
+        )
+        releases: list[Release] = []
+        for row in rows:
+            release = self.get_release(str(row[0]))
+            if release is None:
+                raise sqlite3.IntegrityError("release disappeared during list")
+            releases.append(release)
+        return tuple(releases)
+
+    def list_release_local_ids_for_subject(self, subject_local_id: str) -> tuple[str, ...]:
+        """List every release local id currently pointing at one subject."""
+        rows = (
+            self._require_connection()
+            .execute(
+                "SELECT local_id FROM releases WHERE subject_local_id = ? ORDER BY local_id",
+                (subject_local_id,),
+            )
+            .fetchall()
+        )
+        return tuple(str(row[0]) for row in rows)
+
+    def repoint_release_subject(
+        self,
+        release_local_id: str,
+        to_subject_local_id: str,
+        *,
+        merge_id: str,
+        merged_at: datetime,
+    ) -> str:
+        """Re-point one release to another subject and record the move in ``subject_merges``.
+
+        Returns the release's ``subject_local_id`` before the move (issue D CLI merge; never
+        used by ``put_release``, which never changes an existing release's subject).
+        """
+        with self.transaction():
+            connection = self._require_connection()
+            row = connection.execute(
+                "SELECT subject_local_id FROM releases WHERE local_id = ?", (release_local_id,)
+            ).fetchone()
+            if row is None:
+                raise sqlite3.IntegrityError("release does not exist")
+            from_subject_local_id = str(row[0])
+            connection.execute(
+                "UPDATE releases SET subject_local_id = ? WHERE local_id = ?",
+                (to_subject_local_id, release_local_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO subject_merges
+                    (merge_id, release_local_id, from_subject_local_id, to_subject_local_id,
+                     merged_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    merge_id,
+                    release_local_id,
+                    from_subject_local_id,
+                    to_subject_local_id,
+                    _datetime_text(merged_at),
+                ),
+            )
+        return from_subject_local_id
+
+    def list_subject_merges(self, merge_id: str) -> tuple[tuple[str, str, str], ...]:
+        """List ``(release_local_id, from_subject_local_id, to_subject_local_id)`` for one merge."""
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT release_local_id, from_subject_local_id, to_subject_local_id
+                FROM subject_merges WHERE merge_id = ?
+                """,
+                (merge_id,),
+            )
+            .fetchall()
+        )
+        return tuple((str(row[0]), str(row[1]), str(row[2])) for row in rows)
+
+    def revert_subject_merges(self, merge_id: str) -> None:
+        """Re-point every release moved by one merge back to its recorded origin subject."""
+        with self.transaction():
+            connection = self._require_connection()
+            rows = connection.execute(
+                "SELECT release_local_id, from_subject_local_id FROM subject_merges"
+                " WHERE merge_id = ?",
+                (merge_id,),
+            ).fetchall()
+            for release_local_id, from_subject_local_id in rows:
+                connection.execute(
+                    "UPDATE releases SET subject_local_id = ? WHERE local_id = ?",
+                    (from_subject_local_id, release_local_id),
+                )
+
+    def put_inbox_entry_snapshot(
+        self,
+        *,
+        merge_id: str,
+        role: str,
+        local_id: str,
+        kind: SignalKind,
+        subject_local_id: str,
+        signal_local_id: str,
+        state: InboxState,
+        created_at: datetime,
+        updated_at: datetime,
+        winner_local_id: str,
+        winner_updated_at_after: datetime,
+        merged_at: datetime,
+    ) -> None:
+        """Record one pre-merge inbox row as it was, for CAS ``unmerge`` (issue D)."""
+        if role not in {"winner_before", "loser"}:
+            raise ValueError("role must be 'winner_before' or 'loser'")
+        with self.transaction():
+            self._require_connection().execute(
+                """
+                INSERT INTO inbox_entry_snapshots
+                    (merge_id, role, local_id, kind, subject_local_id, signal_local_id, state,
+                     created_at, updated_at, winner_local_id, winner_updated_at_after, merged_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    merge_id,
+                    role,
+                    local_id,
+                    kind.value,
+                    subject_local_id,
+                    signal_local_id,
+                    state.value,
+                    _datetime_text(created_at),
+                    _datetime_text(updated_at),
+                    winner_local_id,
+                    _datetime_text(winner_updated_at_after),
+                    _datetime_text(merged_at),
+                ),
+            )
+
+    def list_inbox_entry_snapshots(self, merge_id: str) -> tuple[InboxEntrySnapshotRecord, ...]:
+        """List every snapshot row recorded for one merge (both roles, if both exist)."""
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT role, local_id, kind, subject_local_id, signal_local_id, state,
+                       created_at, updated_at, winner_local_id, winner_updated_at_after
+                FROM inbox_entry_snapshots WHERE merge_id = ?
+                ORDER BY snapshot_id ASC
+                """,
+                (merge_id,),
+            )
+            .fetchall()
+        )
+        return tuple(
+            InboxEntrySnapshotRecord(
+                role=str(row[0]),
+                local_id=str(row[1]),
+                kind=SignalKind(str(row[2])),
+                subject_local_id=str(row[3]),
+                signal_local_id=str(row[4]),
+                state=InboxState(str(row[5])),
+                created_at=datetime.fromisoformat(str(row[6])),
+                updated_at=datetime.fromisoformat(str(row[7])),
+                winner_local_id=str(row[8]),
+                winner_updated_at_after=datetime.fromisoformat(str(row[9])),
+            )
+            for row in rows
+        )
+
+    def delete_inbox_entry(self, local_id: str) -> None:
+        """Physically remove one inbox row (issue D merge collapse; the row is snapshotted
+        first, so this stays reversible through ``unmerge``)."""
+        with self.transaction():
+            self._require_connection().execute(
+                "DELETE FROM inbox_entries WHERE local_id = ?", (local_id,)
+            )
+
+    def insert_inbox_entry_row(self, entry: InboxEntry) -> None:
+        """Insert one inbox row, failing if its ``(kind, subject_local_id)`` slot is taken.
+
+        Used only by ``unmerge`` to restore a loser row onto its original, now-empty subject
+        slot; unlike :meth:`put_inbox_entry`, this never upserts onto an existing row.
+        """
+        with self.transaction():
+            if self.get_signal(entry.latest_signal_local_id) is None:
+                raise sqlite3.IntegrityError("inbox signal does not exist")
+            self._require_connection().execute(
+                """
+                INSERT INTO inbox_entries
+                    (local_id, kind, subject_local_id, latest_signal_local_id, state,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.local_id,
+                    entry.kind.value,
+                    entry.subject_local_id,
+                    entry.latest_signal_local_id,
+                    entry.state.value,
+                    _datetime_text(entry.created_at),
+                    _datetime_text(entry.updated_at),
+                ),
+            )
 
     def set_check_time(self, source_name: str, checked_at: datetime) -> None:
         """Record the last successful source check normalized to UTC."""

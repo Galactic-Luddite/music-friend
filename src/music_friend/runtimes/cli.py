@@ -33,7 +33,6 @@ from music_friend.domain import (
     InboxState,
     RefreshMetricKind,
     RefreshRun,
-    SignalKind,
     WatchlistEntry,
 )
 from music_friend.providers import Capability, MusicSource
@@ -56,8 +55,12 @@ from music_friend.providers.ticketmaster import (
 from music_friend.providers.ticketmaster.transport import TicketmasterTransport
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.refresh import RefreshInvocation, refresh_once, update_inbox_state
-from music_friend.tools.release_discovery import _normalized_title
+from music_friend.tools.inbox_maintenance import (
+    find_duplicate_pairs,
+    merge_all_duplicate_pairs,
+    unmerge,
+)
+from music_friend.tools.refresh import RefreshInvocation, refresh_once
 from music_friend.tools.scheduler import (
     SchedulePlatform,
     ScheduleStatus,
@@ -81,8 +84,9 @@ AuthorizerFactory = Callable[
 _USAGE = (
     "Usage: music-friend doctor | setup [--release-sources spotify,musicbrainz,deezer] | connect spotify | disconnect spotify | status | "
     "refresh catalog|releases|events|all [--force] | watchlist list | inbox list|show | "
-    "data export|import|import-spotify|backup|restore|delete|dedupe-inbox [--apply] | diagnostics | "
-    "schedule install|status|remove | version\n"
+    "data export|import|import-spotify|backup|restore|delete | "
+    "data inbox duplicates [--merge --yes] | data inbox unmerge MERGE_ID --yes | "
+    "diagnostics | schedule install|status|remove | version\n"
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
 )
@@ -1162,92 +1166,93 @@ def _data_command(
             return rejected
         application.delete_data()
         return _emit({"status": "deleted"}, structured, stdout, text="Local data deleted.")
-    if (
-        len(argv) in {1, 2}
-        and argv[0] == "dedupe-inbox"
-        and (len(argv) == 1 or argv[1] == "--apply")
-    ):
-        apply_changes = len(argv) == 2
-        return _dedupe_inbox_command(application, apply_changes, structured, stdout)
+    if len(argv) >= 2 and argv[0] == "inbox" and argv[1] == "duplicates":
+        extra_args = argv[2:]
+        merge_flag = "--merge" in extra_args
+        yes_flag = "--yes" in extra_args
+        recognized = {"--merge", "--yes"}
+        if any(arg not in recognized for arg in extra_args) or (merge_flag != yes_flag):
+            print(_USAGE, end="", file=stderr)
+            return 2
+        return _inbox_duplicates_command(application, merge_flag, structured, stdout)
+    if len(argv) == 4 and argv[0] == "inbox" and argv[1] == "unmerge" and argv[3] == "--yes":
+        return _inbox_unmerge_command(application, argv[2], structured, stdout)
     print(_USAGE, end="", file=stderr)
     return 2
 
 
-def _duplicate_inbox_candidates(
+def _inbox_duplicates_command(
     application: MusicFriendApplication,
-) -> tuple[tuple[InboxEntry, InboxEntry], ...]:
-    """Find existing not-yet-dismissed release inbox items that the cross-source
-    title-normalization key (issue #56) would now treat as the same release.
-
-    These rows predate the normalization fix, so this scans stored state directly
-    rather than relying on the write-path dedupe. Groups release-kind inbox entries
-    by ``(normalized_title, artist_refs, release_date)`` and, within any group of
-    two or more, pairs every later entry (by ``created_at``, then ``local_id`` for a
-    stable tie-break) with the earliest one to keep. Same-source dedupe already
-    prevents a duplicate provider_native_id from reaching the inbox, so this only
-    ever surfaces genuine cross-source or pre-fix duplicates.
-    """
-    groups: dict[tuple[str, frozenset[str], str], list[InboxEntry]] = {}
-    for entry in application.list_inbox_entries(None, limit=500):
-        if entry.state is InboxState.DISMISSED:
-            continue
-        signal = application.get_signal(entry.latest_signal_local_id)
-        if signal is None or signal.kind is not SignalKind.RELEASE:
-            continue
-        release = application.get_release(signal.record_local_id)
-        if release is None:
-            continue
-        key = (
-            _normalized_title(release.title),
-            frozenset(release.artist_refs),
-            release.release_date.isoformat(),
-        )
-        groups.setdefault(key, []).append(entry)
-    pairs: list[tuple[InboxEntry, InboxEntry]] = []
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        ordered = sorted(members, key=lambda item: (item.created_at, item.local_id))
-        keep = ordered[0]
-        for extra in ordered[1:]:
-            pairs.append((keep, extra))
-    return tuple(pairs)
-
-
-def _dedupe_inbox_command(
-    application: MusicFriendApplication,
-    apply_changes: bool,
+    merge: bool,
     structured: bool,
     stdout: TextIO,
 ) -> int:
-    """List (default) or, with ``--apply``, dismiss candidate duplicate inbox
-    rows found by :func:`_duplicate_inbox_candidates` (issue #56 part 2).
+    """List (default) or, with ``merge=True``, merge cross-subject duplicate releases.
 
-    Dismissal reuses the existing ``dismissed`` inbox state via
-    :func:`update_inbox_state`, so it never deletes a row and stays reversible
-    through ``inbox show``/``update_inbox_item`` the same way any other
-    dismiss decision is.
+    Dry run (default): lists every pair :func:`inbox_maintenance.find_duplicate_pairs` finds,
+    plus the currently-empty ``conflicts`` list (see ``inbox_maintenance``'s module docstring
+    for the narrowing: no ``identity_conflict`` observation exists yet to report), and writes
+    nothing. ``merge=True`` merges every listed pair and reports the generated ``merge_id``s; a
+    second dry-run call afterward lists nothing, since every merged pair now shares one subject.
     """
-    pairs = _duplicate_inbox_candidates(application)
+    if merge:
+        merge_ids = merge_all_duplicate_pairs(application, now=_utc_now())
+        payload: dict[str, object] = {"merged": list(merge_ids)}
+        text = (
+            "Music Friend found no candidate duplicate releases to merge."
+            if not merge_ids
+            else f"Merged {len(merge_ids)} duplicate release pair(s): " + ", ".join(merge_ids)
+        )
+        return _emit(payload, structured, stdout, text=text)
+    pairs = find_duplicate_pairs(application)
     candidates: list[dict[str, object]] = [
-        {"keep": keep.local_id, "dismiss": extra.local_id} for keep, extra in pairs
+        {
+            "tier": pair.tier,
+            "keep": {
+                "release": pair.keep_release.local_id,
+                "title": pair.keep_release.title,
+                "subject": pair.keep_subject_local_id,
+                "inbox_state": pair.keep_state,
+            },
+            "other": {
+                "release": pair.other_release.local_id,
+                "title": pair.other_release.title,
+                "subject": pair.other_subject_local_id,
+                "inbox_state": pair.other_state,
+            },
+        }
+        for pair in pairs
     ]
-    if apply_changes:
-        now = _utc_now()
-        for _keep, extra in pairs:
-            update_inbox_state(application, extra.local_id, InboxState.DISMISSED, updated_at=now)
-    payload = {"candidates": candidates, "applied": apply_changes}
-    return _emit(payload, structured, stdout, text=_dedupe_inbox_text(candidates, apply_changes))
+    payload = {"candidates": candidates, "conflicts": []}
+    return _emit(payload, structured, stdout, text=_inbox_duplicates_text(candidates))
 
 
-def _dedupe_inbox_text(candidates: list[dict[str, object]], applied: bool) -> str:
+def _inbox_duplicates_text(candidates: list[dict[str, object]]) -> str:
     if not candidates:
-        return "Music Friend found no candidate duplicate inbox items."
-    lines = [f"keep {item['keep']} dismiss {item['dismiss']}" for item in candidates]
-    action = "Dismissed" if applied else "Would dismiss (dry run;"
-    suffix = "" if applied else " re-run with --apply to dismiss)"
-    header = f"{action} {len(candidates)} candidate duplicate inbox item(s){suffix}:"
+        return "Music Friend found no candidate duplicate releases."
+    lines = []
+    for item in candidates:
+        keep = item["keep"]
+        other = item["other"]
+        assert isinstance(keep, dict) and isinstance(other, dict)
+        lines.append(
+            f"[{item['tier']}] keep {keep['release']!r} ({keep['inbox_state']}) "
+            f"<-> other {other['release']!r} ({other['inbox_state']}): "
+            f"{keep['title']!r} / {other['title']!r}"
+        )
+    header = f"Found {len(candidates)} candidate duplicate release pair(s) (dry run):"
     return header + "\n" + "\n".join(lines)
+
+
+def _inbox_unmerge_command(
+    application: MusicFriendApplication,
+    merge_id: str,
+    structured: bool,
+    stdout: TextIO,
+) -> int:
+    restored, message = unmerge(application, merge_id)
+    payload = {"merge_id": merge_id, "restored": restored, "message": message}
+    return _emit(payload, structured, stdout, text=message)
 
 
 def _schedule_command(action: str, structured: bool, stdout: TextIO, stderr: TextIO) -> int:
