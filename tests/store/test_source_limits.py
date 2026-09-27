@@ -51,7 +51,7 @@ def test_source_limit_portable_export_import_round_trip(tmp_path: Path) -> None:
     payload = json.loads(portable.read_text(encoding="utf-8"))
     record = next(item for item in payload["records"] if item["kind"] == "source_limit")
 
-    assert payload["version"] == 4
+    assert payload["version"] == 5
     assert record == {
         "kind": "source_limit",
         "local_id": "spotify",

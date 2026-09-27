@@ -80,10 +80,15 @@ except ImportError:  # pragma: no cover - exercised by the documented fallback p
 
 _BUSY_TIMEOUT_MS = 5_000
 _MAX_QUERY_LIMIT = 500
+_MIN_SQLITE_VERSION = (3, 25, 0)
 
 
 class _UnsafeCatalogPath(Exception):
     pass
+
+
+class _SqliteTooOldError(Exception):
+    """Raised internally when the connected SQLite build lacks window functions."""
 
 
 def _bounded_limit(limit: object) -> int:
@@ -562,6 +567,8 @@ class Catalog:
             if mode is None or str(mode[0]).lower() != "wal":
                 raise sqlite3.OperationalError("WAL mode unavailable")
             connection.execute("PRAGMA synchronous = FULL")
+            if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION:
+                raise _SqliteTooOldError
             migrations.apply_migrations(connection)
             if database_fd >= 0:
                 os.close(database_fd)
@@ -574,7 +581,7 @@ class Catalog:
                 database_path,
                 (opened.st_dev, opened.st_ino),
             )
-        except (OSError, sqlite3.Error, _UnsafeCatalogPath) as error:
+        except (OSError, sqlite3.Error, _UnsafeCatalogPath, _SqliteTooOldError) as error:
             if connection is not None:
                 connection.close()
             if created and opened is not None:
@@ -586,6 +593,14 @@ class Catalog:
                 os.close(database_fd)
             if parent_fd >= 0:
                 os.close(parent_fd)
+            if isinstance(error, _SqliteTooOldError):
+                minimum = ".".join(str(part) for part in _MIN_SQLITE_VERSION)
+                raise CatalogUnavailableError(
+                    public_message=(
+                        f"The local catalog requires SQLite {minimum} or newer "
+                        "for window-function support."
+                    )
+                ) from error
             raise CatalogUnavailableError() from error
 
     def _require_connection(self) -> sqlite3.Connection:
@@ -836,14 +851,31 @@ class Catalog:
         return tuple(artists)
 
     def put_release(self, release: Release) -> None:
-        """Insert or replace one canonical release and its ordered artist links."""
+        """Insert or replace one canonical release and its ordered artist links.
+
+        ``subject_local_id`` identifies the release's inbox subject. A brand new release
+        defaults to its own local_id (one subject per release) unless the caller names an
+        existing subject to join, e.g. after a user-reviewed merge. Once set, put_release
+        never changes an existing release's subject; that requires a separate merge/unmerge
+        operation (issue D).
+        """
         with self.transaction():
             connection = self._require_connection()
+            subject_local_id = release.subject_local_id or release.local_id
+            connection.execute(
+                """
+                INSERT INTO inbox_subjects (local_id, kind, created_at)
+                VALUES (?, 'release', ?)
+                ON CONFLICT (local_id) DO NOTHING
+                """,
+                (subject_local_id, _datetime_text(release.observed_at)),
+            )
             connection.execute(
                 """
                 INSERT INTO releases
-                    (local_id, title, release_type, release_date, date_precision, observed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (local_id, title, release_type, release_date, date_precision, observed_at,
+                     subject_local_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (local_id) DO UPDATE SET
                     title = excluded.title,
                     release_type = excluded.release_type,
@@ -858,6 +890,7 @@ class Catalog:
                     release.release_date.isoformat(),
                     release.date_precision.value,
                     _datetime_text(release.observed_at),
+                    subject_local_id,
                 ),
             )
             connection.execute(
@@ -875,7 +908,8 @@ class Catalog:
         connection = self._require_connection()
         row = connection.execute(
             """
-            SELECT local_id, title, release_type, release_date, date_precision, observed_at
+            SELECT local_id, title, release_type, release_date, date_precision, observed_at,
+                   subject_local_id
             FROM releases WHERE local_id = ?
             """,
             (local_id,),
@@ -898,12 +932,25 @@ class Catalog:
             artist_refs=artist_refs,
             source_refs=self._source_refs("release", str(row[0])),
             observed_at=datetime.fromisoformat(str(row[5])),
+            subject_local_id=None if row[6] is None else str(row[6]),
         )
 
     def put_event(self, event: Event) -> None:
-        """Insert or replace one canonical event and its ordered links."""
+        """Insert or replace one canonical event and its ordered links.
+
+        Events are 1:1 with their inbox subject (the subject id is the event's own
+        local_id), so every event also ensures its own ``inbox_subjects`` row exists.
+        """
         with self.transaction():
             connection = self._require_connection()
+            connection.execute(
+                """
+                INSERT INTO inbox_subjects (local_id, kind, created_at)
+                VALUES (?, 'event', ?)
+                ON CONFLICT (local_id) DO NOTHING
+                """,
+                (event.local_id, _datetime_text(event.observed_at)),
+            )
             connection.execute(
                 """
                 INSERT INTO events
@@ -2452,8 +2499,9 @@ class Catalog:
                 """
                 SELECT signals.local_id
                 FROM signals
-                LEFT JOIN inbox_entries ON inbox_entries.signal_local_id = signals.local_id
-                WHERE inbox_entries.signal_local_id IS NULL
+                LEFT JOIN inbox_entries
+                    ON inbox_entries.latest_signal_local_id = signals.local_id
+                WHERE inbox_entries.latest_signal_local_id IS NULL
                 ORDER BY signals.observed_at ASC, signals.local_id ASC
                 LIMIT ?
                 """,
@@ -2470,24 +2518,34 @@ class Catalog:
         return tuple(records)
 
     def put_inbox_entry(self, entry: InboxEntry) -> None:
-        """Upsert one local inbox state record for an existing signal."""
+        """Upsert one local inbox state record for an existing signal.
+
+        The schema's ``UNIQUE (kind, subject_local_id)`` constraint is the sole guard against
+        a second inbox entry for one subject: inserting a second entry for a subject that
+        already has one raises ``sqlite3.IntegrityError`` with no code-level duplicate check.
+        """
         with self.transaction():
-            if self.get_signal(entry.signal_local_id) is None:
+            if self.get_signal(entry.latest_signal_local_id) is None:
                 raise sqlite3.IntegrityError("inbox signal does not exist")
             self._require_connection().execute(
                 """
                 INSERT INTO inbox_entries
-                    (local_id, signal_local_id, state, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (local_id, kind, subject_local_id, latest_signal_local_id, state,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (local_id) DO UPDATE SET
-                    signal_local_id = excluded.signal_local_id,
+                    kind = excluded.kind,
+                    subject_local_id = excluded.subject_local_id,
+                    latest_signal_local_id = excluded.latest_signal_local_id,
                     state = excluded.state,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at
                 """,
                 (
                     entry.local_id,
-                    entry.signal_local_id,
+                    entry.kind.value,
+                    entry.subject_local_id,
+                    entry.latest_signal_local_id,
                     entry.state.value,
                     _datetime_text(entry.created_at),
                     _datetime_text(entry.updated_at),
@@ -2500,7 +2558,8 @@ class Catalog:
             self._require_connection()
             .execute(
                 """
-            SELECT local_id, signal_local_id, state, created_at, updated_at
+            SELECT local_id, kind, subject_local_id, latest_signal_local_id, state,
+                   created_at, updated_at
             FROM inbox_entries WHERE local_id = ?
             """,
                 (local_id,),
@@ -2511,11 +2570,27 @@ class Catalog:
             return None
         return InboxEntry(
             local_id=str(row[0]),
-            signal_local_id=str(row[1]),
-            state=InboxState(str(row[2])),
-            created_at=datetime.fromisoformat(str(row[3])),
-            updated_at=datetime.fromisoformat(str(row[4])),
+            kind=SignalKind(str(row[1])),
+            subject_local_id=str(row[2]),
+            latest_signal_local_id=str(row[3]),
+            state=InboxState(str(row[4])),
+            created_at=datetime.fromisoformat(str(row[5])),
+            updated_at=datetime.fromisoformat(str(row[6])),
         )
+
+    def get_inbox_entry_for_subject(
+        self, kind: SignalKind, subject_local_id: str
+    ) -> InboxEntry | None:
+        """Read the single inbox entry shared by every release/event under one subject."""
+        row = (
+            self._require_connection()
+            .execute(
+                "SELECT local_id FROM inbox_entries WHERE kind = ? AND subject_local_id = ?",
+                (kind.value, subject_local_id),
+            )
+            .fetchone()
+        )
+        return None if row is None else self.get_inbox_entry(str(row[0]))
 
     def list_inbox_entries(self, state: InboxState | None, *, limit: int) -> tuple[InboxEntry, ...]:
         """List inbox entries in stable newest-first order, optionally by state."""
@@ -2590,7 +2665,7 @@ class Catalog:
                 WHERE provider = ?
                   AND NOT EXISTS (
                       SELECT 1 FROM inbox_entries
-                      WHERE signal_local_id = signals.local_id
+                      WHERE latest_signal_local_id = signals.local_id
                         AND state IN ('saved', 'dismissed')
                   )
                 """,

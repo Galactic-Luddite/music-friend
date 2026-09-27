@@ -407,6 +407,8 @@ def test_accepted_import_text_remains_inert_through_plain_cli_and_mcp(
     application.put_inbox_entry(
         InboxEntry(
             "inbox-safe-event",
+            SignalKind.EVENT,
+            imported_event.local_id,
             "signal-safe-event",
             InboxState.UNREAD,
             datetime(2026, 9, 1, tzinfo=timezone.utc),
@@ -506,7 +508,7 @@ def test_export_import_round_trip_preserves_interested_record_without_live_sourc
     "mutate",
     [
         lambda value: value.update(format="wrong"),
-        lambda value: value.update(version=5),
+        lambda value: value.update(version=6),
         lambda value: value.update(version=True),
         lambda value: value.update(exported_at="2026-09-01T12:00:00"),
         lambda value: value["records"].append(dict(value["records"][0])),
@@ -620,3 +622,92 @@ def test_import_refuses_nonregular_source(
 
     with pytest.raises((OSError, ValueError)):
         import_catalog(catalog, source)
+
+
+def test_pre_014_export_imports_under_the_inbox_constraint(
+    catalog: Catalog, tmp_path: Path
+) -> None:
+    """Verifies AC: importing a pre-014 export (only ``signal_local_id`` on inbox_entry, no
+    ``subject_local_id`` on releases) re-derives subjects and applies the collapse rule, so
+    a ``data restore`` of an old backup never raises."""
+    payload = _payload()
+    # A pre-014 export that already carries signals/inbox entries is at least version 2
+    # (when those record kinds were introduced); it still lacks subject_local_id/entry_kind,
+    # which arrived with migration 014.
+    payload["version"] = 4
+    records = payload["records"]
+    assert isinstance(records, list)
+    assert all(
+        "subject_local_id" not in record for record in records if record["kind"] == "release"
+    )
+
+    explanation = {"version": 1, "reasons": [{"kind": "new_release", "detail": None}]}
+    records.append(
+        {
+            "kind": "signal",
+            "local_id": "signal-pre014-a",
+            "signal_kind": "release",
+            "record_local_id": "release-1",
+            "provider": "spotify",
+            "provider_native_id": "release-native-a",
+            "fingerprint": "fingerprint-a",
+            "material_version": "material-v1",
+            "explanation": explanation,
+            "observed_at": "2026-09-02T00:00:00+00:00",
+        }
+    )
+    records.append(
+        {
+            "kind": "signal",
+            "local_id": "signal-pre014-b",
+            "signal_kind": "release",
+            "record_local_id": "release-1",
+            "provider": "musicbrainz",
+            "provider_native_id": "release-native-b",
+            "fingerprint": "fingerprint-b",
+            "material_version": "material-v1",
+            "explanation": explanation,
+            "observed_at": "2026-09-03T00:00:00+00:00",
+        }
+    )
+    records.append(
+        {
+            "kind": "inbox_entry",
+            "local_id": "inbox-pre014-a",
+            "signal_local_id": "signal-pre014-a",
+            "state": "unread",
+            "created_at": "2026-09-02T01:00:00+00:00",
+            "updated_at": "2026-09-02T01:00:00+00:00",
+        }
+    )
+    records.append(
+        {
+            "kind": "inbox_entry",
+            "local_id": "inbox-pre014-b",
+            "signal_local_id": "signal-pre014-b",
+            "state": "saved",
+            "created_at": "2026-09-03T01:00:00+00:00",
+            "updated_at": "2026-09-03T02:00:00+00:00",
+        }
+    )
+    source = tmp_path / "pre-014-export.json"
+    _write_payload(source, payload)
+
+    result = import_catalog(catalog, source)
+
+    assert result.record_count == len(records)
+    release = catalog.get_release("release-1")
+    assert release is not None
+    assert release.subject_local_id == "release-1"
+
+    collapsed = catalog.get_inbox_entry_for_subject(SignalKind.RELEASE, "release-1")
+    assert collapsed is not None
+    # saved (decided) beats unread; exactly one entry survives for the subject, carrying
+    # the saved state and pointing at the saved signal, whichever local_id the importer
+    # anchored on.
+    assert collapsed.state is InboxState.SAVED
+    assert collapsed.latest_signal_local_id == "signal-pre014-b"
+    assert (
+        catalog.get_inbox_entry("inbox-pre014-a") is None
+        or catalog.get_inbox_entry("inbox-pre014-b") is None
+    )

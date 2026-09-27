@@ -310,6 +310,11 @@ class MusicFriendApplication:
     def get_inbox_entry(self, local_id: str) -> InboxEntry | None:
         return self._catalog.get_inbox_entry(local_id)
 
+    def get_inbox_entry_for_subject(
+        self, kind: SignalKind, subject_local_id: str
+    ) -> InboxEntry | None:
+        return self._catalog.get_inbox_entry_for_subject(kind, subject_local_id)
+
     def list_inbox_entries(self, state: InboxState | None, *, limit: int) -> tuple[InboxEntry, ...]:
         return self._catalog.list_inbox_entries(state, limit=limit)
 

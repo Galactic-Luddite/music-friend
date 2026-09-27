@@ -15,6 +15,21 @@
 - Fixed `doctor` reporting only the first configured release source (`release_sources[0]`) instead
   of every source when two or more are configured; the existing `sources` list already reported
   them all correctly, so the misleading singular `source` key is dropped rather than duplicated.
+- Added a schema-enforced inbox identity constraint (migration 014): `inbox_entries` now carries a
+  `UNIQUE (kind, subject_local_id)` constraint, so a release or event can never end up with a
+  second inbox item -- the database rejects it, with no separate code-level duplicate check
+  needed. Every release gained a `subject_local_id` (a release's own local_id by default; two
+  releases may share a subject after a future merge). Upgrading collapses any duplicate inbox
+  entries a catalog already had into the single entry the new constraint requires, keeping the
+  most-decided entry (`saved`/`dismissed` beats `unread`; the more recently updated one wins among
+  decided entries) with its own original decision; every touched row, before and after, is
+  preserved in a new `inbox_entry_snapshots` table, and no signal is ever deleted or rewritten.
+  **Run `music-friend data backup` before upgrading** -- see `docs/operations.md` "Upgrading" for
+  what the collapse does and why a backup first is worth doing. `data restore` of a pre-upgrade
+  backup applies the same collapse on the way in, so restoring an old backup never fails. This also
+  raises the minimum supported SQLite version to 3.25.0 (2018, for window-function support);
+  `Catalog.open` on an older SQLite reports the requirement by name instead of failing obscurely
+  mid-migration.
 - Fixed `update_setup`'s `event_radius` MCP argument silently accepting `true`/`false` as a valid
   radius (Python's `bool` is a subclass of `int`, so the prior `isinstance` check let a boolean
   through and stored it as radius `1`). `event_radius` now uses the same strict `type(value)`

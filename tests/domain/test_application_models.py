@@ -119,7 +119,9 @@ def test_watchlist_preferences_cursors_and_inbox_use_closed_validated_states() -
         cursor="opaque:page-2",
         updated_at=NOW,
     )
-    inbox = InboxEntry("inbox-1", "signal-1", InboxState.UNREAD, NOW, NOW)
+    inbox = InboxEntry(
+        "inbox-1", SignalKind.RELEASE, "subject-1", "signal-1", InboxState.UNREAD, NOW, NOW
+    )
 
     assert override.action is WatchlistAction.PIN
     assert preference.value == "50"
@@ -130,7 +132,15 @@ def test_watchlist_preferences_cursors_and_inbox_use_closed_validated_states() -
     with pytest.raises(ValueError, match="event radius"):
         LocalPreference(LocalPreferenceKey.EVENT_RADIUS, "500", NOW)
     with pytest.raises(ValueError, match="updated_at"):
-        InboxEntry("inbox-2", "signal-2", InboxState.SAVED, NOW, NOW - timedelta(seconds=1))
+        InboxEntry(
+            "inbox-2",
+            SignalKind.RELEASE,
+            "subject-2",
+            "signal-2",
+            InboxState.SAVED,
+            NOW,
+            NOW - timedelta(seconds=1),
+        )
 
 
 def test_refresh_summary_and_signal_explanation_are_bounded_canonical_structures() -> None:

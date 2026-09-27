@@ -383,10 +383,19 @@ def test_finished_at_is_read_from_the_clock_when_the_run_completes_not_started_a
         assert result.run.finished_at > result.run.started_at
 
 
-def test_materially_changed_release_creates_a_new_unread_item_without_reopening_dismissed_history(
+def test_materially_changed_release_repoints_the_subjects_one_entry_without_reopening_it(
     tmp_path: Path,
 ) -> None:
-    """Catches a changed discovery that reuses the old dismissed signal or fails to surface it."""
+    """Catches a changed discovery either duplicating the subject's inbox entry, or reopening
+    the user's decision, instead of quietly repointing it at the new signal.
+
+    The schema's ``UNIQUE (kind, subject_local_id)`` constraint forbids a second inbox entry
+    for the same release, so a material change updates the existing entry in place. Reopening
+    it to unread would violate "re-observation never changes state" -- material_version still
+    includes provenance (content-digest exclusion is issue B/#62's job), so a routine refresh
+    that picks up a changed/cross-source signal must never flip a dismissed or saved decision
+    back to unread.
+    """
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = MusicFriendApplication(catalog)
         artist = _artist("one", "One")
@@ -411,8 +420,12 @@ def test_materially_changed_release_creates_a_new_unread_item_without_reopening_
         )
 
         entries = application.list_inbox_entries(None, limit=10)
-        assert {entry.state for entry in entries} == {InboxState.UNREAD, InboxState.DISMISSED}
-        assert len(application.list_signals(None, limit=10)) == 2
+        assert len(entries) == 1
+        assert entries[0].local_id == original.local_id
+        assert entries[0].state is InboxState.DISMISSED
+        signals = application.list_signals(None, limit=10)
+        assert len(signals) == 2
+        assert entries[0].latest_signal_local_id in {signal.local_id for signal in signals}
 
 
 def test_later_release_reversion_creates_a_fresh_unread_signal(tmp_path: Path) -> None:
@@ -449,7 +462,7 @@ def test_later_release_reversion_creates_a_fresh_unread_signal(tmp_path: Path) -
         )
 
         assert len(application.list_signals(None, limit=10)) == 3
-        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 3
+        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 1
 
 
 def test_material_event_change_creates_a_fresh_unread_signal(tmp_path: Path) -> None:
@@ -474,7 +487,7 @@ def test_material_event_change_creates_a_fresh_unread_signal(tmp_path: Path) -> 
         )
 
         assert len(application.list_signals(None, limit=10)) == 2
-        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 2
+        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 1
 
 
 def test_event_refresh_creates_an_unread_event_item_and_skips_unconfigured_events(
@@ -1584,20 +1597,25 @@ def test_refresh_recovers_a_changed_release_signal_when_an_earlier_version_exist
         assert failed_update.run.status.value == "partial"
         assert recovered.run is not None
         assert len(application.list_signals(None, limit=10)) == 2
-        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 2
+        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 1
 
 
 def test_inbox_repair_progresses_past_more_than_five_hundred_orphaned_signals(
     tmp_path: Path,
 ) -> None:
-    """Catches a newest-first signal scan starving older orphaned inbox entries forever."""
+    """Catches a newest-first signal scan starving older orphaned inbox entries forever.
+
+    Each signal targets its own release (its own inbox subject), since the schema now
+    forbids a second inbox entry for one subject -- 501 orphaned signals sharing a subject
+    could never each get an entry, by design.
+    """
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = MusicFriendApplication(catalog)
         artist = _artist("one", "One")
         application.put_artist(artist)
-        release = _release("release-1", artist)
-        application.put_release(release)
         for index in range(501):
+            release = _release(f"release-{index}", artist)
+            application.put_release(release)
             application.put_signal(
                 Signal(
                     f"signal:{index}",

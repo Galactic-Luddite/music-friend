@@ -1191,7 +1191,7 @@ def _duplicate_inbox_candidates(
     for entry in application.list_inbox_entries(None, limit=500):
         if entry.state is InboxState.DISMISSED:
             continue
-        signal = application.get_signal(entry.signal_local_id)
+        signal = application.get_signal(entry.latest_signal_local_id)
         if signal is None or signal.kind is not SignalKind.RELEASE:
             continue
         release = application.get_release(signal.record_local_id)
@@ -1444,7 +1444,7 @@ def _inbox_detail(application: MusicFriendApplication, local_id: str) -> dict[st
     entry = application.get_inbox_entry(local_id)
     if entry is None:
         return None
-    signal = application.get_signal(entry.signal_local_id)
+    signal = application.get_signal(entry.latest_signal_local_id)
     if signal is None:
         return None
     return {

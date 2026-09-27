@@ -109,7 +109,17 @@ def _seed_application_state(
             NOW,
         )
     )
-    catalog.put_inbox_entry(InboxEntry(inbox_local_id, "signal-1", inbox_state, NOW, LATER))
+    catalog.put_inbox_entry(
+        InboxEntry(
+            inbox_local_id,
+            SignalKind.RELEASE,
+            release.subject_local_id or release.local_id,
+            "signal-1",
+            inbox_state,
+            NOW,
+            LATER,
+        )
+    )
 
 
 def test_portable_v3_round_trips_all_application_state_without_credentials(
@@ -121,7 +131,7 @@ def test_portable_v3_round_trips_all_application_state_without_credentials(
     exported = export_catalog(catalog, destination, exported_at=NOW)
 
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    assert payload["version"] == 4
+    assert payload["version"] == 5
     kinds = {record["kind"] for record in payload["records"]}
     assert {
         "affinity_evidence",
@@ -153,9 +163,7 @@ def test_portable_v3_round_trips_all_application_state_without_credentials(
             "spotify", SourceCapability.SAVED_ITEMS, "opaque-page", NOW
         )
         assert target.get_signal("signal-1") == catalog.get_signal("signal-1")
-        assert target.get_inbox_entry("inbox-1") == InboxEntry(
-            "inbox-1", "signal-1", InboxState.DISMISSED, NOW, LATER
-        )
+        assert target.get_inbox_entry("inbox-1") == catalog.get_inbox_entry("inbox-1")
 
 
 def test_portable_source_cursor_round_trips_all_valid_maximum_fields(
@@ -265,7 +273,7 @@ def test_purge_source_retains_user_inbox_decision_and_portable_target(
     assert catalog.get_release("release-1") is not None
     assert catalog.get_signal("signal-1") is not None
     assert catalog.get_inbox_entry("inbox-1") == InboxEntry(
-        "inbox-1", "signal-1", state, NOW, LATER
+        "inbox-1", SignalKind.RELEASE, "release-1", "signal-1", state, NOW, LATER
     )
 
     destination = tmp_path / f"retained-{state.value}.json"

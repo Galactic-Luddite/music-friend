@@ -88,7 +88,15 @@ def _seeded_application(
         )
         application.put_signal(signal)
         application.put_inbox_entry(
-            InboxEntry(f"inbox-{index}", signal.local_id, InboxState.UNREAD, NOW, NOW)
+            InboxEntry(
+                f"inbox-{index}",
+                SignalKind.RELEASE,
+                release.local_id,
+                signal.local_id,
+                InboxState.UNREAD,
+                NOW,
+                NOW,
+            )
         )
     return application
 

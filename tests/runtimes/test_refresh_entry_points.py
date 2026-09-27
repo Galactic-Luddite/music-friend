@@ -839,7 +839,7 @@ def test_v1_signal_upgrade_safety_creates_no_duplicate_and_preserves_inbox_state
     try:
         seeded_signal = application.list_signals(SignalKind.RELEASE, limit=1)[0]
         seeded_entry = application.list_inbox_entries(None, limit=1)[0]
-        assert seeded_entry.signal_local_id == seeded_signal.local_id
+        assert seeded_entry.latest_signal_local_id == seeded_signal.local_id
         release = application.get_release(seeded_signal.record_local_id)
         assert release is not None
         artist = application.get_artist(release.artist_refs[0])
@@ -892,3 +892,126 @@ def test_v1_signal_upgrade_safety_creates_no_duplicate_and_preserves_inbox_state
     assert len(signals) == 1
     assert len(entries) == 1
     assert entries[0].state is seeded_state
+
+
+@pytest.mark.parametrize("seeded_state", [InboxState.DISMISSED, InboxState.SAVED])
+def test_re_observed_release_never_reopens_a_decided_inbox_entry_through_cli(
+    clock: FakeClock, tmp_path: Path, seeded_state: InboxState
+) -> None:
+    """Design invariant: "re-observation never changes state."
+
+    A release the user already decided (saved/dismissed) can still change on a later
+    refresh -- new provenance is attached, or a genuine material change is picked up --
+    without the schema allowing a second inbox item (``UNIQUE (kind, subject_local_id)``).
+    The fix must repoint the existing entry's ``latest_signal_local_id`` without ever
+    reopening it to ``unread``: a routine refresh that happens to pick up new information
+    about an already-decided release must never surface it again as if undecided --
+    that is the exact #57 duplicate-inbox regression this issue closes, and reopening
+    to unread on a routine re-observation would be a quieter version of the same bug.
+
+    Proved through ``cli.run_cli`` (``music-friend refresh releases``), the shipped entry
+    point, against the same recorded MusicBrainz fixture the sibling tests in this file
+    use. The literal cross-provider-attach case is already fully deduped upstream with
+    zero release-discovery candidates (see
+    ``test_cross_source_release_discovery_merges_into_one_release_with_two_source_refs``
+    in ``tests/tools/test_release_discovery.py``), so it cannot reach the code path this
+    fix touches. The reachable regression is a genuine material change -- a title edit
+    the fold logic does not absorb, picked up on a later run -- against an already-decided
+    subject; that is what this test exercises.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    live = load_live_release_group_search()
+    one_release_group = live["release-groups"][:1]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "musicbrainz.org"
+        path = request.url.path
+        if path == "/ws/2/url":
+            resources = request.url.params.get_list("resource")
+            urls = [
+                {
+                    "resource": resources[0],
+                    "relations": [{"artist": {"id": LIVE_SEARCH_ARTIST_MBID}}],
+                }
+            ]
+            return httpx.Response(200, json={"url-count": 1, "url-offset": 0, "urls": urls})
+        if path == "/ws/2/release-group":
+            return httpx.Response(
+                200,
+                json={
+                    **live,
+                    "count": len(one_release_group),
+                    "release-groups": one_release_group,
+                },
+            )
+        if path.startswith("/ws/2/artist/"):
+            return httpx.Response(200, json={"relations": []})
+        raise AssertionError(f"unexpected MusicBrainz path: {path}")
+
+    def _run_at(now: datetime) -> dict[str, object]:
+        application = MusicFriendApplication(Catalog.open(catalog_path))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            cli.run_cli(
+                ["refresh", "releases", "--json"],
+                stdout=stdout,
+                stderr=stderr,
+                application=application,
+                config_store=_ConfigStore(LocalConfig()),
+                secret_prompt=lambda _message: "",
+                now=lambda: now,
+                connector_factory=lambda: httpx.MockTransport(handle),
+                credential_store_factory=lambda: _NoTicketmasterKey(),
+            )
+        finally:
+            application.close()
+        assert stderr.getvalue() == ""
+        payload = json.loads(stdout.getvalue())
+        assert isinstance(payload, dict)
+        return payload
+
+    # 1. A real refresh creates the one release/signal/inbox row from the fixture.
+    first = _run_at(NOW)
+    assert first["status"] == "succeeded"
+    assert _metrics(first)["signals_created"] == 1
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        seeded_entry = application.list_inbox_entries(None, limit=1)[0]
+        seeded_signal = application.list_signals(None, limit=1)[0]
+        assert seeded_entry.latest_signal_local_id == seeded_signal.local_id
+        # 2. The user decides: saved or dismissed.
+        refresh_module.update_inbox_state(
+            application, seeded_entry.local_id, seeded_state, updated_at=NOW
+        )
+    finally:
+        application.close()
+
+    # 3. A later refresh picks up a genuine material change (a title edit the fold
+    #    logic does not absorb) for the same real-world release -- attaching new
+    #    provenance about it, same as a second source would.
+    changed_title = f"{one_release_group[0]['title']} (Live Recording)"
+    one_release_group[0] = {**one_release_group[0], "title": changed_title}
+
+    second = _run_at(NOW + timedelta(hours=25))
+    assert second["status"] == "succeeded"
+    # A genuinely new signal is created for the changed material -- that is expected
+    # and correct; only the *inbox entry* must stay singular and keep its decision.
+    assert _metrics(second)["signals_created"] == 1
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        entries = application.list_inbox_entries(None, limit=10)
+        signals = application.list_signals(None, limit=10)
+        assert len(signals) == 2
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.local_id == seeded_entry.local_id
+        # The user's decision survives the re-observation untouched.
+        assert entry.state is seeded_state
+        # ...but the entry now points at the fresh signal, not the stale one.
+        assert entry.latest_signal_local_id != seeded_signal.local_id
+        assert entry.latest_signal_local_id in {signal.local_id for signal in signals}
+    finally:
+        application.close()

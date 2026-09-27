@@ -370,3 +370,23 @@ def test_fallback_cleans_created_file_when_descriptor_validation_fails(
         _prepare_database_fallback(path)
 
     assert not path.exists()
+
+
+def test_open_rejects_sqlite_without_window_functions(
+    catalog_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies AC: Catalog.open on SQLite < 3.25.0 raises CatalogUnavailableError naming the
+    minimum version, before applying migrations."""
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 24, 0))
+
+    with pytest.raises(CatalogUnavailableError) as caught:
+        Catalog.open(catalog_path)
+
+    assert "3.25.0" in str(caught.value)
+    with closing(sqlite3.connect(catalog_path)) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone()
+            is None
+        )

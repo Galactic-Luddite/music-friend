@@ -54,8 +54,8 @@ from music_friend.store.catalog import Catalog
 from music_friend.store.spotify_history import _text as _history_text
 
 _FORMAT = "music-friend-catalog"
-_VERSION = 4
-_SUPPORTED_VERSIONS = frozenset({1, 2, 3, 4})
+_VERSION = 5
+_SUPPORTED_VERSIONS = frozenset({1, 2, 3, 4, 5})
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_RECORDS = 2_000_000
 _PortableCanonical = Artist | Release | Event
@@ -213,8 +213,20 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
                 "observed_at": _iso(observed_at),
             }
         )
-    for local_id, title, release_type, release_date, precision, observed_at in connection.execute(
-        "SELECT local_id, title, release_type, release_date, date_precision, observed_at FROM releases"
+    for (
+        local_id,
+        title,
+        release_type,
+        release_date,
+        precision,
+        observed_at,
+        subject_local_id,
+    ) in connection.execute(
+        """
+        SELECT local_id, title, release_type, release_date, date_precision, observed_at,
+               subject_local_id
+        FROM releases
+        """
     ):
         artist_refs = [
             str(row[0])
@@ -233,6 +245,7 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
                 "date_precision": str(precision),
                 "artist_refs": artist_refs,
                 "observed_at": _iso(observed_at),
+                "subject_local_id": str(subject_local_id),
             }
         )
     for row in connection.execute(
@@ -457,16 +470,22 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
             }
         )
     for row in connection.execute(
-        "SELECT local_id, signal_local_id, state, created_at, updated_at FROM inbox_entries"
+        """
+        SELECT local_id, kind, subject_local_id, latest_signal_local_id, state,
+               created_at, updated_at
+        FROM inbox_entries
+        """
     ):
         records.append(
             {
                 "kind": "inbox_entry",
                 "local_id": str(row[0]),
-                "signal_local_id": str(row[1]),
-                "state": str(row[2]),
-                "created_at": str(row[3]),
-                "updated_at": str(row[4]),
+                "entry_kind": str(row[1]),
+                "subject_local_id": str(row[2]),
+                "latest_signal_local_id": str(row[3]),
+                "state": str(row[4]),
+                "created_at": str(row[5]),
+                "updated_at": str(row[6]),
             }
         )
     for row in connection.execute(
@@ -940,21 +959,22 @@ def _validate_document(
                 )
             )
         elif kind == "release":
-            _require_keys(
-                record,
-                frozenset(
-                    {
-                        "kind",
-                        "local_id",
-                        "title",
-                        "release_type",
-                        "release_date",
-                        "date_precision",
-                        "artist_refs",
-                        "observed_at",
-                    }
-                ),
-            )
+            # subject_local_id is new as of migration 014; a pre-014 export omits it, and
+            # put_release() defaults a missing subject_local_id to the release's own local_id.
+            has_subject = "subject_local_id" in record
+            expected_keys = {
+                "kind",
+                "local_id",
+                "title",
+                "release_type",
+                "release_date",
+                "date_precision",
+                "artist_refs",
+                "observed_at",
+            }
+            if has_subject:
+                expected_keys = expected_keys | {"subject_local_id"}
+            _require_keys(record, frozenset(expected_keys))
             canonical.append(
                 Release(
                     local_id=local_id,
@@ -967,6 +987,11 @@ def _validate_document(
                     artist_refs=_string_list(record["artist_refs"], "artist_refs"),
                     source_refs=source_refs,
                     observed_at=_datetime(record["observed_at"], "observed_at"),
+                    subject_local_id=(
+                        _text(record["subject_local_id"], "subject_local_id")
+                        if has_subject
+                        else None
+                    ),
                 )
             )
         elif kind == "event":
@@ -1018,6 +1043,126 @@ def _validate_document(
     if set(mappings) - canonical_identities:
         raise ValueError("source mapping target does not exist")
     return canonical, deferred
+
+
+def _import_inbox_entry(catalog: Catalog, record: dict[str, object]) -> None:
+    """Write one imported inbox entry under the ``UNIQUE (kind, subject_local_id)`` constraint.
+
+    A migration-014-or-later export already carries ``entry_kind``/``subject_local_id``/
+    ``latest_signal_local_id`` and is written as-is: those subjects were already
+    deduplicated by the exporting catalog's own ``UNIQUE (kind, subject_local_id)``
+    constraint, so a collision on import is a genuine conflict between the import and the
+    target catalog's existing state and must raise, exactly as it always has.
+
+    A pre-014 export carries only ``signal_local_id``; its subject is re-derived from the
+    referenced signal (already imported by this point -- signals replay before inbox
+    entries) and, when that subject already has an entry, the two are folded together with
+    the same most-decided-wins rule migration 014 uses: a decided (saved/dismissed) entry
+    beats unread; between two decided entries the most recently updated wins; the surviving
+    created_at/updated_at span the whole group and the surviving signal is whichever
+    observed_at is greatest. This merge-on-collision behavior is scoped to the legacy shape
+    only, so it never masks a genuine cross-catalog conflict on a modern export.
+    """
+    if "subject_local_id" in record:
+        _require_keys(
+            record,
+            frozenset(
+                {
+                    "kind",
+                    "local_id",
+                    "entry_kind",
+                    "subject_local_id",
+                    "latest_signal_local_id",
+                    "state",
+                    "created_at",
+                    "updated_at",
+                }
+            ),
+        )
+        catalog.put_inbox_entry(
+            InboxEntry(
+                local_id=str(record["local_id"]),
+                kind=SignalKind(_text(record["entry_kind"], "entry_kind", maximum=16)),
+                subject_local_id=_text(record["subject_local_id"], "subject_local_id"),
+                latest_signal_local_id=_text(
+                    record["latest_signal_local_id"], "latest_signal_local_id"
+                ),
+                state=InboxState(_text(record["state"], "state", maximum=16)),
+                created_at=_datetime(record["created_at"], "created_at"),
+                updated_at=_datetime(record["updated_at"], "updated_at"),
+            )
+        )
+        return
+
+    _require_keys(
+        record,
+        frozenset({"kind", "local_id", "signal_local_id", "state", "created_at", "updated_at"}),
+    )
+    latest_signal_local_id = _text(record["signal_local_id"], "signal_local_id")
+    signal = catalog.get_signal(latest_signal_local_id)
+    if signal is None:
+        raise ValueError("inbox entry references an unknown signal")
+    entry_kind = signal.kind
+    if entry_kind is SignalKind.RELEASE:
+        release = catalog.get_release(signal.record_local_id)
+        subject_local_id = (
+            release.subject_local_id or signal.record_local_id
+            if release is not None
+            else signal.record_local_id
+        )
+    else:
+        subject_local_id = signal.record_local_id
+
+    local_id = str(record["local_id"])
+    state = InboxState(_text(record["state"], "state", maximum=16))
+    created_at = _datetime(record["created_at"], "created_at")
+    updated_at = _datetime(record["updated_at"], "updated_at")
+
+    existing = catalog.get_inbox_entry_for_subject(entry_kind, subject_local_id)
+    if existing is None:
+        winner_local_id = local_id
+        winner_state = state
+        winner_created_at = created_at
+        winner_updated_at = updated_at
+        winner_signal = latest_signal_local_id
+    else:
+        decided_existing = existing.state is not InboxState.UNREAD
+        decided_incoming = state is not InboxState.UNREAD
+        # Rank ascending, smallest wins, mirroring migration 014's ROW_NUMBER() ORDER BY:
+        # decided beats unread, then most-recently-updated, then smallest local_id.
+        # The merged row's identity always stays the existing anchor's local_id: unlike the
+        # migration's rebuild-from-scratch, an import upserts by local_id, so introducing a
+        # brand new local_id here would insert a second, still-conflicting row instead of
+        # replacing the one already occupying this subject.
+        existing_rank = (not decided_existing, -existing.updated_at.timestamp(), existing.local_id)
+        incoming_rank = (not decided_incoming, -updated_at.timestamp(), local_id)
+        incoming_wins = incoming_rank < existing_rank
+        winner_local_id = existing.local_id
+        winner_state = state if incoming_wins else existing.state
+        winner_created_at = min(existing.created_at, created_at)
+        winner_updated_at = max(existing.updated_at, updated_at)
+        existing_signal = catalog.get_signal(existing.latest_signal_local_id)
+        incoming_signal = catalog.get_signal(latest_signal_local_id)
+        if existing_signal is not None and incoming_signal is not None:
+            winner_signal = (
+                latest_signal_local_id
+                if incoming_signal.observed_at >= existing_signal.observed_at
+                else existing.latest_signal_local_id
+            )
+        else:
+            winner_signal = existing.latest_signal_local_id
+
+    catalog.put_inbox_entry(
+        InboxEntry(
+            local_id=winner_local_id,
+            kind=entry_kind,
+            subject_local_id=subject_local_id,
+            latest_signal_local_id=winner_signal,
+            state=winner_state,
+            created_at=winner_created_at,
+            updated_at=winner_updated_at,
+        )
+    )
 
 
 def _replay(
@@ -1292,28 +1437,7 @@ def _replay(
                 )
             )
         elif kind == "inbox_entry":
-            _require_keys(
-                record,
-                frozenset(
-                    {
-                        "kind",
-                        "local_id",
-                        "signal_local_id",
-                        "state",
-                        "created_at",
-                        "updated_at",
-                    }
-                ),
-            )
-            catalog.put_inbox_entry(
-                InboxEntry(
-                    local_id=str(record["local_id"]),
-                    signal_local_id=_text(record["signal_local_id"], "signal_local_id"),
-                    state=InboxState(_text(record["state"], "state", maximum=16)),
-                    created_at=_datetime(record["created_at"], "created_at"),
-                    updated_at=_datetime(record["updated_at"], "updated_at"),
-                )
-            )
+            _import_inbox_entry(catalog, record)
         elif kind == "listening_history":
             _require_keys(
                 record,
@@ -1470,7 +1594,7 @@ def purge_source(catalog: Catalog, source_name: str) -> PurgeResult:
                 WHERE provider = ?
                   AND NOT EXISTS (
                       SELECT 1 FROM inbox_entries
-                      WHERE signal_local_id = signals.local_id
+                      WHERE latest_signal_local_id = signals.local_id
                         AND state IN ('saved', 'dismissed')
                   )
                 """,
@@ -1481,12 +1605,12 @@ def purge_source(catalog: Catalog, source_name: str) -> PurgeResult:
             connection.execute(
                 """
                 SELECT COUNT(*) FROM inbox_entries
-                WHERE signal_local_id IN (
+                WHERE latest_signal_local_id IN (
                     SELECT local_id FROM signals
                     WHERE provider = ?
                       AND NOT EXISTS (
                           SELECT 1 FROM inbox_entries AS retained
-                          WHERE retained.signal_local_id = signals.local_id
+                          WHERE retained.latest_signal_local_id = signals.local_id
                             AND retained.state IN ('saved', 'dismissed')
                       )
                 )

@@ -333,6 +333,7 @@ class Release(_CanonicalRecord):
     artist_refs: tuple[RecordId, ...]
     source_refs: tuple[SourceReference, ...]
     observed_at: datetime
+    subject_local_id: RecordId | None = None
 
     def __post_init__(self) -> None:
         _require_record_id(self.local_id, "local_id")
@@ -343,6 +344,8 @@ class Release(_CanonicalRecord):
         _require_record_ids(self.artist_refs, "artist_refs", nonempty=True)
         _require_source_refs(self.source_refs)
         _require_aware_datetime(self.observed_at, "observed_at")
+        if self.subject_local_id is not None:
+            _require_record_id(self.subject_local_id, "subject_local_id")
         if self.date_precision is ReleaseDatePrecision.YEAR and (
             self.release_date.month != 1 or self.release_date.day != 1
         ):
@@ -1039,14 +1042,18 @@ class Signal(_CanonicalRecord):
 @dataclass(frozen=True, slots=True, eq=False)
 class InboxEntry(_CanonicalRecord):
     local_id: RecordId
-    signal_local_id: RecordId
+    kind: SignalKind
+    subject_local_id: RecordId
+    latest_signal_local_id: RecordId
     state: InboxState
     created_at: datetime
     updated_at: datetime
 
     def __post_init__(self) -> None:
         _require_record_id(self.local_id, "local_id")
-        _require_record_id(self.signal_local_id, "signal_local_id")
+        _require_enum(self.kind, SignalKind, "kind")
+        _require_record_id(self.subject_local_id, "subject_local_id")
+        _require_record_id(self.latest_signal_local_id, "latest_signal_local_id")
         _require_enum(self.state, InboxState, "state")
         _require_aware_datetime(self.created_at, "created_at")
         _require_aware_datetime(self.updated_at, "updated_at")

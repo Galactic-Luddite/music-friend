@@ -117,7 +117,7 @@ def test_watchlist_and_inbox_serializers_return_stable_local_shapes() -> None:
     )
     entry = SimpleNamespace(
         local_id="inbox",
-        signal_local_id="signal",
+        latest_signal_local_id="signal",
         state=SimpleNamespace(value="unread"),
         created_at=NOW,
         updated_at=NOW,
@@ -134,7 +134,7 @@ def test_watchlist_and_inbox_serializers_return_stable_local_shapes() -> None:
 def test_inbox_detail_handles_missing_entry_signal_and_complete_result() -> None:
     entry = SimpleNamespace(
         local_id="inbox",
-        signal_local_id="signal",
+        latest_signal_local_id="signal",
         state=SimpleNamespace(value="unread"),
         created_at=NOW,
         updated_at=NOW,
