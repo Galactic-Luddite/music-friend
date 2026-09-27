@@ -33,6 +33,7 @@ from music_friend.domain import (
     InboxState,
     RefreshMetricKind,
     RefreshRun,
+    SignalKind,
     WatchlistEntry,
 )
 from music_friend.providers import Capability, MusicSource
@@ -55,7 +56,8 @@ from music_friend.providers.ticketmaster import (
 from music_friend.providers.ticketmaster.transport import TicketmasterTransport
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.refresh import RefreshInvocation, refresh_once
+from music_friend.tools.refresh import RefreshInvocation, refresh_once, update_inbox_state
+from music_friend.tools.release_discovery import _normalized_title
 from music_friend.tools.scheduler import (
     SchedulePlatform,
     ScheduleStatus,
@@ -79,7 +81,7 @@ AuthorizerFactory = Callable[
 _USAGE = (
     "Usage: music-friend doctor | setup [--release-sources spotify,musicbrainz,deezer] | connect spotify | disconnect spotify | status | "
     "refresh catalog|releases|events|all [--force] | watchlist list | inbox list|show | "
-    "data export|import|import-spotify|backup|restore|delete | diagnostics | "
+    "data export|import|import-spotify|backup|restore|delete|dedupe-inbox [--apply] | diagnostics | "
     "schedule install|status|remove | version\n"
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
@@ -841,8 +843,12 @@ def _doctor(
             for name, value in checks.items()
         },
         "release_source": {
+            # Every configured release source, not just the first one (issue #56
+            # part 3): a prior "source": release_sources[0] key reported only one
+            # source even with two or more configured, which this list already
+            # covered correctly, so the misleading singular key is dropped rather
+            # than duplicated.
             "sources": list(release_sources),
-            "source": release_sources[0] if release_sources else "musicbrainz",
             "unmapped_artists": unmapped_artists,
             "remedy": (
                 "Run 'music-friend refresh releases' to map artists"
@@ -867,14 +873,16 @@ def _doctor_text(payload: dict[str, object]) -> str:
     assert isinstance(release_source, dict)
     sources = release_source["sources"]
     assert isinstance(sources, list)
+    joined_sources = ", ".join(sources) if sources else "spotify"
     if "musicbrainz" in sources:
         lines.append(
-            f"release_source: musicbrainz ({release_source['unmapped_artists']} artists unmapped)"
+            f"release_source: {joined_sources} "
+            f"({release_source['unmapped_artists']} artists unmapped)"
         )
         if release_source["remedy"] is not None:
             lines.append(f"    {release_source['remedy']}")
     else:
-        lines.append(f"release_source: {', '.join(sources) if sources else 'spotify'}")
+        lines.append(f"release_source: {joined_sources}")
     return "\n".join(lines)
 
 
@@ -1154,8 +1162,92 @@ def _data_command(
             return rejected
         application.delete_data()
         return _emit({"status": "deleted"}, structured, stdout, text="Local data deleted.")
+    if (
+        len(argv) in {1, 2}
+        and argv[0] == "dedupe-inbox"
+        and (len(argv) == 1 or argv[1] == "--apply")
+    ):
+        apply_changes = len(argv) == 2
+        return _dedupe_inbox_command(application, apply_changes, structured, stdout)
     print(_USAGE, end="", file=stderr)
     return 2
+
+
+def _duplicate_inbox_candidates(
+    application: MusicFriendApplication,
+) -> tuple[tuple[InboxEntry, InboxEntry], ...]:
+    """Find existing not-yet-dismissed release inbox items that the cross-source
+    title-normalization key (issue #56) would now treat as the same release.
+
+    These rows predate the normalization fix, so this scans stored state directly
+    rather than relying on the write-path dedupe. Groups release-kind inbox entries
+    by ``(normalized_title, artist_refs, release_date)`` and, within any group of
+    two or more, pairs every later entry (by ``created_at``, then ``local_id`` for a
+    stable tie-break) with the earliest one to keep. Same-source dedupe already
+    prevents a duplicate provider_native_id from reaching the inbox, so this only
+    ever surfaces genuine cross-source or pre-fix duplicates.
+    """
+    groups: dict[tuple[str, frozenset[str], str], list[InboxEntry]] = {}
+    for entry in application.list_inbox_entries(None, limit=500):
+        if entry.state is InboxState.DISMISSED:
+            continue
+        signal = application.get_signal(entry.signal_local_id)
+        if signal is None or signal.kind is not SignalKind.RELEASE:
+            continue
+        release = application.get_release(signal.record_local_id)
+        if release is None:
+            continue
+        key = (
+            _normalized_title(release.title),
+            frozenset(release.artist_refs),
+            release.release_date.isoformat(),
+        )
+        groups.setdefault(key, []).append(entry)
+    pairs: list[tuple[InboxEntry, InboxEntry]] = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        ordered = sorted(members, key=lambda item: (item.created_at, item.local_id))
+        keep = ordered[0]
+        for extra in ordered[1:]:
+            pairs.append((keep, extra))
+    return tuple(pairs)
+
+
+def _dedupe_inbox_command(
+    application: MusicFriendApplication,
+    apply_changes: bool,
+    structured: bool,
+    stdout: TextIO,
+) -> int:
+    """List (default) or, with ``--apply``, dismiss candidate duplicate inbox
+    rows found by :func:`_duplicate_inbox_candidates` (issue #56 part 2).
+
+    Dismissal reuses the existing ``dismissed`` inbox state via
+    :func:`update_inbox_state`, so it never deletes a row and stays reversible
+    through ``inbox show``/``update_inbox_item`` the same way any other
+    dismiss decision is.
+    """
+    pairs = _duplicate_inbox_candidates(application)
+    candidates: list[dict[str, object]] = [
+        {"keep": keep.local_id, "dismiss": extra.local_id} for keep, extra in pairs
+    ]
+    if apply_changes:
+        now = _utc_now()
+        for _keep, extra in pairs:
+            update_inbox_state(application, extra.local_id, InboxState.DISMISSED, updated_at=now)
+    payload = {"candidates": candidates, "applied": apply_changes}
+    return _emit(payload, structured, stdout, text=_dedupe_inbox_text(candidates, apply_changes))
+
+
+def _dedupe_inbox_text(candidates: list[dict[str, object]], applied: bool) -> str:
+    if not candidates:
+        return "Music Friend found no candidate duplicate inbox items."
+    lines = [f"keep {item['keep']} dismiss {item['dismiss']}" for item in candidates]
+    action = "Dismissed" if applied else "Would dismiss (dry run;"
+    suffix = "" if applied else " re-run with --apply to dismiss)"
+    header = f"{action} {len(candidates)} candidate duplicate inbox item(s){suffix}:"
+    return header + "\n" + "\n".join(lines)
 
 
 def _schedule_command(action: str, structured: bool, stdout: TextIO, stderr: TextIO) -> int:

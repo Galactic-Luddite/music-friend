@@ -11,7 +11,7 @@ and listening-history summaries.
 | Setup and connection | `doctor`, `setup`, `connect spotify`, `disconnect spotify`, `version` | Check every onboarding prerequisite locally, enter the Spotify client identifier and optional event area, authorize or remove the Spotify credential |
 | Inspect | `status`, `diagnostics`, `watchlist list`, `inbox list`, `inbox show ITEM_ID` | Read local state without contacting a provider |
 | Refresh | `refresh catalog`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
-| Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete` | Move, protect, or erase local data |
+| Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete`, `data dedupe-inbox` | Move, protect, or erase local data |
 | Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional six-hour refresh |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
 
@@ -63,6 +63,24 @@ music-friend data restore backup.json --confirm RESTORE
 
 Without a TTY and without `--yes` or `--confirm`, these commands refuse to proceed and exit with code 2.
 
+## Cross-source duplicate inbox items
+
+```bash
+music-friend data dedupe-inbox
+music-friend data dedupe-inbox --apply
+```
+
+Titles that differ only in typographic punctuation or Unicode form (a curly vs. straight
+apostrophe, an en/em dash vs. a hyphen, NFD vs. NFC accents, doubled whitespace) now dedupe across
+sources at discovery time (issue #56). `data dedupe-inbox` finds existing inbox rows, created
+before that fix, that the same normalized title key would now treat as one release. It scans
+release-kind inbox items sharing an artist, a release date, and a normalized title, and reports
+each duplicate pair as `keep` (the earliest row) and `dismiss` (the later one).
+
+It is dry-run by default: it only lists candidate pairs. Only `--apply` marks each `dismiss` row
+`dismissed` -- the same state `update_inbox_item`/`inbox show` already use, so the row is never
+deleted and the decision can be reversed the same way any other dismiss decision can.
+
 ## Check prerequisites
 
 ```bash
@@ -77,8 +95,9 @@ unlocked), and every non-`ok` check names its fix. It exits 0 when everything is
 otherwise. It reads only local state, never contacts a provider, and never prints credential
 values, so its output is safe to paste into an issue.
 
-It also reports the selected release source. When MusicBrainz is selected, the report includes the
-number of unmapped watchlist artists and directs you to `music-friend refresh releases` to map them.
+It also reports every configured release source (not only the first one). When MusicBrainz is
+among them, the report includes the number of unmapped watchlist artists and directs you to
+`music-friend refresh releases` to map them.
 
 `status --json` includes `mcp_ready`, which is `false` when the MCP server could not open an
 approved native credential store.

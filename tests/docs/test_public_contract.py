@@ -376,6 +376,8 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend data delete",
         "music-friend data delete --yes",
         "music-friend data delete --confirm DELETE",
+        "music-friend data dedupe-inbox",
+        "music-friend data dedupe-inbox --apply",
         "music-friend schedule status --json",
         "music-friend schedule install",
         "music-friend schedule remove",
