@@ -16,6 +16,7 @@ RecordId = str
 
 class IdentityConfidence(str, Enum):
     SOURCE_ONLY = "source_only"
+    PROVISIONAL = "provisional"
     EXTERNAL_ID = "external_id"
     USER_CONFIRMED = "user_confirmed"
 
@@ -91,6 +92,8 @@ class RefreshMetricKind(str, Enum):
     LIMIT_PAUSES = "limit_pauses"
     SOURCE_REQUESTS = "source_requests"
     RELEASE_SOURCE_UNMAPPED = "release_source_unmapped"
+    RELEASE_IDENTITY_AMBIGUOUS = "release_identity_ambiguous"
+    RELEASE_IDENTITY_CONFLICT = "release_identity_conflict"
 
 
 class SyncCapabilityStatus(str, Enum):

@@ -604,7 +604,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
         "refresh": {"running": False},
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
-        "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 1},
+        "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 1, "conflicts": 0},
     }
     assert _call(server, "search_catalog", {"query": "Artist", "limit": 1}) == {
         "items": [

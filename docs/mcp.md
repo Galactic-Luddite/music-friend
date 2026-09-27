@@ -38,7 +38,7 @@ Deezer, or Ticketmaster.
 
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
-| `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is a refresh running now, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `refresh.running` (whether a refresh is in progress right now), `source_limits.spotify` (`ready`, `state`, `retry_at`), and MusicBrainz `identity` mapping counts when configured | read-only, local |
+| `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is a refresh running now, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `refresh.running` (whether a refresh is in progress right now), `source_limits.spotify` (`ready`, `state`, `retry_at`), `identity.conflicts` (open links between releases kept as separate items, for review with `music-friend data inbox duplicates`), and MusicBrainz `identity` mapping counts when configured | read-only, local |
 | `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all`; `force` (boolean, default `false`) | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
 | `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries; entries include `release_source_status` (`mapped` or `unmapped`) for the first configured identity-mapped source (MusicBrainz or Deezer) | read-only, local |
@@ -82,7 +82,10 @@ it). The result's metrics include `release_source_unmapped`, the count of `(arti
 pairs skipped this run for that reason, summed over the release sources that ran (see
 [release discovery limits](limits.md)), so a run that mapped nobody still reports a signal instead
 of a silent `succeeded` with nothing to show; `music_status` reports the same count from the latest
-run and shows the per-source identity picture.
+run and shows the per-source identity picture. The metrics also include `release_identity_ambiguous`
+(reports whose identity key named more than one release, kept separate) and
+`release_identity_conflict` (links that were contradicted or that joined two releases already shown
+separately, recorded instead of merged); see [release identity](limits.md).
 
 `refresh_music` with `kind: "catalog"` or `"all"` skips a catalog capability (followed artists,
 saved items, each top-items time range) that completed successfully within the freshness window --

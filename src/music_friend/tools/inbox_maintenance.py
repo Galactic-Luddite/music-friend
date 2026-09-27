@@ -3,35 +3,35 @@
 Implements ``music-friend data inbox duplicates [--merge --yes]`` and
 ``music-friend data inbox unmerge <merge_id> --yes`` (design doc section 3.6).
 
-**Narrowed scope (issue #64 deviation).** The design doc's ``data inbox duplicates`` describes
-listing pairs the full identity ladder (tiers 1-2 and 4) would join, plus recorded
-``identity_conflict`` observations, and promoting involved ``PROVISIONAL`` source references to
-``USER_CONFIRMED``. At the time this module was written, issue C's identity ladder (tiers 1-2,
-``PROVISIONAL``/``USER_CONFIRMED`` confidence, and the ``observations``/``identity_conflict``
-table) had not been implemented -- ``IdentityConfidence`` has no ``PROVISIONAL`` member and no
-``observations`` table exists. This module therefore detects duplicates the way PR #59's retired
-``dedupe-inbox`` did (folded title + exact artist set + exact release date), but operating on
-distinct ``releases.subject_local_id`` values rather than raw inbox rows, and reports every pair
-under one tier label, ``"title_key"``. It never promotes a source reference (there is nothing yet
-to promote) and never closes an ``identity_conflict`` observation (none can exist yet). When
-issue C lands, ``find_duplicate_pairs`` should be extended to also consult the tier 1/2 lookups
-and to surface open conflicts; the merge/unmerge mechanics below (subject repoint, snapshot,
-CAS) do not need to change.
+Pairs come from two places: the stored title key (folded title + exact artist set + exact
+release date over distinct ``releases.subject_local_id`` values, tier ``"title_key"``), and
+every open late-link conflict the identity ladder recorded (issue #63, tier
+``"external_link"``): a source linked two releases that already had different subjects, which
+the ladder never merges on its own. A merge closes the pair's open conflicts and promotes a
+provisional reference one side holds for the other side's release to ``USER_CONFIRMED``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import uuid4
 
-from music_friend.domain import InboxEntry, InboxState, Release, Signal, SignalKind
-from music_friend.store.catalog import InboxEntrySnapshotRecord
+from music_friend.domain import (
+    IdentityConfidence,
+    InboxEntry,
+    InboxState,
+    Release,
+    Signal,
+    SignalKind,
+)
+from music_friend.store.catalog import InboxEntrySnapshotRecord, fold_title_key
 from music_friend.tools.application import MusicFriendApplication
-from music_friend.tools.release_discovery import _normalized_title
 
-#: The only detection tier currently implemented; see the module docstring's narrowing note.
+#: A pair sharing the stored title key.
 TIER_TITLE_KEY = "title_key"
+#: A pair a source linked while each release already had its own subject (issue #63).
+TIER_EXTERNAL_LINK = "external_link"
 
 
 def _subject_of(release: Release) -> str:
@@ -70,7 +70,7 @@ def find_duplicate_pairs(application: MusicFriendApplication) -> tuple[Duplicate
     groups: dict[tuple[str, frozenset[str], str], list[Release]] = {}
     for release in application._catalog.list_releases():
         key = (
-            _normalized_title(release.title),
+            fold_title_key(release.title),
             frozenset(release.artist_refs),
             release.release_date.isoformat(),
         )
@@ -87,22 +87,67 @@ def find_duplicate_pairs(application: MusicFriendApplication) -> tuple[Duplicate
             if other_subject in seen_subjects:
                 continue
             seen_subjects.add(other_subject)
-            keep_entry = application._catalog.get_inbox_entry_for_subject(
-                SignalKind.RELEASE, _subject_of(keep)
-            )
-            other_entry = application._catalog.get_inbox_entry_for_subject(
-                SignalKind.RELEASE, other_subject
-            )
-            pairs.append(
-                DuplicatePair(
-                    tier=TIER_TITLE_KEY,
-                    keep_release=keep,
-                    other_release=other,
-                    keep_state=keep_entry.state.value if keep_entry is not None else None,
-                    other_state=other_entry.state.value if other_entry is not None else None,
-                )
-            )
+            pairs.append(_pair(application, TIER_TITLE_KEY, keep, other))
+    paired = {
+        frozenset((pair.keep_subject_local_id, pair.other_subject_local_id)) for pair in pairs
+    }
+    for release_local_id, other_release_local_id in list_open_conflicts(application):
+        first = application._catalog.get_release(release_local_id)
+        second = application._catalog.get_release(other_release_local_id)
+        assert first is not None and second is not None  # conflicts cascade with releases
+        keep, other = sorted((first, second), key=lambda item: (item.observed_at, item.local_id))
+        subjects = frozenset((_subject_of(keep), _subject_of(other)))
+        if len(subjects) < 2 or subjects in paired:
+            continue
+        paired.add(subjects)
+        pairs.append(_pair(application, TIER_EXTERNAL_LINK, keep, other))
     return tuple(pairs)
+
+
+def list_open_conflicts(application: MusicFriendApplication) -> tuple[tuple[str, str], ...]:
+    """Every open late-link conflict as ``(release_local_id, other_release_local_id)``."""
+    return application._catalog.list_open_release_identity_conflicts()
+
+
+def _pair(
+    application: MusicFriendApplication, tier: str, keep: Release, other: Release
+) -> DuplicatePair:
+    keep_entry = application._catalog.get_inbox_entry_for_subject(
+        SignalKind.RELEASE, _subject_of(keep)
+    )
+    other_entry = application._catalog.get_inbox_entry_for_subject(
+        SignalKind.RELEASE, _subject_of(other)
+    )
+    return DuplicatePair(
+        tier=tier,
+        keep_release=keep,
+        other_release=other,
+        keep_state=keep_entry.state.value if keep_entry is not None else None,
+        other_state=other_entry.state.value if other_entry is not None else None,
+    )
+
+
+def _confirm_pair_links(application: MusicFriendApplication, pair: DuplicatePair) -> None:
+    """The user merged the pair: a provisional link between the two is now user-confirmed."""
+    catalog = application._catalog
+    for release, other in (
+        (pair.keep_release, pair.other_release),
+        (pair.other_release, pair.keep_release),
+    ):
+        stored = catalog.get_release(release.local_id)
+        counterpart = catalog.get_release(other.local_id)
+        if stored is None or counterpart is None:
+            continue
+        other_keys = {(item.source, item.native_id) for item in counterpart.source_refs}
+        confirmed = tuple(
+            replace(item, confidence=IdentityConfidence.USER_CONFIRMED)
+            if item.confidence is IdentityConfidence.PROVISIONAL
+            and (item.source, item.native_id) in other_keys
+            else item
+            for item in stored.source_refs
+        )
+        if confirmed != stored.source_refs:
+            catalog.put_release(replace(stored, source_refs=confirmed))
 
 
 def _entry_rank_key(entry: InboxEntry) -> tuple[int, float, str]:
@@ -140,6 +185,10 @@ def merge_duplicate_pair(
     merge_id = f"merge:{uuid4()}"
     keep_subject = pair.keep_subject_local_id
     other_subject = pair.other_subject_local_id
+    catalog.close_release_identity_conflicts(
+        pair.keep_release.local_id, pair.other_release.local_id, now
+    )
+    _confirm_pair_links(application, pair)
     if keep_subject == other_subject:
         return merge_id
 
@@ -216,6 +265,12 @@ def merge_all_duplicate_pairs(
     merge_ids: list[str] = []
     for pair in find_duplicate_pairs(application):
         merge_ids.append(merge_duplicate_pair(application, pair, now=now))
+    catalog = application._catalog
+    for release_local_id, other_release_local_id in list_open_conflicts(application):
+        first = catalog.get_release(release_local_id)
+        second = catalog.get_release(other_release_local_id)
+        if first is not None and second is not None and _subject_of(first) == _subject_of(second):
+            catalog.close_release_identity_conflicts(release_local_id, other_release_local_id, now)
     return tuple(merge_ids)
 
 

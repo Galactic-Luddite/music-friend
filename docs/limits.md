@@ -56,6 +56,24 @@ title, type, date, or artists) updates the existing item and adds `updated_relea
 a saved or dismissed item stays saved or dismissed. When two sources disagree about a value, the
 more precise date wins, and otherwise the source listed earlier in `release_sources` wins.
 
+Music Friend decides that two sources' reports are the same release by strong keys first. A
+source's own id for a release decides first. MusicBrainz then lends each new release group's
+streaming links to Spotify and Deezer albums: one extra MusicBrainz request per new release group,
+paced with every other MusicBrainz request and bounded by the same ten-minute deadline. A release
+group whose links a run did not reach is harvested on the next run. A harvested link is only
+provisional: it counts once the linked service reports that album with a compatible title (a
+deluxe edition, a different remixer, or a remix of the original is not compatible), the same date
+or one day apart, and a shared artist. A contradicted link is dropped and both releases keep their
+own items. Every key must name exactly one release or none; a key that names two is left alone
+(`release_identity_ambiguous` metric). A link between two releases that already have separate items
+is recorded rather than merged (`release_identity_conflict` metric); `music_status` reports how many
+are open as `identity.conflicts`, and `music-friend data inbox duplicates` lists them for review.
+
+| Request | When | Budget |
+|---|---|---|
+| MusicBrainz release-group search | each watchlisted artist due for a check | up to five pages per artist per run |
+| MusicBrainz release browse with url-rels | once per new release group | one request; unfinished ones resume next run |
+
 The `release_source_unmapped` refresh metric counts `(watchlisted artist, release source)` pairs
 skipped in a run because the artist has no identity for that source yet. It is summed over the
 release sources that ran, so a run with two release sources that each lack one artist reports 2.

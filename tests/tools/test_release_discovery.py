@@ -26,7 +26,6 @@ from music_friend.providers import (
 )
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.release_discovery import _normalized_title
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 RAW_ERROR_CANARY = "raw-release-provider-canary"
@@ -1218,39 +1217,6 @@ def test_bare_remix_never_matches_the_plain_original_title(tmp_path: Path) -> No
         assert deezer_release is not None
         assert len(mb_release.source_refs) == 1
         assert len(deezer_release.source_refs) == 1
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        pytest.param("I Won’t Stop", "I Won't Stop", id="curly-vs-straight-apostrophe"),
-        pytest.param("Rock–Paper–Scissors", "Rock-Paper-Scissors", id="en-dash-vs-hyphen"),
-        pytest.param("Rock—Paper—Scissors", "Rock-Paper-Scissors", id="em-dash-vs-hyphen"),
-        pytest.param("Café Nights", "Café Nights", id="nfc-vs-nfd-accent"),
-        pytest.param("Wait…", "Wait...", id="ellipsis-character-vs-dots"),
-        pytest.param("Double  Space", "Double Space", id="doubled-whitespace"),
-        pytest.param("‘Quoted’ Title", "'Quoted' Title", id="curly-single-quote-pair"),
-        pytest.param("“Quoted” Title", '"Quoted" Title', id="curly-double-quote-pair"),
-    ],
-)
-def test_normalized_title_folds_typographic_variants_to_the_same_key(left: str, right: str) -> None:
-    """AC (issue #56): titles differing only by typographic punctuation, Unicode
-    form, or whitespace collapse to the same comparison key."""
-    assert _normalized_title(left) == _normalized_title(right)
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        pytest.param("Stop", "Stops", id="different-real-word"),
-        pytest.param("Cafe", "Café", id="different-accented-letter"),
-        pytest.param("Niño", "Nino", id="tilde-n-vs-plain-n"),
-    ],
-)
-def test_normalized_title_keeps_real_differences_distinct(left: str, right: str) -> None:
-    """Negative test (issue #56): titles differing by real characters, including a
-    different accented letter, must not collapse to the same comparison key."""
-    assert _normalized_title(left) != _normalized_title(right)
 
 
 def test_cross_source_dedupe_merges_titles_differing_only_by_typographic_apostrophe(

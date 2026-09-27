@@ -50,7 +50,7 @@ from music_friend.domain import (
     SourceReference,
     SyncCapabilityStatus,
 )
-from music_friend.domain.observations import ReleaseObservation
+from music_friend.domain.observations import ObservationOutcome, ReleaseObservation
 from music_friend.errors import QuotaExhaustedError, RateLimitedError
 from music_friend.providers import MusicSource, Page, ProviderCapabilities, ProviderHealth
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
@@ -207,6 +207,11 @@ class _RefreshCounts:
     #: release source being run (issue #48); a run that mapped nobody still reports
     #: this instead of a silent, signal-free "succeeded".
     release_source_unmapped: int = 0
+    #: Observations whose identity key named two or more subjects (issue #63).
+    release_identity_ambiguous: int = 0
+    #: ``identity_conflict`` observations written: a contradicted provisional link or a
+    #: link between releases that already have different subjects (issue #63).
+    release_identity_conflict: int = 0
     partial: bool = False
     events_skip_reason: str | None = None
     #: Names of additional release sources (see ``additional_release_sources``)
@@ -336,6 +341,13 @@ class _PacedSource:
         """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases."""
         result: str | None = self._request(
             lambda: self.source.deezer_artist_id(mbid)  # type: ignore[attr-defined]
+        )
+        return result
+
+    def release_group_links(self, release_group_id: str) -> tuple[SourceReference, ...]:
+        """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases."""
+        result: tuple[SourceReference, ...] = self._request(
+            lambda: self.source.release_group_links(release_group_id)  # type: ignore[attr-defined]
         )
         return result
 
@@ -912,6 +924,7 @@ def _run_releases(
                 application.put_source_limit(source.limit_observation)
             return
 
+    harvest_links = source_name == "musicbrainz" and isinstance(source.source, MusicBrainzSource)
     checkpoint = application.get_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
     try:
         result = application.discover_releases(
@@ -919,6 +932,7 @@ def _run_releases(
             source,
             checked_at=checked_at,
             start_artist_local_id=None if checkpoint is None else checkpoint.cursor,
+            harvest_links=harvest_links,
         )
     except _ReleaseDiscoveryInterrupted as interrupted:
         _count_releases(
@@ -949,11 +963,20 @@ def _run_releases(
         counts.failures += 1
         return
     counts.release_source_unmapped += result.unmapped
-    _count_releases(application, source_name, result, checked_at, counts, release_sources)
+    harvested = (
+        _harvest_release_links(application, source_name, source, counts) if harvest_links else {}
+    )
+    recorded = _count_releases(
+        application, source_name, result, checked_at, counts, release_sources, harvested
+    )
+    _record_harvested_links(
+        application, source_name, harvested, recorded, checked_at, counts, release_sources
+    )
     if any(artist.status is ReleaseDiscoveryStatus.FAILED for artist in result.artists):
         return
     application.remove_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
-    application.put_source_limit(source.available_observation())
+    if not source.stopped:
+        application.put_source_limit(source.available_observation())
 
 
 def _run_additional_release_sources(
@@ -1015,7 +1038,9 @@ def _count_releases(
     checked_at: datetime,
     counts: _RefreshCounts,
     release_sources: tuple[str, ...],
-) -> None:
+    links: dict[str, tuple[SourceReference, ...]] | None = None,
+) -> set[str]:
+    recorded: set[str] = set()
     for artist_result in result.artists:
         counts.records_seen += artist_result.records_seen
         if artist_result.status is ReleaseDiscoveryStatus.FAILED:
@@ -1024,14 +1049,99 @@ def _count_releases(
         counts.successes += 1
         if artist_result.status is ReleaseDiscoveryStatus.PARTIAL:
             counts.records_skipped += 1
-        _record_release_candidates(
-            application,
-            source_name,
-            artist_result.candidates,
-            checked_at,
-            counts,
-            release_sources,
+        recorded.update(
+            _record_release_candidates(
+                application,
+                source_name,
+                artist_result.candidates,
+                checked_at,
+                counts,
+                release_sources,
+                links or {},
+            )
         )
+    return recorded
+
+
+#: Release groups whose links one run harvests at most; the refresh deadline bounds it too.
+_MAX_LINK_HARVESTS = 100
+
+
+def _harvest_release_links(
+    application: MusicFriendApplication,
+    source_name: str,
+    source: _PacedSource,
+    counts: _RefreshCounts,
+) -> dict[str, tuple[SourceReference, ...]]:
+    """Harvest cross-source links once per new release group (issue #63).
+
+    One paced request per ``link_harvest_pending`` release. A stop (deadline, rate limit,
+    quota) leaves the rest pending for the next run and marks the run partial; a failed
+    request stays pending and counts a failure.
+    """
+    catalog = application._catalog
+    harvested: dict[str, tuple[SourceReference, ...]] = {}
+    for discovery in catalog.list_link_harvest_pending(source_name, limit=_MAX_LINK_HARVESTS):
+        try:
+            links = source.release_group_links(discovery.provider_native_id)
+        except _SourceCallStopped:
+            counts.partial = True
+            if source.limit_observation is not None:
+                application.put_source_limit(source.limit_observation)
+            break
+        except Exception:
+            counts.failures += 1
+            continue
+        catalog.set_link_harvest_pending(discovery.release_local_id, False)
+        harvested[discovery.release_local_id] = links
+    return harvested
+
+
+def _record_harvested_links(
+    application: MusicFriendApplication,
+    source_name: str,
+    harvested: dict[str, tuple[SourceReference, ...]],
+    recorded: set[str],
+    checked_at: datetime,
+    counts: _RefreshCounts,
+    release_sources: tuple[str, ...],
+) -> None:
+    """Feed links harvested for a release recorded in an earlier run through the ladder."""
+    catalog = application._catalog
+    for release_local_id, links in harvested.items():
+        if release_local_id in recorded or not links:
+            continue
+        release = catalog.get_release(release_local_id)
+        assert release is not None  # a discovery row always has its release
+        artist_local_id = next(
+            (item for item in release.artist_refs if catalog.get_artist(item) is not None), None
+        )
+        if artist_local_id is None:
+            continue
+        references = _source_references(release.source_refs, source_name)
+        try:
+            outcome = record_release_observation(
+                catalog,
+                ReleaseObservation(
+                    release=release,
+                    source=source_name,
+                    native_id=references[0].native_id,
+                    monitored_artist_local_id=artist_local_id,
+                    external_links=links,
+                    observed_at=checked_at,
+                ),
+                release_sources=release_sources,
+            )
+        except Exception:
+            counts.failures += 1
+            continue
+        _count_identity(outcome, counts)
+
+
+def _count_identity(outcome: ObservationOutcome, counts: _RefreshCounts) -> None:
+    if outcome.kind == "ambiguous":
+        counts.release_identity_ambiguous += 1
+    counts.release_identity_conflict += outcome.identity_conflicts
 
 
 def _run_events(
@@ -1093,8 +1203,10 @@ def _record_release_candidates(
     checked_at: datetime,
     counts: _RefreshCounts,
     release_sources: tuple[str, ...],
-) -> None:
+    links: dict[str, tuple[SourceReference, ...]] | None = None,
+) -> set[str]:
     """Record each discovered release through the single write path (issue #62)."""
+    recorded: set[str] = set()
     for candidate in candidates:
         if candidate.kind.value == "new":
             counts.records_created += 1
@@ -1109,6 +1221,7 @@ def _record_release_candidates(
                     source=reference.source,
                     native_id=reference.native_id,
                     monitored_artist_local_id=candidate.artist_local_id,
+                    external_links=(links or {}).get(candidate.release.local_id, ()),
                     observed_at=checked_at,
                 ),
                 release_sources=release_sources,
@@ -1120,8 +1233,11 @@ def _record_release_candidates(
             except Exception:
                 counts.failures += 1
             continue
+        recorded.add(candidate.release.local_id)
+        _count_identity(outcome, counts)
         if outcome.signal_created:
             counts.signals_created += 1
+    return recorded
 
 
 def _retry_candidate_next_run(
@@ -1371,6 +1487,8 @@ def _summary(counts: _RefreshCounts) -> RefreshSummary:
         RefreshMetricKind.LIMIT_PAUSES: counts.limit_pauses,
         RefreshMetricKind.SOURCE_REQUESTS: counts.source_requests,
         RefreshMetricKind.RELEASE_SOURCE_UNMAPPED: counts.release_source_unmapped,
+        RefreshMetricKind.RELEASE_IDENTITY_AMBIGUOUS: counts.release_identity_ambiguous,
+        RefreshMetricKind.RELEASE_IDENTITY_CONFLICT: counts.release_identity_conflict,
     }
     return RefreshSummary(
         tuple(

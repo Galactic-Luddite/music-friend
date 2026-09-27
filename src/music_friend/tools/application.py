@@ -184,6 +184,7 @@ class MusicFriendApplication:
         *,
         checked_at: datetime,
         start_artist_local_id: str | None = None,
+        harvest_links: bool = False,
     ) -> ReleaseDiscoveryResult:
         return discover_releases(
             self._catalog,
@@ -191,6 +192,7 @@ class MusicFriendApplication:
             source,
             checked_at=checked_at,
             start_artist_local_id=start_artist_local_id,
+            harvest_links=harvest_links,
         )
 
     def discover_ticketmaster_events(
@@ -253,6 +255,10 @@ class MusicFriendApplication:
 
     def list_refresh_runs(self, *, limit: int) -> tuple[RefreshRun, ...]:
         return self._catalog.list_refresh_runs(limit=limit)
+
+    def count_open_identity_conflicts(self) -> int:
+        """Open late-link conflicts awaiting ``data inbox duplicates`` (issue #63)."""
+        return len(self._catalog.list_open_release_identity_conflicts())
 
     def put_source_cursor(self, cursor: SourceCursor) -> None:
         self._catalog.put_source_cursor(cursor)

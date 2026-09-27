@@ -21,6 +21,8 @@ signature, status footer, or advice to retry unless the local result specificall
 
 - For a quick overview, call `music_status`. Its `refresh.running` flag reports whether a
   refresh is in progress right now; other tools keep answering from local state while it runs.
+  A non-zero `identity.conflicts` means some releases a source linked were kept as separate
+  items; tell the person they can review them with `music-friend data inbox duplicates`.
 - To update local information, ask for confirmation and then call `refresh_music` with one of
   `catalog`, `releases`, `events`, or `all`. A `kind: "events"` call with no event area configured
   returns `{"status": "skipped", "reason": "event_area_not_configured"}` and makes no provider

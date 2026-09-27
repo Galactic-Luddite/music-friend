@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
@@ -16,8 +17,13 @@ from music_friend.errors import (
 from music_friend.providers import Capability
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from tests.providers.musicbrainz.live_fixtures import (
+    LIVE_BROWSE_RELEASE_GROUP_ID,
     LIVE_SEARCH_ARTIST_MBID,
+    SYNTHETIC_DEEZER_ALBUM_ID,
+    SYNTHETIC_SPOTIFY_ALBUM_ID,
+    load_live_release_browse,
     load_live_release_group_search,
+    release_browse_with_synthetic_streaming_links,
 )
 
 FIXED_NOW = datetime(2026, 9, 26, tzinfo=timezone.utc)
@@ -590,3 +596,100 @@ def test_deezer_artist_id_propagates_rate_limited() -> None:
     source = _source(transport)
     with pytest.raises(RateLimitedError):
         source.deezer_artist_id(mbid)
+
+
+def test_recent_releases_harvests_release_url_rels() -> None:
+    """Issue #63: a new release group's links come from one release browse with url-rels,
+    rewritten from a recorded public response to synthetic Spotify and Deezer album ids,
+    and every harvested link is PROVISIONAL. (The harvest is its own method, called once per
+    new release group by the refresh, not by recent_releases itself.)"""
+    transport = FakeTransport()
+    transport.queue(release_browse_with_synthetic_streaming_links())
+    source = _source(transport)
+
+    links = source.release_group_links(LIVE_BROWSE_RELEASE_GROUP_ID)
+
+    assert transport.calls == [
+        (
+            "release",
+            {"release-group": LIVE_BROWSE_RELEASE_GROUP_ID, "inc": "url-rels", "limit": "100"},
+        )
+    ]
+    assert [(link.source, link.native_id, link.canonical_url) for link in links] == [
+        (
+            "deezer",
+            SYNTHETIC_DEEZER_ALBUM_ID,
+            f"https://www.deezer.com/album/{SYNTHETIC_DEEZER_ALBUM_ID}",
+        ),
+        (
+            "spotify",
+            SYNTHETIC_SPOTIFY_ALBUM_ID,
+            f"https://open.spotify.com/album/{SYNTHETIC_SPOTIFY_ALBUM_ID}",
+        ),
+    ]
+    assert {link.confidence for link in links} == {IdentityConfidence.PROVISIONAL}
+    assert {link.observed_at for link in links} == {FIXED_NOW}
+
+
+def test_release_url_rels_without_streaming_links_harvest_nothing() -> None:
+    """The recorded response, unmodified, links only a non-Spotify, non-Deezer store."""
+    transport = FakeTransport()
+    transport.queue(load_live_release_browse())
+
+    assert _source(transport).release_group_links(LIVE_BROWSE_RELEASE_GROUP_ID) == ()
+
+
+def test_release_url_rels_naming_two_albums_of_one_provider_link_none_of_them() -> None:
+    """Exactly one or none: two distinct Deezer albums across a group's releases link
+    no Deezer album, while the single Spotify album still links."""
+    browse = release_browse_with_synthetic_streaming_links()
+    second_release = json.loads(json.dumps(browse["releases"][0]))
+    for relation in second_release["relations"]:
+        resource = relation["url"]["resource"]
+        if resource.startswith("https://www.deezer.com/album/"):
+            relation["url"]["resource"] = "https://www.deezer.com/album/900000002"
+    browse["releases"].append(second_release)
+    transport = FakeTransport()
+    transport.queue(browse)
+
+    links = _source(transport).release_group_links(LIVE_BROWSE_RELEASE_GROUP_ID)
+
+    assert [(link.source, link.native_id) for link in links] == [
+        ("spotify", SYNTHETIC_SPOTIFY_ALBUM_ID)
+    ]
+
+
+def test_release_url_rels_reject_invalid_input_and_responses() -> None:
+    transport = FakeTransport()
+    source = _source(transport)
+    for bad in ("", "not-an-mbid", 7):
+        with pytest.raises(ValueError, match="release_group_id"):
+            source.release_group_links(bad)  # type: ignore[arg-type]
+    assert transport.calls == []
+    transport.queue([])
+    with pytest.raises(InvalidSourceResponseError):
+        source.release_group_links(LIVE_BROWSE_RELEASE_GROUP_ID)
+    transport.queue({"release-count": 0})
+    with pytest.raises(InvalidSourceResponseError):
+        source.release_group_links(LIVE_BROWSE_RELEASE_GROUP_ID)
+    transport.queue(
+        {
+            "releases": [
+                "not-a-release",
+                {"relations": "not-a-list"},
+                {
+                    "relations": [
+                        "not-a-relation",
+                        {"type": "purchase for download", "url": {"resource": "x"}},
+                        {"type": "streaming", "url": "not-a-mapping"},
+                        {
+                            "type": "streaming",
+                            "url": {"resource": "https://www.deezer.com/album/12"},
+                        },
+                    ]
+                },
+            ]
+        }
+    )
+    links = source.release_group_links(LIVE_BROWSE_RELEASE_GROUP_ID)
+    assert [(link.source, link.native_id) for link in links] == [("deezer", "12")]

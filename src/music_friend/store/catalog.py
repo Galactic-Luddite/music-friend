@@ -132,6 +132,51 @@ _FEAT_CREDIT = re.compile(r"^(?P<base>.+?)\s*\(feat\.?\s+[^()]*\)\Z")
 _FROM_CREDIT = re.compile(r"^(?P<base>.+?)\s*[(\[]from\s+[^()\[\]]*[)\]]\Z", re.IGNORECASE)
 _REMIX_QUALIFIER = re.compile(r"^(?P<base>.+?)\s*\((?P<remixer>[^()]*?)\s*remix\)\Z")
 
+#: Typographic quote variants folded to ASCII equivalents (issue #56 / #59).
+_TITLE_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "‘": "'",  # LEFT SINGLE QUOTATION MARK
+        "’": "'",  # RIGHT SINGLE QUOTATION MARK
+        "‛": "'",  # SINGLE HIGH-REVERSED-9 QUOTATION MARK
+        "′": "'",  # PRIME
+        "“": '"',  # LEFT DOUBLE QUOTATION MARK
+        "”": '"',  # RIGHT DOUBLE QUOTATION MARK
+        "″": '"',  # DOUBLE PRIME
+    }
+)
+#: Dash variants (hyphen through horizontal bar, plus minus sign) folded to ``-`` (issue #56 / #59).
+_TITLE_DASH_TRANSLATION = str.maketrans(
+    {
+        "‐": "-",  # HYPHEN
+        "‑": "-",  # NON-BREAKING HYPHEN
+        "‒": "-",  # FIGURE DASH
+        "–": "-",  # EN DASH
+        "—": "-",  # EM DASH
+        "―": "-",  # HORIZONTAL BAR
+        "−": "-",  # MINUS SIGN
+    }
+)
+
+
+def _fold_ellipsis(text: str) -> str:
+    """Replace horizontal ellipsis (…) with three periods."""
+    return text.replace("…", "...")
+
+
+def fold_title_key(title: str) -> str:
+    """Fold a release title to a cross-source comparison key (issue #56, #59).
+
+    Applies Unicode NFKC normalization, maps typographic quote and dash variants to
+    their ASCII equivalents, case-folds, and collapses whitespace. The stored display
+    title is never altered -- only this comparison key. Used by both tier-4 discovery
+    and the identity ladder.
+    """
+    normalized = unicodedata.normalize("NFKC", title)
+    normalized = normalized.translate(_TITLE_QUOTE_TRANSLATION)
+    normalized = normalized.translate(_TITLE_DASH_TRANSLATION)
+    normalized = _fold_ellipsis(normalized)
+    return " ".join(normalized.casefold().split())
+
 
 def _release_title_variant_key(normalized_title: str) -> tuple[str, str | None]:
     """Fold decorations that never distinguish genuinely different releases (issue #50, #54).
@@ -182,6 +227,44 @@ def _release_title_variants_compatible(
     if incoming_remixer == "" or stored_remixer == "":
         return True
     return incoming_remixer == stored_remixer
+
+
+def release_title_keys_compatible(
+    title: str,
+    release_date: date,
+    date_precision: ReleaseDatePrecision,
+    other_title: str,
+    other_release_date: date,
+    other_date_precision: ReleaseDatePrecision,
+) -> bool:
+    """Whether two reports agree on the conservative tier-4 key (issue #63 corroboration).
+
+    Titles must be equal after ``fold_title_key`` or compatible title variants (deluxe and
+    original, two different remixers, or an original and its remix are not); dates must be
+    equal, or one day apart when both have day precision.
+    """
+    for name, value in (("title", title), ("other_title", other_title)):
+        if type(value) is not str:
+            raise ValueError(f"{name} must be a string")
+    for name, day in (("release_date", release_date), ("other_release_date", other_release_date)):
+        if not isinstance(day, date) or isinstance(day, datetime):
+            raise ValueError(f"{name} must be a date")
+    for name, precision in (
+        ("date_precision", date_precision),
+        ("other_date_precision", other_date_precision),
+    ):
+        if not isinstance(precision, ReleaseDatePrecision):
+            raise ValueError(f"{name} must be a ReleaseDatePrecision")
+    key = fold_title_key(title)
+    other_key = fold_title_key(other_title)
+    if key != other_key and not _release_title_variants_compatible(
+        _release_title_variant_key(key), _release_title_variant_key(other_key)
+    ):
+        return False
+    if release_date == other_release_date:
+        return True
+    both_day = date_precision is other_date_precision is ReleaseDatePrecision.DAY
+    return both_day and abs((release_date - other_release_date).days) == 1
 
 
 def _datetime_text(value: datetime) -> str:
@@ -679,26 +762,50 @@ class Catalog:
         record_local_id: str,
         references: tuple[SourceReference, ...],
     ) -> None:
+        from music_friend.domain import IdentityConfidence
+
         connection = self._require_connection()
         reference_ids: list[int] = []
+        provisional_flags: list[int] = []
         for position, reference in enumerate(references):
-            connection.execute(
-                """
-                INSERT INTO source_references (source, native_id, canonical_url, observed_at, confidence)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (source, native_id) DO UPDATE SET
-                    canonical_url = excluded.canonical_url,
-                    observed_at = excluded.observed_at,
-                    confidence = excluded.confidence
-                """,
-                (
-                    reference.source,
-                    reference.native_id,
-                    reference.canonical_url,
-                    _datetime_text(reference.observed_at),
-                    reference.confidence.value,
-                ),
-            )
+            provisional = reference.confidence is IdentityConfidence.PROVISIONAL
+            provisional_flags.append(1 if provisional else 0)
+            if provisional:
+                # A provisional link is a claim about this record only (issue #63): it never
+                # overwrites what the linked provider itself reported for the shared reference.
+                connection.execute(
+                    """
+                    INSERT INTO source_references
+                        (source, native_id, canonical_url, observed_at, confidence)
+                    VALUES (?, ?, ?, ?, 'source_only')
+                    ON CONFLICT (source, native_id) DO NOTHING
+                    """,
+                    (
+                        reference.source,
+                        reference.native_id,
+                        reference.canonical_url,
+                        _datetime_text(reference.observed_at),
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO source_references
+                        (source, native_id, canonical_url, observed_at, confidence)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (source, native_id) DO UPDATE SET
+                        canonical_url = excluded.canonical_url,
+                        observed_at = excluded.observed_at,
+                        confidence = excluded.confidence
+                    """,
+                    (
+                        reference.source,
+                        reference.native_id,
+                        reference.canonical_url,
+                        _datetime_text(reference.observed_at),
+                        reference.confidence.value,
+                    ),
+                )
             source_row = connection.execute(
                 "SELECT id FROM source_references WHERE source = ? AND native_id = ?",
                 (reference.source, reference.native_id),
@@ -733,12 +840,18 @@ class Catalog:
             connection.execute(
                 """
                 INSERT INTO record_sources
-                    (record_kind, record_local_id, source_reference_id, position)
-                VALUES (?, ?, ?, ?)
+                    (record_kind, record_local_id, source_reference_id, position, provisional)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (record_kind, record_local_id, source_reference_id)
-                DO UPDATE SET position = excluded.position
+                DO UPDATE SET position = excluded.position, provisional = excluded.provisional
                 """,
-                (record_kind, record_local_id, source_reference_id, position),
+                (
+                    record_kind,
+                    record_local_id,
+                    source_reference_id,
+                    position,
+                    provisional_flags[position],
+                ),
             )
         connection.execute(
             """
@@ -756,7 +869,9 @@ class Catalog:
             .execute(
                 """
             SELECT reference.source, reference.native_id, reference.canonical_url,
-                   reference.observed_at, reference.confidence
+                   reference.observed_at,
+                   CASE WHEN mapping.provisional = 1 THEN 'provisional'
+                        ELSE reference.confidence END
             FROM record_sources AS mapping
             JOIN source_references AS reference ON reference.id = mapping.source_reference_id
             WHERE mapping.record_kind = ? AND mapping.record_local_id = ?
@@ -1997,6 +2112,180 @@ class Catalog:
         )
         return tuple(str(row[0]) for row in rows)
 
+    def find_release_reference_holders(
+        self, source: str, native_id: str
+    ) -> tuple[tuple[str, str, bool], ...]:
+        """List ``(release_local_id, subject_local_id, provisional)`` for every release carrying
+        the ``(source, native_id)`` reference, in release id order (issue #63)."""
+        if type(source) is not str or not source or type(native_id) is not str or not native_id:
+            raise ValueError("source and native_id must be non-empty strings")
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT release.local_id, release.subject_local_id, mapping.provisional
+                FROM record_sources AS mapping
+                JOIN source_references AS reference ON reference.id = mapping.source_reference_id
+                JOIN releases AS release ON release.local_id = mapping.record_local_id
+                WHERE mapping.record_kind = 'release'
+                  AND reference.source = ? AND reference.native_id = ?
+                ORDER BY release.local_id
+                """,
+                (source, native_id),
+            )
+            .fetchall()
+        )
+        return tuple(
+            (str(row[0]), str(row[1] if row[1] is not None else row[0]), bool(row[2]))
+            for row in rows
+        )
+
+    def join_new_release_to_subject(self, release_local_id: str, subject_local_id: str) -> None:
+        """Map a release that has never had an inbox entry onto an existing subject (issue #63).
+
+        Only the identity ladder uses this, for a release discovery created moments before its
+        first observation. A release whose subject already carries an inbox entry is never
+        re-pointed here; that is a user-reviewed merge (``data inbox duplicates``).
+        """
+        with self.transaction():
+            connection = self._require_connection()
+            row = connection.execute(
+                "SELECT subject_local_id FROM releases WHERE local_id = ?", (release_local_id,)
+            ).fetchone()
+            if row is None:
+                raise sqlite3.IntegrityError("release does not exist")
+            current = str(row[0])
+            if current == subject_local_id:
+                return
+            if connection.execute(
+                "SELECT 1 FROM inbox_entries WHERE kind = 'release' AND subject_local_id = ?",
+                (current,),
+            ).fetchone():
+                raise sqlite3.IntegrityError("release subject already has an inbox entry")
+            if not connection.execute(
+                "SELECT 1 FROM inbox_subjects WHERE local_id = ? AND kind = 'release'",
+                (subject_local_id,),
+            ).fetchone():
+                raise sqlite3.IntegrityError("target subject does not exist")
+            connection.execute(
+                "UPDATE releases SET subject_local_id = ? WHERE local_id = ?",
+                (subject_local_id, release_local_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM inbox_subjects
+                WHERE local_id = ?
+                  AND NOT EXISTS (SELECT 1 FROM releases WHERE subject_local_id = ?)
+                  AND NOT EXISTS (SELECT 1 FROM inbox_entries WHERE subject_local_id = ?)
+                """,
+                (current, current, current),
+            )
+
+    def set_link_harvest_pending(self, release_local_id: str, pending: bool) -> None:
+        """Mark whether a discovered release still needs its cross-source links harvested."""
+        if type(pending) is not bool:
+            raise ValueError("pending must be a boolean")
+        with self.transaction():
+            updated = (
+                self._require_connection()
+                .execute(
+                    "UPDATE release_discoveries SET link_harvest_pending = ? "
+                    "WHERE release_local_id = ?",
+                    (1 if pending else 0, release_local_id),
+                )
+                .rowcount
+            )
+            if updated != 1:
+                raise sqlite3.IntegrityError("release discovery does not exist")
+
+    def list_link_harvest_pending(self, source: str, *, limit: int) -> tuple[ReleaseDiscovery, ...]:
+        """List discovered releases of one source whose links are still to be harvested."""
+        if type(source) is not str or not source:
+            raise ValueError("source must be a non-empty string")
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT release_local_id, source, provider_native_id, normalized_title, release_date,
+                       material_identity, first_seen_at, last_seen_at
+                FROM release_discoveries
+                WHERE source = ? AND link_harvest_pending = 1
+                ORDER BY first_seen_at, release_local_id
+                LIMIT ?
+                """,
+                (source, limit),
+            )
+            .fetchall()
+        )
+        return tuple(self._release_discovery_from_row(row) for row in rows)
+
+    def open_release_identity_conflict(
+        self,
+        observation_local_id: str,
+        release_local_id: str,
+        other_release_local_id: str,
+        opened_at: datetime,
+    ) -> None:
+        """Record a late link between two releases kept in different subjects (issue #63)."""
+        with self.transaction():
+            self._require_connection().execute(
+                """
+                INSERT INTO release_identity_conflicts
+                    (observation_local_id, release_local_id, other_release_local_id, opened_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (observation_local_id) DO NOTHING
+                """,
+                (
+                    observation_local_id,
+                    release_local_id,
+                    other_release_local_id,
+                    _datetime_text(opened_at),
+                ),
+            )
+
+    def list_open_release_identity_conflicts(self) -> tuple[tuple[str, str], ...]:
+        """List ``(release_local_id, other_release_local_id)`` for every open conflict."""
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT release_local_id, other_release_local_id
+                FROM release_identity_conflicts
+                WHERE closed_at IS NULL
+                ORDER BY opened_at, observation_local_id
+                """
+            )
+            .fetchall()
+        )
+        return tuple((str(row[0]), str(row[1])) for row in rows)
+
+    def close_release_identity_conflicts(
+        self, release_local_id: str, other_release_local_id: str, closed_at: datetime
+    ) -> int:
+        """Close every open conflict between two releases, in either direction."""
+        with self.transaction():
+            return int(
+                self._require_connection()
+                .execute(
+                    """
+                    UPDATE release_identity_conflicts SET closed_at = ?
+                    WHERE closed_at IS NULL
+                      AND ((release_local_id = ? AND other_release_local_id = ?)
+                        OR (release_local_id = ? AND other_release_local_id = ?))
+                    """,
+                    (
+                        _datetime_text(closed_at),
+                        release_local_id,
+                        other_release_local_id,
+                        other_release_local_id,
+                        release_local_id,
+                    ),
+                )
+                .rowcount
+            )
+
     def find_release_discovery_variant(
         self,
         source: str,
@@ -2432,6 +2721,20 @@ class Catalog:
             .fetchone()
         )
         return None if row is None else self.get_signal(str(row[0]))
+
+    def record_has_signal(self, kind: SignalKind, record_local_id: str) -> bool:
+        """Whether any signal, of any content version, was ever recorded for one record."""
+        if not isinstance(kind, SignalKind):
+            raise ValueError("kind must be a SignalKind")
+        row = (
+            self._require_connection()
+            .execute(
+                "SELECT 1 FROM signals WHERE kind = ? AND record_local_id = ? LIMIT 1",
+                (kind.value, record_local_id),
+            )
+            .fetchone()
+        )
+        return row is not None
 
     def find_signal_for_record(
         self, kind: SignalKind, record_local_id: str, material_version: str
@@ -3054,4 +3357,4 @@ class Catalog:
         return [str(row[0]) for row in rows]
 
 
-__all__ = ["Catalog"]
+__all__ = ["Catalog", "fold_title_key", "release_title_keys_compatible"]

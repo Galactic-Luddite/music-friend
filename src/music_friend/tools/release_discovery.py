@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -24,7 +23,7 @@ from music_friend.domain import (
     SourceReference,
 )
 from music_friend.providers import MusicSource, Page
-from music_friend.store import Catalog
+from music_friend.store import Catalog, fold_title_key
 
 _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_RELEASES_PER_ARTIST = 100
@@ -68,8 +67,13 @@ def discover_releases(
     *,
     checked_at: datetime,
     start_artist_local_id: str | None = None,
+    harvest_links: bool = False,
 ) -> ReleaseDiscoveryResult:
-    """Discover each monitored artist independently without writing inbox state."""
+    """Discover each monitored artist independently without writing inbox state.
+
+    With ``harvest_links``, every newly discovered release is marked
+    ``link_harvest_pending`` so the refresh harvests its cross-source links (issue #63).
+    """
     if not isinstance(catalog, Catalog):
         raise ValueError("catalog must be a Catalog")
     if type(source_name) is not str or _SOURCE_NAME.fullmatch(source_name) is None:
@@ -77,6 +81,8 @@ def discover_releases(
     if not isinstance(source, MusicSource):
         raise ValueError("source must implement the music source contract")
     _require_aware(checked_at, "checked_at")
+    if type(harvest_links) is not bool:
+        raise ValueError("harvest_links must be a boolean")
 
     entries = catalog._watchlist_entries()
     start = 0
@@ -100,7 +106,9 @@ def discover_releases(
             continue
         try:
             completed.append(
-                _discover_artist(catalog, source_name, source, entry.artist, checked_at)
+                _discover_artist(
+                    catalog, source_name, source, entry.artist, checked_at, harvest_links
+                )
             )
         except _SourceCallStopped:
             raise _ReleaseDiscoveryInterrupted(
@@ -115,6 +123,7 @@ def _discover_artist(
     source: MusicSource,
     artist: Artist,
     checked_at: datetime,
+    harvest_links: bool = False,
 ) -> ArtistReleaseDiscoveryResult:
     try:
         source_reference = _source_reference(artist, source_name)
@@ -151,6 +160,7 @@ def _discover_artist(
                 artist.local_id,
                 releases,
                 checked_at,
+                harvest_links,
             )
             if next_cursor is None:
                 catalog.put_release_check_cursor(
@@ -232,14 +242,19 @@ def _persist_artist_releases(
     artist_local_id: str,
     releases: tuple[Release, ...],
     checked_at: datetime,
+    harvest_links: bool = False,
 ) -> tuple[ReleaseCandidate, ...]:
     candidates: list[ReleaseCandidate] = []
     with catalog.transaction():
         for release in releases:
             native_id = _release_native_id(release, source_name)
-            normalized_title = _normalized_title(release.title)
+            normalized_title = fold_title_key(release.title)
             existing = catalog.get_release_discovery_by_provider(source_name, native_id)
-            if existing is None:
+            # A reference another source already linked (issue #63) is resolved by the
+            # identity ladder when this report is observed, never by a title guess here.
+            if existing is None and not catalog.find_releases_by_source_reference(
+                source_name, native_id
+            ):
                 existing = catalog.find_release_discovery_variant(
                     source_name,
                     _candidate_artist_local_ids(release, artist_local_id),
@@ -275,6 +290,8 @@ def _persist_artist_releases(
                         checked_at,
                     )
                 )
+                if harvest_links:
+                    catalog.set_link_harvest_pending(persisted.local_id, True)
                 candidates.append(
                     ReleaseCandidate(persisted, artist_local_id, ReleaseCandidateKind.NEW)
                 )
@@ -395,52 +412,6 @@ def _candidate_artist_local_ids(release: Release, artist_local_id: str) -> tuple
     for artist_id in release.artist_refs:
         seen.setdefault(artist_id, None)
     return tuple(seen)
-
-
-#: Typographic quote/apostrophe variants folded to the ASCII form they stand in for
-#: (issue #56): a curly single quote/apostrophe/reversed-9-quote/prime maps to ``'``,
-#: and a curly double quote/double-prime maps to ``"``.
-_TITLE_QUOTE_TRANSLATION = str.maketrans(
-    {
-        "‘": "'",  # LEFT SINGLE QUOTATION MARK
-        "’": "'",  # RIGHT SINGLE QUOTATION MARK
-        "‛": "'",  # SINGLE HIGH-REVERSED-9 QUOTATION MARK
-        "′": "'",  # PRIME
-        "“": '"',  # LEFT DOUBLE QUOTATION MARK
-        "”": '"',  # RIGHT DOUBLE QUOTATION MARK
-        "″": '"',  # DOUBLE PRIME
-    }
-)
-#: Dash variants (hyphen through horizontal bar, plus minus sign) folded to ``-``,
-#: and the ellipsis character folded to three literal periods (issue #56).
-_TITLE_DASH_TRANSLATION = str.maketrans(
-    {
-        "‐": "-",  # HYPHEN
-        "‑": "-",  # NON-BREAKING HYPHEN
-        "‒": "-",  # FIGURE DASH
-        "–": "-",  # EN DASH
-        "—": "-",  # EM DASH
-        "―": "-",  # HORIZONTAL BAR
-        "−": "-",  # MINUS SIGN
-        "…": "...",  # HORIZONTAL ELLIPSIS
-    }
-)
-
-
-def _normalized_title(title: str) -> str:
-    """Fold a release title to a cross-source comparison key (issue #56).
-
-    Applies Unicode NFKC normalization, maps typographic quote and dash variants to
-    their ASCII equivalents, case-folds, and collapses whitespace, so titles that
-    differ only in typographic punctuation or Unicode form (curly vs. straight
-    apostrophe, en/em dash vs. hyphen, NFD vs. NFC accents, doubled spaces) compare
-    equal across sources. The stored display title is never altered -- only this
-    comparison key.
-    """
-    normalized = unicodedata.normalize("NFKC", title)
-    normalized = normalized.translate(_TITLE_QUOTE_TRANSLATION)
-    normalized = normalized.translate(_TITLE_DASH_TRANSLATION)
-    return " ".join(normalized.casefold().split())
 
 
 def _material_identity(release: Release, source_name: str, native_id: str) -> str:

@@ -57,6 +57,7 @@ from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.inbox_maintenance import (
     find_duplicate_pairs,
+    list_open_conflicts,
     merge_all_duplicate_pairs,
     unmerge,
 )
@@ -1190,9 +1191,8 @@ def _inbox_duplicates_command(
     """List (default) or, with ``merge=True``, merge cross-subject duplicate releases.
 
     Dry run (default): lists every pair :func:`inbox_maintenance.find_duplicate_pairs` finds,
-    plus the currently-empty ``conflicts`` list (see ``inbox_maintenance``'s module docstring
-    for the narrowing: no ``identity_conflict`` observation exists yet to report), and writes
-    nothing. ``merge=True`` merges every listed pair and reports the generated ``merge_id``s; a
+    including each open late-link conflict (tier ``external_link``), plus the open
+    ``conflicts`` themselves, and writes nothing. ``merge=True`` merges every listed pair and reports the generated ``merge_id``s; a
     second dry-run call afterward lists nothing, since every merged pair now shares one subject.
     """
     if merge:
@@ -1223,7 +1223,10 @@ def _inbox_duplicates_command(
         }
         for pair in pairs
     ]
-    payload = {"candidates": candidates, "conflicts": []}
+    conflicts: list[dict[str, object]] = []
+    for release_local_id, other_release_local_id in list_open_conflicts(application):
+        conflicts.append({"release": release_local_id, "other": other_release_local_id})
+    payload = {"candidates": candidates, "conflicts": conflicts}
     return _emit(payload, structured, stdout, text=_inbox_duplicates_text(candidates))
 
 

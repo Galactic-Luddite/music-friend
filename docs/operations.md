@@ -75,13 +75,16 @@ Two releases discovered through different sources or before a title-normalizatio
 in distinct inbox subjects for the same real-world release. `data inbox duplicates` is dry-run by
 default: it scans stored releases for pairs in different subjects that share a folded title, the
 same artist set, and the same release date, and lists each pair with its titles and both subjects'
-inbox states. It contacts no provider and writes nothing.
+inbox states. It also lists every open identity conflict (a source linked two releases that already
+had separate inbox items; Music Friend never merges those on its own) under `conflicts`, and as a
+pair with tier `external_link`. It contacts no provider and writes nothing.
 
 `--merge --yes` merges every listed pair: the later release's subject is re-pointed onto the
 earlier one's, the two inbox entries collapse (the more-decided one wins; ties go to the more
 recently updated, then to the entry with the smaller id), and a merge id is printed for each
-merged pair. Run `data inbox duplicates` again afterward to confirm it lists nothing -- every
-merged pair now shares one subject.
+merged pair. Merging a pair closes its open identity conflicts, which `music_status` then stops
+counting. Run `data inbox duplicates` again afterward to confirm it lists nothing -- every merged
+pair now shares one subject.
 
 `data inbox unmerge MERGE_ID --yes` reverses one merge: it restores the pre-merge inbox state,
 signal, and timestamps and re-points the affected releases back to their original subjects, but

@@ -68,6 +68,6 @@ def test_openai_compatible_loop_translates_mcp_schema_and_synthetic_result(tmp_p
         "refresh": {"running": False},
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
-        "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 0},
+        "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 0, "conflicts": 0},
     }
     application.close()
