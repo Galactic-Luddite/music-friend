@@ -473,7 +473,7 @@ def _update_setup_arguments(arguments: Mapping[str, Any]) -> None:
 
     if "event_radius" in arguments:
         value = arguments["event_radius"]
-        if value is not None and (not isinstance(value, (int, float)) or value < 1 or value > 100):
+        if value is not None and (type(value) not in (int, float) or value < 1 or value > 100):
             raise _InvalidArguments("event_radius must be 1-100 or null")
 
     if "event_radius_unit" in arguments:

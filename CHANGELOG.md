@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Fixed `update_setup`'s `event_radius` MCP argument silently accepting `true`/`false` as a valid
+  radius (Python's `bool` is a subclass of `int`, so the prior `isinstance` check let a boolean
+  through and stored it as radius `1`). `event_radius` now uses the same strict `type(value)`
+  check as every other MCP argument validator, rejecting `true`, `false`, strings, and
+  out-of-range numbers with `invalid_arguments`; `null` and numeric radii from `1` through `100`
+  are still accepted. `LocalConfig`'s own radius validation was already strict.
 - MusicBrainz's rate-limit pause budget is no longer shared with Spotify's two-pause cap: a
   MusicBrainz `503` is transient load shedding by MusicBrainz's own documentation, so a releases
   refresh now keeps pausing and retrying at the steady one request per second (honoring an exact

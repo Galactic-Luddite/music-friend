@@ -194,6 +194,31 @@ def test_local_config_rejects_nonfinite_radius(radius: float) -> None:
         LocalConfig(event_radius=radius)
 
 
+@pytest.mark.parametrize(
+    ("radius", "should_reject"),
+    (
+        (True, True),
+        (False, True),
+        ("50", True),
+        (0, True),
+        (101, True),
+        (50, False),
+        (12.5, False),
+    ),
+)
+def test_local_config_rejects_boolean_and_invalid_radius_strictly(
+    radius: object, should_reject: bool
+) -> None:
+    """A bool is a subclass of int, so ``isinstance(True, int)`` is True -- the radius
+    validator must use a strict ``type(value)`` check to reject `true`/`false`, the same
+    aliasing bug class fixed for `refresh_music.force` in #44."""
+    if should_reject:
+        with pytest.raises(ValueError):
+            LocalConfig(event_radius=radius)  # type: ignore[arg-type]
+    else:
+        LocalConfig(event_radius=radius)  # type: ignore[arg-type]
+
+
 def test_save_revalidates_a_bypassed_frozen_config(tmp_path: Path) -> None:
     """Trusting mutated object fields would permit invalid persistence after construction."""
     config = LocalConfig(event_radius=20, event_radius_unit="miles")

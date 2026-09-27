@@ -384,6 +384,48 @@ def test_refresh_music_rejects_a_non_boolean_force(tmp_path: Path, bad_force: ob
     application.close()
 
 
+@pytest.mark.parametrize(
+    ("event_radius", "should_reject"),
+    (
+        (True, True),
+        (False, True),
+        ("50", True),
+        (0, True),
+        (101, True),
+        (None, False),
+        (50, False),
+        (12.5, False),
+    ),
+)
+def test_update_setup_validates_event_radius_strictly(
+    tmp_path: Path, event_radius: object, should_reject: bool
+) -> None:
+    """`event_radius` must be a strict int/float: a bool is rejected even though
+    ``isinstance(True, int)`` is True -- the same aliasing bug fixed for
+    `refresh_music.force` in #44 -- and out-of-range numbers or strings are rejected too."""
+    from music_friend.configuration import LocalConfigStore
+
+    config_dir = tmp_path / "config"
+    application = _application(tmp_path)
+    server = create_music_server(
+        application,
+        refresh=lambda _kind, force=False: {"status": "succeeded"},
+        now=lambda: NOW,
+        config_store_factory=lambda: LocalConfigStore(config_dir=config_dir),
+    )
+
+    result = _call(server, "update_setup", {"event_radius": event_radius})
+
+    if should_reject:
+        assert result["category"] == "invalid_arguments"
+        assert "event_radius" in str(result["message"])
+    else:
+        assert result["status"] == "updated"
+        persisted = LocalConfigStore(config_dir=config_dir).load()
+        assert persisted.event_radius == event_radius
+    application.close()
+
+
 def test_refresh_music_does_not_retry_when_the_callback_itself_raises_typeerror(
     tmp_path: Path,
 ) -> None:
