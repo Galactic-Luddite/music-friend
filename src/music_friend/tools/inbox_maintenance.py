@@ -219,13 +219,29 @@ def merge_all_duplicate_pairs(
     return tuple(merge_ids)
 
 
+def _restore_snapshot_row(snapshot: InboxEntrySnapshotRecord) -> InboxEntry:
+    return InboxEntry(
+        snapshot.local_id,
+        snapshot.kind,
+        snapshot.subject_local_id,
+        snapshot.signal_local_id,
+        snapshot.state,
+        snapshot.created_at,
+        snapshot.updated_at,
+    )
+
+
 def unmerge(application: MusicFriendApplication, merge_id: str) -> tuple[bool, str]:
     """Compare-and-swap recovery for one merge. Returns ``(restored, message)``.
 
-    If the merge collapsed two inbox entries, the CAS check is on the winner's
-    ``updated_at``: unchanged since the merge means restore; changed (the user made a new
-    decision) means skip the whole merge and report why. A merge that only re-pointed subjects
-    (no inbox collapse -- one side had no entry) has nothing to CAS on and always restores.
+    A ``merge_id`` can carry more than one independent winner: migration 014 shares one
+    ``merge_id`` ('014') across every same-subject collapse it performed, each with its own
+    winner. The CAS check therefore runs per winner, not once for the whole merge_id -- a
+    change to one winner's entry since the merge skips only that winner's restore and reports
+    why, while every other winner whose entry is untouched still restores. (A CLI ``--merge``
+    always produces exactly one winner per merge_id, so this degenerates to the single-winner
+    case described in the module docstring.) A merge that only re-pointed subjects (no inbox
+    collapse -- one side had no entry) has nothing to CAS on and always restores.
     """
     catalog = application._catalog
     snapshots = catalog.list_inbox_entry_snapshots(merge_id)
@@ -233,45 +249,51 @@ def unmerge(application: MusicFriendApplication, merge_id: str) -> tuple[bool, s
     if not snapshots and not subject_merges:
         return False, f"No merge found with id {merge_id!r}."
 
-    winner_snapshot: InboxEntrySnapshotRecord | None = next(
-        (s for s in snapshots if s.role == "winner_before"), None
-    )
-    if winner_snapshot is not None:
-        winner_local_id = winner_snapshot.winner_local_id
-        recorded_updated_at = winner_snapshot.winner_updated_at_after
+    by_winner: dict[str, list[InboxEntrySnapshotRecord]] = {}
+    for snapshot in snapshots:
+        by_winner.setdefault(snapshot.winner_local_id, []).append(snapshot)
+
+    if not by_winner:
+        # Pure subject re-pointing, no inbox collapse to CAS on.
+        catalog.revert_subject_merges(merge_id)
+        return True, f"Merge {merge_id} was unmerged."
+
+    restored_any = False
+    skip_reasons: list[str] = []
+    for winner_local_id, winner_snapshots in by_winner.items():
+        winner_before = next(s for s in winner_snapshots if s.role == "winner_before")
+        recorded_updated_at = winner_before.winner_updated_at_after
         current_winner = catalog.get_inbox_entry(winner_local_id)
         if current_winner is None:
-            return (
-                False,
-                f"Merge {merge_id}: winner inbox entry {winner_local_id} no longer exists; "
-                "skipping restore.",
+            skip_reasons.append(
+                f"winner inbox entry {winner_local_id} no longer exists; skipping restore"
             )
+            continue
         if current_winner.updated_at != recorded_updated_at:
-            return (
-                False,
-                f"Merge {merge_id}: winner {winner_local_id} was changed since the merge "
-                f"(updated_at {current_winner.updated_at.isoformat()} != recorded "
+            skip_reasons.append(
+                f"winner {winner_local_id} was changed since the merge (updated_at "
+                f"{current_winner.updated_at.isoformat()} != recorded "
                 f"{recorded_updated_at.isoformat()}); skipping restore to keep the newer "
-                "decision.",
+                "decision"
             )
+            continue
+        for snapshot in winner_snapshots:
+            restored = _restore_snapshot_row(snapshot)
+            if snapshot.role == "winner_before":
+                catalog.put_inbox_entry(restored)
+            elif subject_merges:
+                # A migration-collapsed loser (merge_id '014') has no subject_merges row, so
+                # its subject already has the winner's row and a second insert would violate
+                # the UNIQUE(kind, subject_local_id) constraint; report, don't re-insert.
+                catalog.insert_inbox_entry_row(restored)
+        restored_any = True
 
-    catalog.revert_subject_merges(merge_id)
-    for snapshot in snapshots:
-        restored = InboxEntry(
-            snapshot.local_id,
-            snapshot.kind,
-            snapshot.subject_local_id,
-            snapshot.signal_local_id,
-            snapshot.state,
-            snapshot.created_at,
-            snapshot.updated_at,
-        )
-        if snapshot.role == "winner_before":
-            catalog.put_inbox_entry(restored)
-        elif subject_merges:
-            # A migration-collapsed loser (merge_id '014') has no subject_merges row, so its
-            # subject already has the winner's row and a second insert would violate the
-            # UNIQUE(kind, subject_local_id) constraint; the design says report, don't re-insert.
-            catalog.insert_inbox_entry_row(restored)
+    if subject_merges and restored_any:
+        # A CLI merge_id has exactly one winner, so any restore here is the whole merge's.
+        catalog.revert_subject_merges(merge_id)
 
-    return True, f"Merge {merge_id} was unmerged."
+    if restored_any and not skip_reasons:
+        return True, f"Merge {merge_id} was unmerged."
+    if restored_any:
+        return True, f"Merge {merge_id} was partially unmerged: " + "; ".join(skip_reasons)
+    return False, f"Merge {merge_id}: " + "; ".join(skip_reasons)

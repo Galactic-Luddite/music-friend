@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -351,5 +353,159 @@ def test_dedupe_inbox_command_is_retired(tmp_path: Path) -> None:
         assert result == 2
         assert stderr == cli._USAGE
         assert "dedupe-inbox" not in cli._USAGE
+    finally:
+        application.close()
+
+
+_V13_DUPLICATE_INBOX_FIXTURE = (
+    Path(__file__).parent.parent / "store" / "fixtures" / "v13_duplicate_inbox.sql"
+)
+
+
+def _load_v13_fixture(path: Path) -> None:
+    """Load the real pre-014 fixture (also used by tests/store/test_migrations.py) so
+    Catalog.open runs migration 014 against genuine migration input, not a hand-built shape.
+
+    The fixture carries no ``artists``/``release_artists`` rows -- it exists purely to exercise
+    the migration's inbox-collapse SQL, and pre-014 ``releases`` never needed an artist. A real
+    catalog can never reach that shape (``Release.__post_init__`` requires a non-empty
+    ``artist_refs``, enforced before ``put_release`` ever writes a row), so a CLI command that
+    reads releases back out -- as ``data inbox duplicates`` does -- cannot run against the
+    fixture verbatim. This adds one artist and links it to each fixture release, which is the
+    minimum needed to make the fixture a valid catalog; it changes nothing the migration or its
+    snapshots read or write.
+    """
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(_V13_DUPLICATE_INBOX_FIXTURE.read_text(encoding="utf-8"))
+        connection.execute(
+            "INSERT INTO artists (local_id, display_name, identity_confidence, observed_at) "
+            "VALUES ('artist-fixture', 'Fixture Artist', 'source_only', "
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        connection.executemany(
+            "INSERT INTO release_artists (release_id, artist_id, position) VALUES (?, ?, 0)",
+            [
+                ("release-a", "artist-fixture"),
+                ("release-b", "artist-fixture"),
+                ("release-d", "artist-fixture"),
+            ],
+        )
+
+
+def test_cli_against_rows_migration_014_actually_produced(tmp_path: Path) -> None:
+    """Integration test against migration 014's real output, not a hand-mirrored shape.
+
+    Loads the genuine pre-014 fixture (three same-subject collapse shapes: (a) saved beats
+    unread, (b) a later saved beats an earlier dismissed, (c) two unread entries where the
+    more-recently-updated one wins -- plus (d) a lone entry the migration never touches),
+    opens it so migration 014 actually runs and writes its own inbox_entry_snapshots, then
+    drives the CLI: `data inbox duplicates` (dry run, expects no cross-subject candidates --
+    the fixture's releases have distinct titles), `--merge --yes` (nothing to merge), and
+    `data inbox unmerge 014 --yes` -- exercising the CAS-per-winner path this merge_id
+    requires, since migration 014 shares one merge_id across three independent winners.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _load_v13_fixture(catalog_path)
+
+    catalog = Catalog.open(catalog_path)
+    application = MusicFriendApplication(catalog)
+    try:
+        # Migration 014 ran: confirm its documented collapse (mirrors
+        # tests/store/test_migrations.py::test_014_collapses_duplicate_inbox_entries_most_decided_wins).
+        winner_a = application.get_inbox_entry("entry-a-saved")
+        assert winner_a is not None
+        assert winner_a.state is InboxState.SAVED
+        assert winner_a.latest_signal_local_id == "signal-a2"
+        assert application.get_inbox_entry("entry-a-unread") is None
+
+        winner_b = application.get_inbox_entry("entry-b-saved")
+        assert winner_b is not None
+        assert winner_b.state is InboxState.SAVED
+        assert winner_b.latest_signal_local_id == "signal-b2"
+        assert winner_b.created_at == datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+        assert application.get_inbox_entry("entry-b-dismissed") is None
+
+        winner_c = application.get_inbox_entry("entry-c2")
+        assert winner_c is not None
+        assert winner_c.state is InboxState.UNREAD
+        assert winner_c.latest_signal_local_id == "signal-c2"
+        assert winner_c.created_at == datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+        assert application.get_inbox_entry("entry-c1") is None
+
+        untouched_d = application.get_inbox_entry("entry-d")
+        assert untouched_d is not None
+        assert untouched_d.state is InboxState.SAVED
+
+        # `data inbox duplicates` against real post-migration state: the fixture's three
+        # releases (Case A/B/D Release) have distinct titles, so no cross-subject candidate
+        # exists -- a genuine negative control, not an assumption.
+        dry_result, dry_stdout, dry_stderr = _run(
+            ["data", "inbox", "duplicates", "--json"], application
+        )
+        assert dry_result == 0, dry_stderr
+        assert dry_stderr == ""
+        assert json.loads(dry_stdout)["candidates"] == []
+
+        merge_result, merge_stdout, _ = _run(
+            ["data", "inbox", "duplicates", "--merge", "--yes", "--json"], application
+        )
+        assert merge_result == 0
+        assert json.loads(merge_stdout)["merged"] == []
+
+        # A user decision lands on winner (a) *after* migration 014 ran -- this must not be
+        # clobbered by unmerging (b) and (c), even though all three share merge_id '014'.
+        update_inbox_state(
+            application,
+            "entry-a-saved",
+            InboxState.DISMISSED,
+            updated_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        )
+
+        unmerge_result, unmerge_stdout, unmerge_stderr = _run(
+            ["data", "inbox", "unmerge", "014", "--yes", "--json"], application
+        )
+        assert unmerge_result == 0
+        assert unmerge_stderr == ""
+        payload = json.loads(unmerge_stdout)
+        assert payload["restored"] is True
+        assert "entry-a-saved" in payload["message"]
+        assert "changed" in payload["message"].lower()
+
+        # (a): the newer decision is untouched -- not reverted to its pre-migration state.
+        still_dismissed = application.get_inbox_entry("entry-a-saved")
+        assert still_dismissed is not None
+        assert still_dismissed.state is InboxState.DISMISSED
+        assert still_dismissed.latest_signal_local_id == "signal-a2"
+        assert application.get_inbox_entry("entry-a-unread") is None
+
+        # (b) and (c) restore to the *original fixture* rows exactly -- local_id, signal,
+        # state, and both timestamps -- literal values transcribed from the fixture's own
+        # INSERT statements (tests/store/fixtures/v13_duplicate_inbox.sql), which migration
+        # 014 changed on collapse (created_at moved to the group minimum) and unmerge must
+        # move back.
+        restored_b = application.get_inbox_entry("entry-b-saved")
+        assert restored_b is not None
+        assert restored_b.state is InboxState.SAVED
+        assert restored_b.latest_signal_local_id == "signal-b2"
+        assert restored_b.created_at == datetime(2026, 1, 3, 1, tzinfo=timezone.utc)
+        assert restored_b.updated_at == datetime(2026, 1, 3, 4, tzinfo=timezone.utc)
+        # The loser is reported by its snapshot, never re-inserted (design: a migration
+        # collapse has no subject_merges row, so a second row on the same subject would
+        # violate UNIQUE(kind, subject_local_id)).
+        assert application.get_inbox_entry("entry-b-dismissed") is None
+
+        restored_c = application.get_inbox_entry("entry-c2")
+        assert restored_c is not None
+        assert restored_c.state is InboxState.UNREAD
+        assert restored_c.latest_signal_local_id == "signal-c2"
+        assert restored_c.created_at == datetime(2026, 1, 4, 1, tzinfo=timezone.utc)
+        assert restored_c.updated_at == datetime(2026, 1, 4, 5, tzinfo=timezone.utc)
+        assert application.get_inbox_entry("entry-c1") is None
+
+        # (d) was never part of any collapse or snapshot: untouched throughout.
+        final_d = application.get_inbox_entry("entry-d")
+        assert final_d is not None
+        assert final_d.state is InboxState.SAVED
+        assert final_d.latest_signal_local_id == "signal-d1"
     finally:
         application.close()
