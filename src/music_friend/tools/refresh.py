@@ -1583,6 +1583,21 @@ def _lock_stale_at(path: Path) -> str | None:
         return None
 
 
+def refresh_is_running(lock_path: Path) -> bool:
+    """Whether a refresh currently holds the local lock at ``lock_path`` (not stale).
+
+    Read-only: unlike ``_acquire_lock`` this never creates, removes, or takes over the
+    lock file. ``music_status.refresh.running`` calls this so it can report a run in
+    progress without perturbing the lock the running refresh still owns.
+    """
+    if not isinstance(lock_path, Path):
+        raise ValueError("lock_path must be a Path")
+    held = _read_lock(lock_path)
+    if held is None:
+        return False
+    return time.time() - held.created_at < _LOCK_STALE_AFTER.total_seconds()
+
+
 def _release_lock(lease: _LockLease) -> None:
     try:
         if not isinstance(lease, _LockLease) or lease.path.is_symlink():
@@ -1624,4 +1639,4 @@ def _read_lock(path: Path) -> _LockLease | None:
         return None
 
 
-__all__ = ["RefreshInvocation", "refresh_once", "update_inbox_state"]
+__all__ = ["RefreshInvocation", "refresh_is_running", "refresh_once", "update_inbox_state"]

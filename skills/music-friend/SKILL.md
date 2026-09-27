@@ -19,13 +19,16 @@ signature, status footer, or advice to retry unless the local result specificall
 
 ## Normal requests
 
-- For a quick overview, call `music_status`.
+- For a quick overview, call `music_status`. Its `refresh.running` flag reports whether a
+  refresh is in progress right now; other tools keep answering from local state while it runs.
 - To update local information, ask for confirmation and then call `refresh_music` with one of
   `catalog`, `releases`, `events`, or `all`. A `kind: "events"` call with no event area configured
   returns `{"status": "skipped", "reason": "event_area_not_configured"}` and makes no provider
   request; report that no event area is set rather than "no nearby events". A `kind: "all"` call
   with the same missing configuration still runs catalog and release discovery and adds
-  `events_skipped_reason: "event_area_not_configured"` to its result.
+  `events_skipped_reason: "event_area_not_configured"` to its result. A second `refresh_music`
+  call while one is already running returns `{"status": "partial", "reason": "already_running"}`
+  with a `retry_after` timestamp; wait and retry rather than repeating the call immediately.
 - To find a known artist, call `search_catalog` before changing a watchlist. Matching is
   case- and accent-insensitive, so a plain-ASCII spelling still finds a stylized or accented
   stored name.

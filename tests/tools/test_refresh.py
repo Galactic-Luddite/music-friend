@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import time
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2607,6 +2608,64 @@ def test_additional_release_source_same_release_produces_exactly_one_inbox_entry
         assert len(stored_release.source_refs) == 2
         assert {ref.source for ref in stored_release.source_refs} == {"musicbrainz", "deezer"}
         assert application.get_release("release:deezer:al-shared-one") is None
+
+
+def test_no_transaction_spans_a_source_call(tmp_path: Path) -> None:
+    """AC (issue #65): no refresh transaction is open across a provider request --
+    the fake source asserts ``connection.in_transaction is False`` on every call."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+
+        connection = catalog._connection  # type: ignore[attr-defined]
+        assert connection is not None
+        calls: list[bool] = []
+
+        class _TransactionCheckingSource(FakeMusicSource):
+            def recent_releases(
+                self,
+                artist_refs: Sequence[SourceReference],
+                since: datetime,
+                cursor: str | None = None,
+            ) -> Page[Release]:
+                calls.append(connection.in_transaction)
+                return super().recent_releases(artist_refs, since, cursor)
+
+        source = _TransactionCheckingSource()
+        source.releases[("one", None)] = Page((_release("release-1", artist),), None)
+
+        result = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
+
+        assert result.run is not None
+        assert calls  # the fake source's recent_releases was actually called
+        assert all(call is False for call in calls)
+
+
+def test_per_artist_transaction_is_short(tmp_path: Path) -> None:
+    """AC (issue #65): a 100-release-per-artist transaction commits in under 200 ms.
+
+    ``_MAX_RELEASES_PER_ARTIST`` bounds a single artist's persisted release batch
+    at 100; this measures the wall time of one full refresh over exactly that many
+    brand-new synthetic releases for a single watched artist.
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        source = FakeMusicSource()
+        releases = tuple(
+            _release(f"release-{index}", artist, title=f"Release {index}") for index in range(100)
+        )
+        source.releases[("one", None)] = Page(releases, None)
+
+        started = time.perf_counter()
+        result = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
+        elapsed = time.perf_counter() - started
+
+        assert result.run is not None
+        assert len(application.list_inbox_entries(None, limit=200)) == 100
+        assert elapsed < 0.2
 
 
 def test_additional_release_sources_rejects_a_malformed_entry(tmp_path: Path) -> None:
