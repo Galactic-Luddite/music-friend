@@ -4,6 +4,7 @@ import random
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from music_friend.domain import (
     Artist,
     CatalogItemBatch,
     Event,
+    EventDiscovery,
     Explanation,
     ExplanationReason,
     ExplanationReasonKind,
@@ -2944,3 +2946,80 @@ def test_release_source_unmapped_counts_artist_source_pairs(tmp_path: Path) -> N
         assert musicbrainz.release_calls == ["mb-first"]
         assert deezer.release_calls == ["dz-second"]
         assert _metric(result.run, RefreshMetricKind.RELEASE_SOURCE_UNMAPPED) == 2
+
+
+def test_repair_records_an_interrupted_event_once_and_counts_it_as_repaired(
+    tmp_path: Path,
+) -> None:
+    """An event committed with its discovery but without a signal is recorded by the next
+    run as a repair (never as created), with an unread entry whose subject is the event."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        event = Event(
+            "event:interrupted",
+            "Show",
+            (artist.local_id,),
+            "Venue",
+            "City",
+            NOW + timedelta(days=10),
+            "minute",
+            (),
+            (SourceReference("ticketmaster", "interrupted", None, NOW),),
+            NOW,
+        )
+        catalog.put_event(event)
+        catalog.put_event_discovery(
+            EventDiscovery(
+                event.local_id,
+                "ticketmaster",
+                "interrupted",
+                artist.local_id,
+                "variant:interrupted",
+                "material:interrupted",
+                None,
+                NOW,
+                NOW,
+                NOW,
+                NOW + timedelta(hours=6),
+            )
+        )
+
+        first = _refresh(application, FakeMusicSource(), kind="events", lock_path=tmp_path / "l")
+        second = _refresh(
+            application,
+            FakeMusicSource(),
+            kind="events",
+            lock_path=tmp_path / "l",
+            checked_at=NOW + timedelta(hours=1),
+        )
+
+        assert first.run is not None and second.run is not None
+        assert _metric(first.run, RefreshMetricKind.SIGNALS_REPAIRED) == 1
+        assert _metric(first.run, RefreshMetricKind.SIGNALS_CREATED) == 0
+        assert _metric(second.run, RefreshMetricKind.SIGNALS_REPAIRED) == 0
+        (entry,) = application.list_inbox_entries(None, limit=10)
+        assert entry.kind is SignalKind.EVENT
+        assert entry.subject_local_id == event.local_id
+        assert entry.state is InboxState.UNREAD
+        assert len(application.list_signals(SignalKind.EVENT, limit=10)) == 1
+
+
+def test_release_repair_counts_a_stored_release_without_provenance_as_a_failure(
+    tmp_path: Path,
+) -> None:
+    """A release subject that cannot be re-observed (no source reference) is reported as a
+    failure every run instead of being silently skipped or crashing the refresh."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        catalog.put_release(replace(_release("unsourced", artist), source_refs=()))
+
+        result = _refresh(application, FakeMusicSource(), kind="events", lock_path=tmp_path / "l")
+
+        assert result.run is not None
+        assert _metric(result.run, RefreshMetricKind.FAILURES) == 1
+        assert _metric(result.run, RefreshMetricKind.SIGNALS_REPAIRED) == 0
+        assert application.list_inbox_entries(None, limit=10) == ()

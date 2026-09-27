@@ -314,3 +314,66 @@ def test_record_release_observation_rejects_invalid_inputs(tmp_path: Path) -> No
         )
     with pytest.raises(ValueError, match="external_links"):
         ReleaseObservation(release, "musicbrainz", "rg-1", "artist:one", external_links=("x",))  # type: ignore[arg-type]
+
+
+def test_contradictory_external_links_are_a_recorded_conflict_not_a_merge(
+    tmp_path: Path,
+) -> None:
+    """Links naming two different stored releases never pick one: the observation becomes
+    its own release, recorded as identity_conflict, and both stored releases are untouched."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        _artist(catalog)
+        _observe(catalog, _release("musicbrainz", "rg-1"))
+        _observe(catalog, _release("musicbrainz", "rg-2", title="Other Record"))
+
+        outcome = _observe(
+            catalog,
+            _release("deezer", "al-1"),
+            links=(
+                SourceReference("musicbrainz", "rg-1", None, NOW),
+                SourceReference("musicbrainz", "rg-2", None, NOW),
+            ),
+        )
+
+        assert outcome.kind == "conflict"  # type: ignore[attr-defined]
+        assert outcome.method is IdentityMethod.EXTERNAL_LINK  # type: ignore[attr-defined]
+        assert ("identity_conflict", "deezer") in _facts(catalog, "release:deezer:al-1")
+        for local_id in ("release:musicbrainz:rg-1", "release:musicbrainz:rg-2"):
+            stored = catalog.get_release(local_id)
+            assert stored is not None
+            assert [reference.source for reference in stored.source_refs] == ["musicbrainz"]
+        assert len(catalog.list_inbox_entries(None, limit=10)) == 3
+
+
+def test_release_type_follows_source_order_and_a_lower_source_is_recorded(
+    tmp_path: Path,
+) -> None:
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        _artist(catalog)
+        _observe(catalog, _release("musicbrainz", "rg-1"))
+        outcome = _observe(
+            catalog,
+            replace(_release("deezer", "al-1"), release_type="single"),
+            links=(SourceReference("musicbrainz", "rg-1", None, NOW),),
+        )
+
+        stored = catalog.get_release("release:musicbrainz:rg-1")
+        assert stored is not None and stored.release_type == "album"
+        assert outcome.kind == "provenance_attached"  # type: ignore[attr-defined]
+        assert ("content_conflict:release_type", "deezer") in _facts(
+            catalog, "release:musicbrainz:rg-1"
+        )
+
+
+def test_an_observation_for_an_unknown_monitored_artist_writes_nothing(tmp_path: Path) -> None:
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        _artist(catalog)
+        release = _release("musicbrainz", "rg-1")
+        with pytest.raises(ValueError, match="artist does not exist"):
+            record_release_observation(
+                catalog,
+                ReleaseObservation(release, "musicbrainz", "rg-1", "artist:missing"),
+                release_sources=SOURCES,
+            )
+        assert catalog.get_release(release.local_id) is None
+        assert catalog.list_signals(None, limit=10) == ()
