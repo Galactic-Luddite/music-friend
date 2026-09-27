@@ -84,7 +84,19 @@ def record_release_observation(
             _put_fact(catalog, release_local_id, reference, fact, observed_at)
         elif not matches:
             release_local_id = observation.release.local_id
-            catalog.put_release(replace(observation.release, subject_local_id=None))
+            # Add external_links to the release even when there's no match
+            # so they're available for future tier-1 lookups
+            known = {(item.source, item.native_id) for item in observation.release.source_refs}
+            new_references = tuple(
+                item for item in observation.external_links
+                if (item.source, item.native_id) not in known
+            )
+            release_with_links = replace(
+                observation.release,
+                source_refs=observation.release.source_refs + new_references,
+                subject_local_id=None,
+            )
+            catalog.put_release(release_with_links)
         else:
             release_local_id = matches[0]
             attached = _attach_and_merge(
