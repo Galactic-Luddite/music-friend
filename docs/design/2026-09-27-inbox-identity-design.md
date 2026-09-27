@@ -488,8 +488,11 @@ ReleaseObservation ──> record_release_observation ──┐  one transaction
         ├─ signal: find_for_record or insert ───────┤  history
         └─ inbox: INSERT ... ON CONFLICT (kind, subject) DO UPDATE latest_signal, updated_at
                                                     │  state never touched here
-repair pass = for subject in subjects_without_inbox_entry: record_release_observation(stored)
+repair pass = for release in observation_pending: record_release_observation(stored)   (#70)
+              for subject in subjects_without_inbox_entry: record_release_observation(stored)
               (second run: every call returns unchanged)
+              discovery sets observation_pending with the content commit; the write path
+              clears it in the transaction that writes the signal and inbox entry
 cleanup      = data inbox duplicates [--merge]: subject merge, snapshots, CAS unmerge
 ```
 

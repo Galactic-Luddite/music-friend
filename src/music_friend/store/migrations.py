@@ -79,6 +79,10 @@ def bundled_migrations() -> tuple[Migration, ...]:
             15,
             schema.joinpath("015_release_identity_ladder.sql").read_text(encoding="utf-8"),
         ),
+        Migration(
+            16,
+            schema.joinpath("016_release_observation_pending.sql").read_text(encoding="utf-8"),
+        ),
     )
 
 

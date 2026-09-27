@@ -181,6 +181,8 @@ def record_release_observation(
             kind = "updated"
         else:
             kind = "provenance_attached" if attached else "unchanged"
+        # Same transaction as the signal and inbox write: the observation is now complete.
+        catalog.set_release_observation_pending(own_local_id, False)
     if resolution.kind in ("ambiguous", "conflict"):
         kind = resolution.kind
     return ObservationOutcome(

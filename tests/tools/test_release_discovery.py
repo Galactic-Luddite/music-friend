@@ -1291,3 +1291,48 @@ def test_cross_source_dedupe_does_not_merge_titles_differing_by_a_real_character
         assert deezer_release is not None
         assert len(mb_release.source_refs) == 1
         assert len(deezer_release.source_refs) == 1
+
+
+def test_a_recheck_by_one_source_keeps_another_sources_reference(tmp_path: Path) -> None:
+    """Issue #70: a MusicBrainz re-check that updates a release keeps Deezer's reference.
+
+    Deezer's reference is attached by a real cross-source discovery; MusicBrainz then reports
+    a changed title for its own release. The rewritten release carries both references.
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _multi_source_artist("mb-keep", "deezer-keep")
+        _watch(application, artist)
+        mb_source = FakeReleaseSource()
+        mb_source.pages[("mb-keep", None)] = Page(
+            (_cross_source_release("rg-keep", "musicbrainz", artist),), None
+        )
+        application.discover_releases("musicbrainz", mb_source, checked_at=NOW)
+        deezer_source = FakeReleaseSource()
+        deezer_source.pages[("deezer-keep", None)] = Page(
+            (_cross_source_release("al-keep", "deezer", artist),), None
+        )
+        application.discover_releases("deezer", deezer_source, checked_at=NOW)
+        attached = application.get_release("release:musicbrainz:rg-keep")
+        assert attached is not None
+        deezer_reference = next(ref for ref in attached.source_refs if ref.source == "deezer")
+
+        mb_source.pages[("mb-keep", None)] = Page(
+            (
+                _cross_source_release(
+                    "rg-keep", "musicbrainz", artist, title="Shared Release (Remastered)"
+                ),
+            ),
+            None,
+        )
+        recheck = application.discover_releases(
+            "musicbrainz", mb_source, checked_at=NOW + timedelta(days=2)
+        )
+
+        (candidate,) = recheck.artists[0].candidates
+        assert candidate.kind is ReleaseCandidateKind.UPDATED
+        stored = application.get_release("release:musicbrainz:rg-keep")
+        assert stored is not None
+        assert stored.title == "Shared Release (Remastered)"
+        assert deezer_reference in stored.source_refs
+        assert [ref.source for ref in stored.source_refs] == ["musicbrainz", "deezer"]

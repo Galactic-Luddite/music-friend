@@ -54,6 +54,7 @@ from music_friend.runtimes import cli, mcp_stdio
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools import refresh as refresh_module
+from music_friend.tools.release_observation import content_version_of
 from tests.providers.musicbrainz.live_fixtures import (
     LIVE_BROWSE_RELEASE_GROUP_ID,
     LIVE_SEARCH_ARTIST_MBID,
@@ -1276,6 +1277,177 @@ def test_second_source_on_a_decided_release_survives_repair_through_cli(
         assert len(signals_after) == len(signals_before) + 1
         orphan_entry = catalog.get_inbox_entry_for_subject(SignalKind.RELEASE, orphan.local_id)
         assert orphan_entry is not None and orphan_entry.state is InboxState.UNREAD
+        stored = catalog.get_release(merged.local_id)
+        assert stored is not None
+        assert {reference.source for reference in stored.source_refs} == {"musicbrainz", "deezer"}
+
+
+class _ProcessKilled(BaseException):
+    """Stands in for the process dying: nothing in the refresh may catch it."""
+
+
+def _retitled_release_group_handler(
+    title: list[str],
+) -> Callable[[httpx.Request], httpx.Response]:
+    """``one_release_group_handler`` whose one release-group reports ``title[0]`` when set."""
+    handle = one_release_group_handler()
+
+    def retitle(request: httpx.Request) -> httpx.Response:
+        response = handle(request)
+        if request.url.path != "/ws/2/release-group" or not title:
+            return response
+        body = json.loads(response.content)
+        body["release-groups"] = [{**body["release-groups"][0], "title": title[0]}]
+        return httpx.Response(200, json=body)
+
+    return retitle
+
+
+@pytest.mark.parametrize("decided", [InboxState.DISMISSED, InboxState.SAVED])
+def test_crash_mid_update_of_a_listed_release_is_completed_next_refresh_through_cli(
+    clock: FakeClock, tmp_path: Path, decided: InboxState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #70 through ``music-friend refresh releases --json``.
+
+    A release the user decided changes title. The refresh commits the new content, then the
+    process dies before the signal and inbox write. The next refresh completes the write: one
+    updated signal, the one entry repointed at it with the user's state, status succeeded.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    title: list[str] = []
+    handle = _retitled_release_group_handler(title)
+    first = _run_refresh("cli", "releases", catalog_path, lambda: httpx.MockTransport(handle))
+    assert first["status"] == "succeeded"
+    assert _metrics(first)["signals_created"] == 1
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        (entry,) = application.list_inbox_entries(None, limit=10)
+        (original_signal,) = application.list_signals(None, limit=10)
+        refresh_module.update_inbox_state(application, entry.local_id, decided, updated_at=NOW)
+    finally:
+        application.close()
+
+    title.append("Synthetic Retitled Release")
+
+    def killed(*_args: object, **_kwargs: object) -> object:
+        raise _ProcessKilled
+
+    crashed_at = NOW + timedelta(days=2)
+    with monkeypatch.context() as patch:
+        patch.setattr(refresh_module, "record_release_observation", killed)
+        application = MusicFriendApplication(Catalog.open(catalog_path))
+        try:
+            with pytest.raises(_ProcessKilled):
+                cli.run_cli(
+                    ["refresh", "releases", "--json"],
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    application=application,
+                    config_store=_ConfigStore(LocalConfig()),
+                    secret_prompt=lambda _message: "",
+                    now=lambda: crashed_at,
+                    connector_factory=lambda: httpx.MockTransport(handle),
+                    credential_store_factory=lambda: _NoTicketmasterKey(),
+                )
+        finally:
+            application.close()
+    with Catalog.open(catalog_path) as catalog:
+        (release_local_id,) = (
+            str(row[0])
+            for row in catalog._require_connection()
+            .execute("SELECT local_id FROM releases")
+            .fetchall()
+        )
+        crashed = catalog.get_release(release_local_id)
+        assert crashed is not None and crashed.title == "Synthetic Retitled Release"
+        assert catalog.list_signals(SignalKind.RELEASE, limit=10) == (original_signal,)
+
+    second = _run_refresh(
+        "cli",
+        "releases",
+        catalog_path,
+        lambda: httpx.MockTransport(handle),
+        now=crashed_at + timedelta(hours=1),
+    )
+
+    metrics = _metrics(second)
+    assert second["status"] == "succeeded"
+    assert metrics["signals_repaired"] == 1
+    assert metrics.get("failures", 0) == 0
+    with Catalog.open(catalog_path) as catalog:
+        (after,) = catalog.list_inbox_entries(None, limit=10)
+        assert after.local_id == entry.local_id
+        assert after.state is decided
+        signals = catalog.list_signals(SignalKind.RELEASE, limit=10)
+        assert len(signals) == 2
+        (updated,) = (signal for signal in signals if signal != original_signal)
+        assert after.latest_signal_local_id == updated.local_id
+        stored = catalog.get_release(release_local_id)
+        assert stored is not None
+        assert updated.material_version == content_version_of(stored)
+        assert updated.explanation.reasons[-1].kind is ExplanationReasonKind.UPDATED_RELEASE
+        assert catalog.list_release_observations_pending(limit=10) == ()
+
+    third = _run_refresh(
+        "cli",
+        "releases",
+        catalog_path,
+        lambda: httpx.MockTransport(handle),
+        now=crashed_at + timedelta(days=2),
+    )
+    assert third["status"] == "succeeded"
+    assert _metrics(third).get("signals_repaired", 0) == 0
+    assert _metrics(third).get("signals_created", 0) == 0
+
+
+@pytest.mark.parametrize("decided", [InboxState.DISMISSED, InboxState.SAVED])
+def test_repair_of_a_decided_release_with_a_second_source_mints_nothing_through_cli(
+    clock: FakeClock, tmp_path: Path, decided: InboxState
+) -> None:
+    """Issue #57 sibling: the repair pass re-observes a decided two-source release.
+
+    The release gains a Deezer reference by a real cross-source merge, and an interrupted
+    write left it pending, so the next refresh re-records it through the single write path.
+    Provenance is not content: no signal is minted and the entry is untouched. Folding the
+    source references back into the content digest makes this test fail.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    handle = one_release_group_handler()
+    first = _run_refresh("cli", "releases", catalog_path, lambda: httpx.MockTransport(handle))
+    assert first["status"] == "succeeded"
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        (entry,) = application.list_inbox_entries(None, limit=10)
+        refresh_module.update_inbox_state(application, entry.local_id, decided, updated_at=NOW)
+        (decided_entry,) = application.list_inbox_entries(None, limit=10)
+    finally:
+        application.close()
+    merged = attach_a_second_source(catalog_path)
+    with Catalog.open(catalog_path) as catalog:
+        # The state a run killed between the content commit and the signal write leaves.
+        catalog.set_release_observation_pending(merged.local_id, True)
+        signals_before = catalog.list_signals(SignalKind.RELEASE, limit=10)
+
+    second = _run_refresh(
+        "cli",
+        "releases",
+        catalog_path,
+        lambda: httpx.MockTransport(handle),
+        now=NOW + timedelta(days=21),
+    )
+
+    metrics = _metrics(second)
+    assert second["status"] == "succeeded"
+    assert metrics.get("signals_repaired", 0) == 0
+    assert metrics.get("signals_created", 0) == 0
+    assert metrics.get("failures", 0) == 0
+    with Catalog.open(catalog_path) as catalog:
+        assert catalog.list_release_observations_pending(limit=10) == ()
+        assert catalog.list_signals(SignalKind.RELEASE, limit=10) == signals_before
+        (after,) = catalog.list_inbox_entries(None, limit=10)
+        assert after == decided_entry
         stored = catalog.get_release(merged.local_id)
         assert stored is not None
         assert {reference.source for reference in stored.source_refs} == {"musicbrainz", "deezer"}
