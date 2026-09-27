@@ -65,6 +65,7 @@ def test_openai_compatible_loop_translates_mcp_schema_and_synthetic_result(tmp_p
     assert result["tool_result"] == {
         "inbox": {"has_unread": False},
         "latest_refresh": None,
+        "refresh": {"running": False},
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
         "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 0},

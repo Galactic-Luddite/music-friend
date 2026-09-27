@@ -235,7 +235,12 @@ def _run_refresh(
         def run(self, _transport: str) -> None:
             return None
 
-    def create_server(_application: object, *, refresh: Callable[[str], object]) -> _Server:
+    def create_server(
+        _application: object,
+        *,
+        refresh: Callable[[str], object],
+        refresh_status: Callable[[], bool] | None = None,
+    ) -> _Server:
         captured.append(refresh(kind))
         return _Server()
 

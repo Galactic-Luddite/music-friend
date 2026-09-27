@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, cast
 
@@ -525,15 +526,28 @@ def create_music_server(
     application: MusicFriendApplication,
     *,
     refresh: RefreshCallback,
+    refresh_status: Callable[[], bool] | None = None,
     now: Clock | None = None,
     config_store_factory: Callable[[], LocalConfigStore] | None = None,
 ) -> MCPServer[Any]:
-    """Create the fixed provider-neutral local Music Friend MCP surface."""
+    """Create the fixed provider-neutral local Music Friend MCP surface.
+
+    ``refresh_status`` reports whether a refresh is currently running (read by
+    ``music_status.refresh.running``); it defaults to always-``False`` for callers that
+    have no lock file to consult (most tests). ``refresh_music`` itself awaits
+    ``asyncio.to_thread(refresh, ...)`` so it never blocks every other tool's event loop
+    while a refresh is in progress.
+    """
     if not isinstance(application, MusicFriendApplication) or not callable(refresh):
         raise ValueError("application and refresh callback are required")
     clock = _utc_now if now is None else now
     if not callable(clock):
         raise ValueError("now must be callable")
+    report_refresh_running: Callable[[], bool] = (
+        (lambda: False) if refresh_status is None else refresh_status
+    )
+    if not callable(report_refresh_running):
+        raise ValueError("refresh_status must be callable")
     make_config_store = LocalConfigStore if config_store_factory is None else config_store_factory
     if not callable(make_config_store):
         raise ValueError("config_store_factory must be callable")
@@ -559,7 +573,7 @@ def create_music_server(
         annotations=_READ_ONLY,
     )
     async def music_status() -> CallToolResult:
-        return _safe_call(lambda: _status(application, clock()))
+        return _safe_call(lambda: _status(application, clock(), report_refresh_running()))
 
     @server.tool(
         name="refresh_music",
@@ -584,11 +598,12 @@ def create_music_server(
         kind: Literal["catalog", "releases", "events", "all"],
         force: bool = False,
     ) -> CallToolResult:
-        def action() -> dict[str, object]:
+        async def action() -> dict[str, object]:
             kindval = _refresh_kind(kind)
-            return _refresh_result(refresh(kindval, force=force))
+            outcome = await asyncio.to_thread(refresh, kindval, force=force)
+            return _refresh_result(outcome)
 
-        return _safe_call(action)
+        return await _safe_call_async(action)
 
     @server.tool(
         name="search_catalog",
@@ -946,6 +961,22 @@ def _safe_call(action: Callable[[], dict[str, object]]) -> CallToolResult:
     return _tool_result(result)
 
 
+async def _safe_call_async(action: Callable[[], Awaitable[dict[str, object]]]) -> CallToolResult:
+    """The async twin of ``_safe_call``, used only by ``refresh_music``.
+
+    ``refresh_music`` is the only tool whose work runs off the event loop (via
+    ``asyncio.to_thread``); every other tool stays synchronous because its work is a
+    handful of indexed reads/writes. Error mapping is unchanged from ``_safe_call``.
+    """
+    try:
+        result = await action()
+    except _InvalidArguments as error:
+        result = {"category": "invalid_arguments", "message": str(error)}
+    except Exception:
+        result = dict(_INTERNAL_ERROR)
+    return _tool_result(result)
+
+
 def _tool_result(result: dict[str, object]) -> CallToolResult:
     return CallToolResult(
         content=[
@@ -1053,7 +1084,9 @@ def _now(clock: Clock) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[str, object]:
+def _status(
+    application: MusicFriendApplication, checked_at: datetime, refresh_running: bool
+) -> dict[str, object]:
     latest = application.list_refresh_runs(limit=1)
     unread = application.list_inbox_entries(InboxState.UNREAD, limit=1)
 
@@ -1070,6 +1103,7 @@ def _status(application: MusicFriendApplication, checked_at: datetime) -> dict[s
         "status": "ready",
         "inbox": {"has_unread": bool(unread)},
         "latest_refresh": None if not latest else _refresh_run(latest[0]),
+        "refresh": {"running": bool(refresh_running)},
         "source_limits": {"spotify": _source_limit_status(application, "spotify", checked_at)},
     }
 

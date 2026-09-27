@@ -32,7 +32,7 @@ from music_friend.providers.ticketmaster import TicketmasterDiscoveryClient
 from music_friend.providers.ticketmaster.transport import TicketmasterTransport
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.refresh import refresh_once
+from music_friend.tools.refresh import refresh_is_running, refresh_once
 
 _SPOTIFY_ENVIRONMENT_KEYS = ("SPOTIFY_CLIENT_ID", "SPOTIFY_REDIRECT_URI")
 _MISSING = object()
@@ -174,91 +174,106 @@ def run_catalog_stdio_session(
         )
 
         def refresh(kind: str, force: bool = False) -> object:
-            if kind == "events":
-                return refresh_once(
-                    application,
-                    kind=kind,
-                    source_name="spotify",
-                    source=None,
-                    config=config,
-                    event_client=event_client,
-                    checked_at=_utc_now(),
-                    lock_path=catalog_path.with_name("refresh.lock"),
-                    force=force,
-                    now=_utc_now,
-                )
-            release_sources = config.release_sources or DEFAULT_RELEASE_SOURCES
-            release_source_name = release_sources[0]
-            needs_catalog = kind in ("catalog", "all")
-            needs_releases = kind in ("releases", "all")
-            needs_spotify_source = needs_catalog or (
-                needs_releases and "spotify" in release_sources
-            )
-            with ExitStack() as stack:
-                source: MusicSource | None = None
-                if needs_spotify_source:
-                    source_values = {
-                        "SPOTIFY_CLIENT_ID": config.spotify_client_id,
-                    }
-                    source = stack.enter_context(
-                        spotify_source(
-                            provider="spotify",
-                            values=source_values,
-                            connector_factory=connector_factory,
-                            credential_store_factory=credential_store_factory,
-                        )
+            # The refresh worker (invoked off the MCP event loop via
+            # asyncio.to_thread; see mcp.catalog_server.refresh_music) never touches
+            # the server's own connection -- sqlite3 connections are not shared
+            # across threads. It opens its own Catalog/MusicFriendApplication
+            # against the same database file and closes it when the run ends.
+            worker_application = MusicFriendApplication(Catalog.open(catalog_path))
+            try:
+                if kind == "events":
+                    return refresh_once(
+                        worker_application,
+                        kind=kind,
+                        source_name="spotify",
+                        source=None,
+                        config=config,
+                        event_client=event_client,
+                        checked_at=_utc_now(),
+                        lock_path=catalog_path.with_name("refresh.lock"),
+                        force=force,
+                        now=_utc_now,
                     )
-                release_source: MusicSource | None = None
-                additional_release_sources: list[tuple[str, MusicSource]] = []
-                if needs_releases:
-                    for index, name in enumerate(release_sources):
-                        if name == "spotify":
-                            built: MusicSource | None = source
-                        elif name == "musicbrainz":
-                            # A musicbrainz-only or "all" refresh never needs a Spotify
-                            # token session just for release discovery: identity
-                            # mapping reads Spotify URLs already stored in the local
-                            # catalog, it never calls Spotify live.
-                            mb_transport = MusicBrainzTransport(
-                                user_agent=(
-                                    f"music-friend/{__version__} "
-                                    "(https://github.com/Galactic-Luddite/music-friend)"
-                                ),
-                                connector=connector_factory(),
-                            )
-                            mb_source = MusicBrainzSource(transport=mb_transport, clock=_utc_now)
-                            stack.callback(mb_source.close)
-                            built = mb_source
-                        else:
-                            # Deezer (issue #42): keyless, artist ids come only from
-                            # the MusicBrainz url-rels batch, never a live name search.
-                            dz_transport = DeezerTransport(connector=connector_factory())
-                            stack.callback(dz_transport.close)
-                            built = DeezerSource(transport=dz_transport, clock=_utc_now)
-                        if index == 0:
-                            release_source = built
-                        else:
-                            assert built is not None  # spotify's session is opened above
-                            additional_release_sources.append((name, built))
-                return refresh_once(
-                    application,
-                    kind=kind,
-                    source_name="spotify",
-                    source=source,
-                    release_source=release_source,
-                    release_source_name=release_source_name if needs_releases else None,
-                    additional_release_sources=(
-                        additional_release_sources if needs_releases else None
-                    ),
-                    config=config,
-                    event_client=event_client,
-                    checked_at=_utc_now(),
-                    lock_path=catalog_path.with_name("refresh.lock"),
-                    force=force,
-                    now=_utc_now,
+                release_sources = config.release_sources or DEFAULT_RELEASE_SOURCES
+                release_source_name = release_sources[0]
+                needs_catalog = kind in ("catalog", "all")
+                needs_releases = kind in ("releases", "all")
+                needs_spotify_source = needs_catalog or (
+                    needs_releases and "spotify" in release_sources
                 )
+                with ExitStack() as stack:
+                    source: MusicSource | None = None
+                    if needs_spotify_source:
+                        source_values = {
+                            "SPOTIFY_CLIENT_ID": config.spotify_client_id,
+                        }
+                        source = stack.enter_context(
+                            spotify_source(
+                                provider="spotify",
+                                values=source_values,
+                                connector_factory=connector_factory,
+                                credential_store_factory=credential_store_factory,
+                            )
+                        )
+                    release_source: MusicSource | None = None
+                    additional_release_sources: list[tuple[str, MusicSource]] = []
+                    if needs_releases:
+                        for index, name in enumerate(release_sources):
+                            if name == "spotify":
+                                built: MusicSource | None = source
+                            elif name == "musicbrainz":
+                                # A musicbrainz-only or "all" refresh never needs a Spotify
+                                # token session just for release discovery: identity
+                                # mapping reads Spotify URLs already stored in the local
+                                # catalog, it never calls Spotify live.
+                                mb_transport = MusicBrainzTransport(
+                                    user_agent=(
+                                        f"music-friend/{__version__} "
+                                        "(https://github.com/Galactic-Luddite/music-friend)"
+                                    ),
+                                    connector=connector_factory(),
+                                )
+                                mb_source = MusicBrainzSource(
+                                    transport=mb_transport, clock=_utc_now
+                                )
+                                stack.callback(mb_source.close)
+                                built = mb_source
+                            else:
+                                # Deezer (issue #42): keyless, artist ids come only from
+                                # the MusicBrainz url-rels batch, never a live name search.
+                                dz_transport = DeezerTransport(connector=connector_factory())
+                                stack.callback(dz_transport.close)
+                                built = DeezerSource(transport=dz_transport, clock=_utc_now)
+                            if index == 0:
+                                release_source = built
+                            else:
+                                assert built is not None  # spotify's session is opened above
+                                additional_release_sources.append((name, built))
+                    return refresh_once(
+                        worker_application,
+                        kind=kind,
+                        source_name="spotify",
+                        source=source,
+                        release_source=release_source,
+                        release_source_name=release_source_name if needs_releases else None,
+                        additional_release_sources=(
+                            additional_release_sources if needs_releases else None
+                        ),
+                        config=config,
+                        event_client=event_client,
+                        checked_at=_utc_now(),
+                        lock_path=catalog_path.with_name("refresh.lock"),
+                        force=force,
+                        now=_utc_now,
+                    )
+            finally:
+                worker_application.close()
 
-        create_music_server(application, refresh=refresh).run("stdio")
+        create_music_server(
+            application,
+            refresh=refresh,
+            refresh_status=lambda: refresh_is_running(catalog_path.with_name("refresh.lock")),
+        ).run("stdio")
     finally:
         event_transport.close()
         application.close()

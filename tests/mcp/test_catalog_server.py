@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -599,6 +601,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
     assert _call(server, "music_status", {}) == {
         "inbox": {"has_unread": True},
         "latest_refresh": None,
+        "refresh": {"running": False},
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
         "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 1},
@@ -1090,3 +1093,158 @@ def test_refresh_result_carries_reason_retry_after_and_remaining() -> None:
     assert payload["reason"] == "quota_exhausted"
     assert payload["remaining"] == 2
     assert "retry_after" not in payload
+
+
+def _blocking_refresh(artist_count: int, delay_seconds: float) -> tuple[object, threading.Event]:
+    """A fake ``RefreshCallback`` that blocks ``delay_seconds`` per artist, synchronously,
+    and a ``threading.Event`` set the instant it starts blocking.
+
+    Used to prove ``refresh_music`` runs off the event loop (via ``asyncio.to_thread``):
+    a real ``time.sleep`` here only blocks the worker thread it runs on, never the
+    event loop other tool calls are scheduled on. Callers wait on the returned event
+    instead of an arbitrary ``asyncio.sleep`` so the test never races the refresh's
+    actual start (matching the ``threading.Event`` pattern used elsewhere in this file).
+    """
+    started = threading.Event()
+
+    def refresh(kind: str, force: bool = False) -> dict[str, object]:
+        started.set()
+        for _ in range(artist_count):
+            time.sleep(delay_seconds)
+        return {"kind": kind, "status": "succeeded"}
+
+    return refresh, started
+
+
+def test_read_tools_respond_during_refresh(tmp_path: Path) -> None:
+    """AC (issue #65): list_inbox, explain_inbox_item, and music_status each complete
+    in under 500 ms while a refresh that blocks 2 s per artist runs in the same
+    server process."""
+    application = _application(tmp_path)
+    refresh, started = _blocking_refresh(2, 2.0)
+    server = create_music_server(application, refresh=refresh, now=lambda: NOW)
+
+    async def scenario() -> tuple[float, float, float]:
+        async with Client(server) as client:  # type: ignore[arg-type]
+            refresh_task = asyncio.ensure_future(client.call_tool("refresh_music", {"kind": "all"}))
+            await asyncio.get_event_loop().run_in_executor(None, started.wait, 5)
+
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            await client.call_tool("list_inbox", {"limit": 10})
+            list_inbox_elapsed = loop.time() - start
+
+            start = loop.time()
+            await client.call_tool("explain_inbox_item", {"inbox_id": "inbox-1"})
+            explain_elapsed = loop.time() - start
+
+            start = loop.time()
+            await client.call_tool("music_status", {})
+            status_elapsed = loop.time() - start
+
+            await refresh_task
+            return list_inbox_elapsed, explain_elapsed, status_elapsed
+
+    list_inbox_elapsed, explain_elapsed, status_elapsed = asyncio.run(scenario())
+
+    assert list_inbox_elapsed < 0.5
+    assert explain_elapsed < 0.5
+    assert status_elapsed < 0.5
+    application.close()
+
+
+def test_write_tool_completes_during_refresh(tmp_path: Path) -> None:
+    """AC (issue #65): update_inbox_item completes in under 1 s while the same
+    2-s-per-artist refresh runs in the same server process."""
+    application = _application(tmp_path)
+    refresh, started = _blocking_refresh(2, 2.0)
+    server = create_music_server(application, refresh=refresh, now=lambda: NOW)
+
+    async def scenario() -> float:
+        async with Client(server) as client:  # type: ignore[arg-type]
+            refresh_task = asyncio.ensure_future(client.call_tool("refresh_music", {"kind": "all"}))
+            await asyncio.get_event_loop().run_in_executor(None, started.wait, 5)
+
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            await client.call_tool("update_inbox_item", {"inbox_id": "inbox-1", "state": "saved"})
+            elapsed = loop.time() - start
+
+            await refresh_task
+            return elapsed
+
+    elapsed = asyncio.run(scenario())
+
+    assert elapsed < 1.0
+    application.close()
+
+
+def test_status_reports_running_refresh(tmp_path: Path) -> None:
+    """AC (issue #65): music_status.refresh.running is true during a run and false after."""
+    application = _application(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def refresh(kind: str, force: bool = False) -> dict[str, object]:
+        started.set()
+        release.wait(timeout=5)
+        return {"kind": kind, "status": "succeeded"}
+
+    server = create_music_server(
+        application,
+        refresh=refresh,
+        refresh_status=lambda: started.is_set() and not release.is_set(),
+        now=lambda: NOW,
+    )
+
+    async def scenario() -> tuple[object, object]:
+        async with Client(server) as client:  # type: ignore[arg-type]
+            refresh_task = asyncio.ensure_future(client.call_tool("refresh_music", {"kind": "all"}))
+            await asyncio.get_event_loop().run_in_executor(None, started.wait, 5)
+            during = await client.call_tool("music_status", {})
+            release.set()
+            await refresh_task
+            after = await client.call_tool("music_status", {})
+            return during.structured_content, after.structured_content  # type: ignore[union-attr]
+
+    during, after = asyncio.run(scenario())
+
+    assert during["refresh"] == {"running": True}  # type: ignore[index]
+    assert after["refresh"] == {"running": False}  # type: ignore[index]
+    application.close()
+
+
+def test_second_refresh_music_call_reports_already_running_while_the_first_holds_the_lock(
+    tmp_path: Path,
+) -> None:
+    """AC (issue #65): a second refresh_music while one runs still returns
+    already_running with retry_after, now proven with a real concurrent second call
+    (not just a synchronous fake) since refresh_music runs off the event loop."""
+    application = _application(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def refresh(kind: str, force: bool = False) -> object:
+        calls.append(kind)
+        if len(calls) == 1:
+            started.set()
+            release.wait(timeout=5)
+            return {"kind": kind, "status": "succeeded"}
+        return RefreshInvocation(None, True, reason="already_running", retry_after="later")
+
+    server = create_music_server(application, refresh=refresh, now=lambda: NOW)
+
+    async def scenario() -> object:
+        async with Client(server) as client:  # type: ignore[arg-type]
+            first_task = asyncio.ensure_future(client.call_tool("refresh_music", {"kind": "all"}))
+            await asyncio.get_event_loop().run_in_executor(None, started.wait, 5)
+            second = await client.call_tool("refresh_music", {"kind": "all"})
+            release.set()
+            await first_task
+            return second.structured_content  # type: ignore[union-attr]
+
+    result = asyncio.run(scenario())
+
+    assert result == {"status": "partial", "reason": "already_running", "retry_after": "later"}
+    application.close()

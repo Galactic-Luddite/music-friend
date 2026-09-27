@@ -6,6 +6,7 @@ import json
 import selectors
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -292,12 +293,21 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     application_closes: list[object] = []
+    created_applications: list[object] = []
 
     class Application:
         def close(self) -> None:
             application_closes.append(self)
 
-    application = Application()
+    def make_application(_catalog: object) -> Application:
+        instance = Application()
+        created_applications.append(instance)
+        return instance
+
+    # created_applications[0] is the server's own long-lived connection, opened once
+    # by run_catalog_stdio_session itself; every later instance is a fresh worker
+    # connection opened (and closed) inside one refresh() call (issue #65 AC: the
+    # worker never touches the server's connection).
     event_transport = _CloseRecorder()
     event_client = object()
     source = object()
@@ -331,19 +341,26 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
         def close(self) -> None:
             pass
 
-    def create_server(actual_application: object, *, refresh: Callable[[str], object]) -> _Server:
-        assert actual_application is application
+    def create_server(
+        actual_application: object,
+        *,
+        refresh: Callable[[str], object],
+        refresh_status: Callable[[], bool] | None = None,
+    ) -> _Server:
+        assert actual_application is created_applications[0]
         for kind in ("events", "catalog", "releases", "all"):
             refresh(kind)
         return server
 
     def run_refresh(actual_application: object, **kwargs: object) -> object:
-        assert actual_application is application
+        # AC (issue #65): the refresh worker's connection is never the server's own.
+        assert actual_application is not created_applications[0]
+        assert actual_application in created_applications
         refresh_calls.append(kwargs)
         return {"status": "succeeded"}
 
     monkeypatch.setattr(mcp_stdio.Catalog, "open", lambda path: path)
-    monkeypatch.setattr(mcp_stdio, "MusicFriendApplication", lambda _catalog: application)
+    monkeypatch.setattr(mcp_stdio, "MusicFriendApplication", make_application)
     monkeypatch.setattr(mcp_stdio, "TicketmasterTransport", lambda _connector: event_transport)
     monkeypatch.setattr(mcp_stdio, "TicketmasterDiscoveryClient", EventClientFactory)
     monkeypatch.setattr(mcp_stdio, "spotify_source", source_context)
@@ -360,7 +377,12 @@ def test_catalog_stdio_session_composes_refresh_modes_and_closes_owned_resources
 
     assert server.transports == ["stdio"]
     assert event_transport.closes == 1
-    assert application_closes == [application]
+    # 1 server connection (opened by run_catalog_stdio_session) + 4 worker
+    # connections (one per refresh() call below), every one closed exactly once.
+    assert len(created_applications) == 5
+    # Each worker connection closes right after its own refresh() call; the
+    # server's own connection (created first) closes last, when the session ends.
+    assert application_closes == created_applications[1:] + [created_applications[0]]
     assert [call["kind"] for call in refresh_calls] == ["events", "catalog", "releases", "all"]
     events_call, catalog_call, releases_call, all_call = refresh_calls
     # events: no source at all.
@@ -434,7 +456,12 @@ def test_mcp_refresh_releases_uses_musicbrainz_and_never_opens_a_spotify_source(
 
     refresh_results: list[object] = []
 
-    def create_server(actual_application: object, *, refresh: Callable[[str], object]) -> _Server:
+    def create_server(
+        actual_application: object,
+        *,
+        refresh: Callable[[str], object],
+        refresh_status: Callable[[], bool] | None = None,
+    ) -> _Server:
         refresh_results.append(refresh("releases"))
         return _Server()
 
@@ -542,7 +569,12 @@ def test_mcp_refresh_releases_calls_musicbrainz_and_deezer_but_never_spotify(
 
     refresh_results: list[object] = []
 
-    def create_server(actual_application: object, *, refresh: Callable[[str], object]) -> _Server:
+    def create_server(
+        actual_application: object,
+        *,
+        refresh: Callable[[str], object],
+        refresh_status: Callable[[], bool] | None = None,
+    ) -> _Server:
         refresh_results.append(refresh("releases"))
         return _Server()
 
@@ -596,7 +628,11 @@ def test_catalog_stdio_session_starts_without_an_available_native_credential_sto
     monkeypatch.setattr(mcp_stdio, "MusicFriendApplication", lambda _catalog: application)
     monkeypatch.setattr(mcp_stdio, "TicketmasterTransport", lambda _connector: event_transport)
     monkeypatch.setattr(mcp_stdio, "TicketmasterDiscoveryClient", EventClientFactory)
-    monkeypatch.setattr(mcp_stdio, "create_music_server", lambda _application, refresh: server)
+    monkeypatch.setattr(
+        mcp_stdio,
+        "create_music_server",
+        lambda _application, refresh, refresh_status=None: server,
+    )
 
     mcp_stdio.run_catalog_stdio_session(
         config=mcp_stdio.LocalConfig(),
@@ -779,3 +815,101 @@ def _assert_catalog_stdio_flow(process: subprocess.Popen[str]) -> None:
     ]
     assert updated["result"]["structuredContent"]["state"] == "saved"  # type: ignore[index]
     assert explained["result"]["structuredContent"]["entry"]["local_id"] == inbox_id  # type: ignore[index]
+
+
+def test_refresh_runs_on_a_worker_connection(tmp_path: Path) -> None:
+    """AC (issue #65): the refresh worker opens its own Catalog/connection; the
+    server's own connection is never passed into refresh_once, and the worker's
+    Catalog.open happens on a different thread than the server's own open."""
+    opened: list[tuple[object, int]] = []
+
+    class FakeCatalog:
+        def __init__(self, path: object) -> None:
+            self.path = path
+            self.thread_id = threading.get_ident()
+            opened.append((self, self.thread_id))
+
+        def close(self) -> None:
+            pass
+
+    class FakeApplication:
+        def __init__(self, catalog: object) -> None:
+            self.catalog = catalog
+            self.closes = 0
+
+        def close(self) -> None:
+            self.closes += 1
+
+    refresh_calls: list[object] = []
+
+    def run_refresh(actual_application: object, **_kwargs: object) -> object:
+        refresh_calls.append(actual_application)
+        return {"status": "succeeded"}
+
+    event_transport = _CloseRecorder()
+
+    class EventClientFactory:
+        def __new__(cls, *_args: object, **_kwargs: object) -> object:
+            return object()
+
+    class EventStore:
+        def save(self, _key: object, _value: str) -> None:
+            raise AssertionError("unused")
+
+        def load(self, _key: object) -> str | None:
+            return None
+
+        def delete(self, _key: object) -> None:
+            raise AssertionError("unused")
+
+    captured_refresh: list[Callable[..., object]] = []
+
+    def create_server(
+        actual_application: object,
+        *,
+        refresh: Callable[[str], object],
+        refresh_status: Callable[[], bool] | None = None,
+    ) -> _Server:
+        captured_refresh.append(refresh)
+        return _Server()
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(mcp_stdio.Catalog, "open", FakeCatalog)
+        monkeypatch.setattr(mcp_stdio, "MusicFriendApplication", FakeApplication)
+        monkeypatch.setattr(mcp_stdio, "TicketmasterTransport", lambda _connector: event_transport)
+        monkeypatch.setattr(mcp_stdio, "TicketmasterDiscoveryClient", EventClientFactory)
+        monkeypatch.setattr(mcp_stdio, "refresh_once", run_refresh)
+        monkeypatch.setattr(mcp_stdio, "create_music_server", create_server)
+
+        mcp_stdio.run_catalog_stdio_session(
+            config=mcp_stdio.LocalConfig(),
+            catalog_path=tmp_path / "catalog.sqlite3",
+            connector_factory=lambda: object(),
+            credential_store_factory=lambda: EventStore(),  # type: ignore[arg-type]
+        )
+
+        assert len(opened) == 1  # only the server's own open so far
+        server_catalog, server_thread_id = opened[0]
+
+        refresh = captured_refresh[0]
+        worker_thread_ids: list[int] = []
+
+        def call_from_worker_thread() -> None:
+            worker_thread_ids.append(threading.get_ident())
+            refresh("events")
+
+        thread = threading.Thread(target=call_from_worker_thread)
+        thread.start()
+        thread.join(timeout=5)
+
+        assert len(opened) == 2
+        worker_catalog, worker_thread_id = opened[1]
+        assert worker_catalog is not server_catalog
+        assert worker_thread_id != server_thread_id
+        assert worker_thread_id == worker_thread_ids[0]
+        assert refresh_calls[-1] is not None
+        assert refresh_calls[-1].catalog is worker_catalog  # type: ignore[attr-defined]
+        assert refresh_calls[-1].catalog is not server_catalog  # type: ignore[attr-defined]
+    finally:
+        monkeypatch.undo()

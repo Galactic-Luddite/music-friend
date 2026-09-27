@@ -30,6 +30,15 @@
   raises the minimum supported SQLite version to 3.25.0 (2018, for window-function support);
   `Catalog.open` on an older SQLite reports the requirement by name instead of failing obscurely
   mid-migration.
+- `refresh_music` no longer blocks the MCP server while it runs: it now runs off the event loop
+  (via `asyncio.to_thread`) on its own local database connection, so `list_inbox`,
+  `explain_inbox_item`, `music_status`, and `update_inbox_item` keep answering from local state
+  while a refresh is in progress. The refresh worker opens its own connection against the same
+  catalog file and closes it when the run ends; the server's own connection is never touched from
+  the worker thread. `music_status` gained a `refresh.running` field reporting whether a refresh
+  is currently in progress. No write transaction spans a provider request, and a single artist's
+  release batch (bounded at 100 releases) commits in one short transaction, so a concurrent MCP
+  write waits at most for that one transaction to commit, not for the whole refresh.
 - Fixed `update_setup`'s `event_radius` MCP argument silently accepting `true`/`false` as a valid
   radius (Python's `bool` is a subclass of `int`, so the prior `isinstance` check let a boolean
   through and stored it as radius `1`). `event_radius` now uses the same strict `type(value)`

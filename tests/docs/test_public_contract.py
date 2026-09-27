@@ -49,7 +49,40 @@ def test_mcp_guide_covers_every_tool_with_purpose_inputs_result_and_behavior() -
         assert all(cells), name
         assert re.search(r"read-only|local write", cells[4]), name
     assert re.search(r"provider contact", rows["refresh_music"])
+    assert re.search(r"refresh\.running", rows["music_status"])
     assert "exactly these eleven tools" in mcp
+
+
+def test_music_status_refresh_running_field_is_documented_and_live(tmp_path: Path) -> None:
+    """AC (issue #65): `music_status.refresh.running` is documented in docs/mcp.md and
+    the skill, and the live tool result actually carries that field."""
+    import asyncio
+
+    from mcp.client import Client
+
+    from music_friend.mcp import create_music_server
+    from music_friend.store import Catalog
+    from music_friend.tools import MusicFriendApplication
+
+    mcp = (ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+    skill = SKILL.read_text(encoding="utf-8")
+    assert "refresh.running" in mcp
+    assert "refresh.running" in skill
+
+    application = MusicFriendApplication(Catalog.open(tmp_path / "catalog.sqlite3"))
+    try:
+        server = create_music_server(
+            application, refresh=lambda kind, force=False: {"kind": kind, "status": "succeeded"}
+        )
+
+        async def call() -> object:
+            async with Client(server) as client:  # type: ignore[arg-type]
+                return await client.call_tool("music_status", {})
+
+        result = asyncio.run(call()).structured_content  # type: ignore[union-attr]
+        assert result["refresh"] == {"running": False}  # type: ignore[index]
+    finally:
+        application.close()
     for path in _public_markdown_files():
         text = path.read_text(encoding="utf-8").lower()
         assert "eight tools" not in text, path
