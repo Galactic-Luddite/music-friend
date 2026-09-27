@@ -298,8 +298,24 @@ def test_signals_repeat_and_inbox_upserts_are_idempotent_and_fail_closed_on_refe
     signal = _signal(release.local_id)
     catalog.put_signal(signal)
     catalog.put_signal(_signal(release.local_id, observed_at=LATER))
-    unread = InboxEntry("inbox-1", signal.local_id, InboxState.UNREAD, NOW, NOW)
-    saved = InboxEntry("inbox-1", signal.local_id, InboxState.SAVED, NOW, LATER)
+    unread = InboxEntry(
+        "inbox-1",
+        SignalKind.RELEASE,
+        release.local_id,
+        signal.local_id,
+        InboxState.UNREAD,
+        NOW,
+        NOW,
+    )
+    saved = InboxEntry(
+        "inbox-1",
+        SignalKind.RELEASE,
+        release.local_id,
+        signal.local_id,
+        InboxState.SAVED,
+        NOW,
+        LATER,
+    )
     catalog.put_inbox_entry(unread)
     catalog.put_inbox_entry(saved)
 
@@ -317,7 +333,15 @@ def test_signals_repeat_and_inbox_upserts_are_idempotent_and_fail_closed_on_refe
         catalog.put_signal(_signal("missing-release"))
     with pytest.raises(sqlite3.IntegrityError):
         catalog.put_inbox_entry(
-            InboxEntry("inbox-invalid", "missing-signal", InboxState.UNREAD, NOW, NOW)
+            InboxEntry(
+                "inbox-invalid",
+                SignalKind.RELEASE,
+                release.local_id,
+                "missing-signal",
+                InboxState.UNREAD,
+                NOW,
+                NOW,
+            )
         )
 
 
@@ -374,7 +398,15 @@ def test_signal_material_conflict_preserves_saved_inbox_decision(
     )
     catalog.put_release(other_release)
     original = _signal(original_release.local_id)
-    saved = InboxEntry("inbox-saved", original.local_id, InboxState.SAVED, NOW, NOW)
+    saved = InboxEntry(
+        "inbox-saved",
+        SignalKind.RELEASE,
+        original_release.local_id,
+        original.local_id,
+        InboxState.SAVED,
+        NOW,
+        NOW,
+    )
     catalog.put_signal(original)
     catalog.put_inbox_entry(saved)
     conflicting = Signal(
@@ -415,7 +447,7 @@ def test_signal_material_conflict_preserves_saved_inbox_decision(
     assert catalog.get_signal(conflicting.local_id) is None
     actual_inbox = catalog.get_inbox_entry(saved.local_id)
     assert actual_inbox is not None
-    assert actual_inbox.signal_local_id == "signal-1"
+    assert actual_inbox.latest_signal_local_id == "signal-1"
     assert actual_inbox.state is InboxState.SAVED
     assert actual_inbox.created_at == NOW
     assert actual_inbox.updated_at == NOW

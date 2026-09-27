@@ -87,7 +87,17 @@ def _application(tmp_path: Path) -> MusicFriendApplication:
         NOW,
     )
     application.put_signal(signal)
-    application.put_inbox_entry(InboxEntry("inbox-1", signal.local_id, InboxState.UNREAD, NOW, NOW))
+    application.put_inbox_entry(
+        InboxEntry(
+            "inbox-1",
+            SignalKind.RELEASE,
+            release.subject_local_id or release.local_id,
+            signal.local_id,
+            InboxState.UNREAD,
+            NOW,
+            NOW,
+        )
+    )
     return application
 
 

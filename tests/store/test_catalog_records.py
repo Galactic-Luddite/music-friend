@@ -9,13 +9,20 @@ import pytest
 from music_friend.domain import (
     Artist,
     Event,
+    Explanation,
+    ExplanationReason,
+    ExplanationReasonKind,
     IdentityConfidence,
+    InboxEntry,
+    InboxState,
     Interest,
     InterestKind,
     InterestStatus,
     Observation,
     Release,
     ReleaseDatePrecision,
+    Signal,
+    SignalKind,
     SourceReference,
 )
 from music_friend.store import Catalog
@@ -82,6 +89,7 @@ def test_release_round_trip_preserves_artist_order_and_date(catalog: Catalog) ->
         artist_refs=(second.local_id, first.local_id),
         source_refs=(_source("release-source", "release-1", 3),),
         observed_at=OBSERVED,
+        subject_local_id="release-1",
     )
 
     catalog.put_release(expected)
@@ -394,6 +402,7 @@ def test_release_upsert_replaces_ordered_artist_and_source_links(catalog: Catalo
             _source("other-release-source", "other-release-id"),
         ),
         observed_at=LATER,
+        subject_local_id=original.local_id,
     )
     catalog.put_release(original)
 
@@ -454,6 +463,7 @@ def test_failed_release_upsert_restores_old_fields_and_links(catalog: Catalog) -
         artist_refs=(artist.local_id,),
         source_refs=(_source("old-source", "old-id"),),
         observed_at=OBSERVED,
+        subject_local_id="rollback-existing-release",
     )
     catalog.put_release(original)
     invalid = Release(
@@ -521,3 +531,127 @@ def test_raw_canonical_identity_mutation_cannot_dangle_polymorphic_links(
             )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(f"DELETE FROM {table} WHERE local_id = ?", (local_id,))
+
+
+def _release_for_subject(local_id: str, artist: Artist, *, title: str = "Release") -> Release:
+    return Release(
+        local_id=local_id,
+        title=title,
+        release_type="album",
+        release_date=date(2026, 9, 1),
+        date_precision=ReleaseDatePrecision.DAY,
+        artist_refs=(artist.local_id,),
+        source_refs=(_source("spotify", local_id),),
+        observed_at=OBSERVED,
+    )
+
+
+def _signal_for(local_id: str, record_local_id: str, *, native_id: str) -> Signal:
+    return Signal(
+        local_id,
+        SignalKind.RELEASE,
+        record_local_id,
+        "spotify",
+        native_id,
+        f"fingerprint-{local_id}",
+        f"material-{local_id}",
+        Explanation((ExplanationReason(ExplanationReasonKind.NEW_RELEASE, "Release"),)),
+        OBSERVED,
+    )
+
+
+def test_second_inbox_entry_for_one_subject_is_rejected_by_the_schema(catalog: Catalog) -> None:
+    """Verifies AC: UNIQUE (kind, subject_local_id) rejects a second entry for one subject,
+    at the schema, with no code-level duplicate check involved."""
+    artist = _artist("artist-subject-1")
+    catalog.put_artist(artist)
+    release = _release_for_subject("release-subject-1", artist)
+    catalog.put_release(release)
+    first_signal = _signal_for("signal-subject-1a", release.local_id, native_id="native-a")
+    second_signal = _signal_for("signal-subject-1b", release.local_id, native_id="native-b")
+    catalog.put_signal(first_signal)
+    catalog.put_signal(second_signal)
+
+    catalog.put_inbox_entry(
+        InboxEntry(
+            "entry-subject-1a",
+            SignalKind.RELEASE,
+            release.local_id,
+            first_signal.local_id,
+            InboxState.UNREAD,
+            OBSERVED,
+            OBSERVED,
+        )
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        catalog.put_inbox_entry(
+            InboxEntry(
+                "entry-subject-1b",
+                SignalKind.RELEASE,
+                release.local_id,
+                second_signal.local_id,
+                InboxState.UNREAD,
+                OBSERVED,
+                OBSERVED,
+            )
+        )
+
+    assert catalog.get_inbox_entry("entry-subject-1a") is not None
+    assert catalog.get_inbox_entry("entry-subject-1b") is None
+
+
+def test_releases_map_many_to_one_onto_subjects(catalog: Catalog) -> None:
+    """Verifies AC: a release's subject_local_id defaults to its own local_id; two releases
+    may share one subject and get_inbox_entry_for_subject returns the single shared entry
+    for both."""
+    artist = _artist("artist-subject-2")
+    catalog.put_artist(artist)
+    solo = _release_for_subject("release-solo", artist, title="Solo Release")
+    catalog.put_release(solo)
+    solo_actual = catalog.get_release(solo.local_id)
+    assert solo_actual is not None
+    assert solo_actual.subject_local_id == solo.local_id
+
+    first = _release_for_subject("release-shared-1", artist, title="Shared One")
+    second = _release_for_subject("release-shared-2", artist, title="Shared Two")
+    catalog.put_release(first)
+    catalog.put_release(
+        Release(
+            local_id=second.local_id,
+            title=second.title,
+            release_type=second.release_type,
+            release_date=second.release_date,
+            date_precision=second.date_precision,
+            artist_refs=second.artist_refs,
+            source_refs=second.source_refs,
+            observed_at=second.observed_at,
+            subject_local_id=first.local_id,
+        )
+    )
+
+    shared_signal = _signal_for("signal-shared", first.local_id, native_id="native-shared")
+    catalog.put_signal(shared_signal)
+    entry = InboxEntry(
+        "entry-shared",
+        SignalKind.RELEASE,
+        first.local_id,
+        shared_signal.local_id,
+        InboxState.SAVED,
+        OBSERVED,
+        OBSERVED,
+    )
+    catalog.put_inbox_entry(entry)
+
+    first_actual = catalog.get_release(first.local_id)
+    second_actual = catalog.get_release(second.local_id)
+    assert first_actual is not None and second_actual is not None
+    assert first_actual.subject_local_id == first.local_id
+    assert second_actual.subject_local_id == first.local_id
+
+    for release_actual in (first_actual, second_actual):
+        found = catalog.get_inbox_entry_for_subject(
+            SignalKind.RELEASE, release_actual.subject_local_id
+        )
+        assert found is not None
+        assert found.local_id == "entry-shared"

@@ -1228,7 +1228,7 @@ def _inbox_summary(
     Returns ``None`` when the entry's signal or underlying record is unexpectedly missing;
     ``local_id``/``state``/timestamps remain populated either way.
     """
-    signal = application.get_signal(value.signal_local_id)
+    signal = application.get_signal(value.latest_signal_local_id)
     if signal is None:
         return None
     if signal.kind is SignalKind.RELEASE:
@@ -1277,7 +1277,7 @@ def _explain_inbox(application: MusicFriendApplication, inbox_id: str) -> dict[s
     entry = application.get_inbox_entry(inbox_id)
     if entry is None:
         return dict(_NOT_FOUND)
-    signal = application.get_signal(entry.signal_local_id)
+    signal = application.get_signal(entry.latest_signal_local_id)
     if signal is None:
         return dict(_NOT_FOUND)
     record = _signal_record(application, signal)

@@ -82,6 +82,16 @@ class CatalogUnavailableError(MusicFriendError):
     CATEGORY = "catalog_unavailable"
     PUBLIC_MESSAGE = "The local catalog is unavailable."
 
+    def __init__(self, *_diagnostic_context: object, public_message: str | None = None) -> None:
+        super().__init__(*_diagnostic_context)
+        self._public_message = self.PUBLIC_MESSAGE if public_message is None else public_message
+
+    def __str__(self) -> str:
+        return self._public_message
+
+    def to_public_dict(self) -> dict[str, object]:
+        return {"category": self.CATEGORY, "message": self._public_message}
+
 
 _UNSIGNED_INTEGER = re.compile(r"[0-9]+\Z")
 _MAX_RETRY_AFTER_SECONDS = 900

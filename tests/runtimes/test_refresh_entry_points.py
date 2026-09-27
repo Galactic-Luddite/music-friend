@@ -839,7 +839,7 @@ def test_v1_signal_upgrade_safety_creates_no_duplicate_and_preserves_inbox_state
     try:
         seeded_signal = application.list_signals(SignalKind.RELEASE, limit=1)[0]
         seeded_entry = application.list_inbox_entries(None, limit=1)[0]
-        assert seeded_entry.signal_local_id == seeded_signal.local_id
+        assert seeded_entry.latest_signal_local_id == seeded_signal.local_id
         release = application.get_release(seeded_signal.record_local_id)
         assert release is not None
         artist = application.get_artist(release.artist_refs[0])

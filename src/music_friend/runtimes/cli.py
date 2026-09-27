@@ -1444,7 +1444,7 @@ def _inbox_detail(application: MusicFriendApplication, local_id: str) -> dict[st
     entry = application.get_inbox_entry(local_id)
     if entry is None:
         return None
-    signal = application.get_signal(entry.signal_local_id)
+    signal = application.get_signal(entry.latest_signal_local_id)
     if signal is None:
         return None
     return {

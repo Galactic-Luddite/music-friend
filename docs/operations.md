@@ -249,6 +249,21 @@ to remove the Spotify credential, then rerun setup with `-` at the Ticketmaster 
 the Ticketmaster credential. In other words, disconnect Spotify separately before discarding the
 local installation.
 
+### Upgrading
+
+Run `music-friend data backup music-friend-backup.json` before upgrading to a new release. A
+catalog upgrade applies any pending schema migration automatically the next time it opens (`doctor`
+and every other command trigger it); migration 014 collapses a release or event that ever ended up
+with more than one inbox item -- for example the same release signalled by two sources, or a repair
+pass that re-recorded an already-signalled release under a new explanation -- into the single inbox
+item the schema now requires per release or event. The collapse keeps the most-decided entry
+(`saved` or `dismissed` beats `unread`; between two decided entries, the more recently updated one
+wins) with its original decision, and every entry the collapse touched is preserved, before and
+after, in a local snapshot table for later review. No signal is ever deleted or rewritten, and the
+collapse never happens without every pre-upgrade duplicate already recorded in that snapshot.
+`data restore` of a pre-upgrade backup applies the same collapse on the way in, so restoring an old
+backup never fails because of this constraint.
+
 ### Data command failure messages
 
 `data export|backup|import|import-spotify|restore` distinguish these failure categories with a

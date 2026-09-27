@@ -796,7 +796,15 @@ def update_inbox_state(
     entry = application.get_inbox_entry(inbox_local_id)
     if entry is None:
         raise ValueError("inbox entry does not exist")
-    updated = InboxEntry(entry.local_id, entry.signal_local_id, state, entry.created_at, updated_at)
+    updated = InboxEntry(
+        entry.local_id,
+        entry.kind,
+        entry.subject_local_id,
+        entry.latest_signal_local_id,
+        state,
+        entry.created_at,
+        updated_at,
+    )
     application.put_inbox_entry(updated)
     return updated
 
@@ -1155,11 +1163,35 @@ def _record_candidate(
         checked_at,
     )
     application.put_signal(signal)
-    application.put_inbox_entry(
-        InboxEntry(
-            _inbox_id(signal.local_id), signal.local_id, InboxState.UNREAD, checked_at, checked_at
+    subject_local_id = _subject_local_id_for(application, kind, record_local_id)
+    existing_entry = application.get_inbox_entry_for_subject(kind, subject_local_id)
+    if existing_entry is None:
+        application.put_inbox_entry(
+            InboxEntry(
+                _inbox_id(signal.local_id),
+                kind,
+                subject_local_id,
+                signal.local_id,
+                InboxState.UNREAD,
+                checked_at,
+                checked_at,
+            )
         )
-    )
+    elif not repair:
+        # The subject already has its one inbox entry (schema-enforced). A genuinely new
+        # signal for it -- a material change -- reopens that same entry to unread and points
+        # it at the new signal, rather than creating a second entry for the same subject.
+        application.put_inbox_entry(
+            InboxEntry(
+                existing_entry.local_id,
+                kind,
+                subject_local_id,
+                signal.local_id,
+                InboxState.UNREAD,
+                existing_entry.created_at,
+                checked_at,
+            )
+        )
     if repair:
         counts.signals_repaired += 1
     else:
@@ -1175,11 +1207,41 @@ def _repair_inbox_entries(
     for signal in application.list_signals_without_inbox_entries(limit=500):
         inbox_id = _inbox_id(signal.local_id)
         try:
+            subject_local_id = _subject_local_id_for(
+                application, signal.kind, signal.record_local_id
+            )
+            if application.get_inbox_entry_for_subject(signal.kind, subject_local_id) is not None:
+                continue
             application.put_inbox_entry(
-                InboxEntry(inbox_id, signal.local_id, InboxState.UNREAD, checked_at, checked_at)
+                InboxEntry(
+                    inbox_id,
+                    signal.kind,
+                    subject_local_id,
+                    signal.local_id,
+                    InboxState.UNREAD,
+                    checked_at,
+                    checked_at,
+                )
             )
         except Exception:
             counts.failures += 1
+
+
+def _subject_local_id_for(
+    application: MusicFriendApplication, kind: SignalKind, record_local_id: str
+) -> str:
+    """Resolve a signal's target record to its inbox subject.
+
+    Events are 1:1 with their subject (the subject id is the event id). A release's
+    subject defaults to its own local_id unless it was explicitly joined to another
+    subject by a reviewed merge (issue D).
+    """
+    if kind is SignalKind.EVENT:
+        return record_local_id
+    release = application.get_release(record_local_id)
+    if release is None:
+        raise ValueError("release does not exist")
+    return release.subject_local_id or release.local_id
 
 
 def _repair_missing_signals(application: MusicFriendApplication, counts: _RefreshCounts) -> None:

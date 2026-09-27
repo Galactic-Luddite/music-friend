@@ -71,6 +71,10 @@ def bundled_migrations() -> tuple[Migration, ...]:
                 encoding="utf-8"
             ),
         ),
+        Migration(
+            14,
+            schema.joinpath("014_inbox_identity.sql").read_text(encoding="utf-8"),
+        ),
     )
 
 
