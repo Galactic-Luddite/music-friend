@@ -95,7 +95,7 @@ def _seed_duplicate_pair(
             Explanation((ExplanationReason(ExplanationReasonKind.NEW_RELEASE, title),)),
             observed_at,
         )
-        application.put_signal(signal)
+        application._catalog.put_signal(signal)
         application.put_inbox_entry(
             InboxEntry(
                 f"inbox-{index}",

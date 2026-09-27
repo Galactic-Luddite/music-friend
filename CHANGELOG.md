@@ -15,6 +15,19 @@
   (added below for issue #56 AC 3; superseded once migration 014 made cross-source duplicates a
   cross-subject problem the new commands solve directly) -- run `data inbox duplicates --merge
   --yes` instead of `dedupe-inbox --apply`.
+- Fixed a release gaining a second inbox item, or a new signal, when a second source was attached
+  to it or when the next refresh's repair pass re-examined it (issues #57 and #62). Every release
+  signal and inbox write now goes through one write path whose repeat is a no-op: a release's
+  signal identity is a digest of its content only (title, type, date, precision, artists), never
+  its sources or timestamps. A real content change updates the one existing item and adds
+  `updated_release` to its reasons without changing a `saved` or `dismissed` decision. When two
+  sources disagree, the more precise date wins and otherwise the earlier source in
+  `release_sources` wins; each overruled value is recorded locally. Repair now only fills release
+  subjects that have no inbox item at all, and a routine MusicBrainz re-check no longer drops a
+  Deezer reference attached to the same release. `explain_inbox_item` adds `sources`, the number
+  of sources reporting the record. `release_source_unmapped` is documented as `(artist, source)`
+  pairs summed over the release sources that ran. Reverting a release to earlier content now
+  reuses that content's signal instead of minting a new one.
 - Fixed cross-source dedupe missing titles that differ only in typographic punctuation or Unicode
   form (issue #56): a curly apostrophe/quote, an en/em dash, an NFD-decomposed accent, or doubled
   whitespace no longer produces a second inbox item for a release already reported under the ASCII

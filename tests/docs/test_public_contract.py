@@ -440,6 +440,20 @@ def test_credential_and_network_docs_state_the_actual_local_boundaries() -> None
     assert "temporary 127.0.0.1 OAuth callback" in security
 
 
+def test_release_source_unmapped_and_single_inbox_item_are_documented() -> None:
+    """Issue #62: the metric's pair-summing definition and the one-item-per-release rule."""
+    limits = (ROOT / "docs" / "limits.md").read_text(encoding="utf-8")
+    mcp = (ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+
+    assert "`(watchlisted artist, release source)` pairs" in limits
+    assert "summed over the\nrelease sources that ran" in limits
+    assert "reports 2" in limits
+    assert "A release keeps one inbox item for its whole life." in limits
+    assert "a saved or dismissed item stays saved or dismissed" in limits
+    assert "`(artist, release source)`\npairs skipped this run" in mcp
+    assert "`sources` (how many sources report the record)" in mcp
+
+
 def test_public_markdown_files_include_contributor_guidance() -> None:
     """The public residue scan covers the checkout-only contributor guide."""
     assert ROOT / ("AGENTS.md") in _public_markdown_files()

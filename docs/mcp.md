@@ -45,7 +45,7 @@ Deezer, or Ticketmaster.
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove`; optional `source_ids` mapping source names to user-confirmed identifiers | the applied decision, or `not_found` | local write |
 | `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries, each with a `summary` (`kind`, `title`, `artist_names`, `date`) so most requests need no follow-up call | read-only, local |
 | `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry (including its `summary`), or `not_found` | local write |
-| `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry` (with `summary`), `record` (with `artist_names` alongside `artist_ids`), and `reasons` (why it was included) | read-only, local |
+| `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry` (with `summary`), `record` (with `artist_names` alongside `artist_ids`), `sources` (how many sources report the record), and `reasons` (why it was included) | read-only, local |
 | `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
 | `get_setup` | Query Music Friend configuration state and completion status | none | configured fields (Spotify ID, event area fields, `release_sources`), which fields are missing, whether setup is complete for MCP readiness | read-only, local |
 | `update_setup` | Update Music Friend configuration fields (non-secrets only) | `client_id`, `event_country_code`, `event_postal_code`, `event_radius`, `event_radius_unit`, `release_sources` (an ordered array chosen from `spotify`, `musicbrainz`, `deezer`; all optional, pass null to leave unchanged) | updated configuration state, or instructions to use CLI for secrets | local write |
@@ -78,9 +78,11 @@ a cooldown -- see [adaptive request pacing](operations.md#adaptive-request-pacin
 `refresh_music` with `kind: "releases"` or `"all"` skips a watchlisted artist entirely, making no
 source request for it, when that artist carries no `SourceReference` yet for the release source
 being run (for example, an artist added from Spotify before MusicBrainz identity mapping resolved
-it). The result's metrics include `release_source_unmapped`, the count of artists skipped this run
-for that reason, so a run that mapped nobody still reports a signal instead of a silent
-`succeeded` with nothing to show; `music_status` reports the same count from the latest run.
+it). The result's metrics include `release_source_unmapped`, the count of `(artist, release source)`
+pairs skipped this run for that reason, summed over the release sources that ran (see
+[release discovery limits](limits.md)), so a run that mapped nobody still reports a signal instead
+of a silent `succeeded` with nothing to show; `music_status` reports the same count from the latest
+run and shows the per-source identity picture.
 
 `refresh_music` with `kind: "catalog"` or `"all"` skips a catalog capability (followed artists,
 saved items, each top-items time range) that completed successfully within the freshness window --

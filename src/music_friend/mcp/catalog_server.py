@@ -1320,11 +1320,22 @@ def _explain_inbox(application: MusicFriendApplication, inbox_id: str) -> dict[s
     return {
         "entry": _inbox(application, entry),
         "record": record,
+        "sources": _source_count(application, signal),
         "reasons": [
             {"kind": reason.kind.value, "detail": reason.detail}
             for reason in signal.explanation.reasons
         ],
     }
+
+
+def _source_count(application: MusicFriendApplication, signal: Signal) -> int:
+    """How many sources report the explained record; provider identities stay local."""
+    record = (
+        application.get_release(signal.record_local_id)
+        if signal.kind is SignalKind.RELEASE
+        else application.get_event(signal.record_local_id)
+    )
+    return 0 if record is None else len({reference.source for reference in record.source_refs})
 
 
 def _signal_record(application: MusicFriendApplication, signal: Signal) -> dict[str, object] | None:

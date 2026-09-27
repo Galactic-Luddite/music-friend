@@ -1831,6 +1831,14 @@ class Catalog:
             datetime.fromisoformat(str(row[3])),
         )
 
+    def remove_release_check_cursor(self, source: str, artist_local_id: str) -> None:
+        """Forget one artist's success boundary so the next run checks it again."""
+        with self.transaction():
+            self._require_connection().execute(
+                "DELETE FROM release_check_cursors WHERE source = ? AND artist_local_id = ?",
+                (source, artist_local_id),
+            )
+
     def remove_release_check_continuation(self, source: str, artist_local_id: str) -> None:
         """Remove only a continuation that completed with a successful full pass."""
         with self.transaction():
@@ -1968,42 +1976,26 @@ class Catalog:
         )
         return None if row is None else self._release_discovery_from_row(row)
 
-    def list_release_discoveries_without_current_signal(
-        self, *, limit: int
-    ) -> tuple[ReleaseDiscovery, ...]:
-        """List oldest releases whose latest discovered version lacks a signal.
-
-        Deliberately over-inclusive: ``last_seen_at`` advances on every refresh that
-        re-sees the release, including a no-op run where nothing changed, so this can
-        flag a release that already has a signal -- just not one recorded at this exact
-        ``last_seen_at``. Callers must not assume a listed release truly lacks a signal
-        for its current material; ``_repair_missing_signals`` (issue #50) checks that
-        before recording anything, since the content-only ``material_version`` (also
-        #50) is what makes that check reliable across repeated over-inclusive listings.
-        """
-        selected_limit = _bounded_limit(limit)
+    def find_releases_by_source_reference(self, source: str, native_id: str) -> tuple[str, ...]:
+        """List every release carrying the ``(source, native_id)`` reference, in id order."""
+        if type(source) is not str or not source or type(native_id) is not str or not native_id:
+            raise ValueError("source and native_id must be non-empty strings")
         rows = (
             self._require_connection()
             .execute(
                 """
-                SELECT discovery.release_local_id, discovery.source, discovery.provider_native_id,
-                       discovery.normalized_title, discovery.release_date, discovery.material_identity,
-                       discovery.first_seen_at, discovery.last_seen_at
-                FROM release_discoveries AS discovery
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM signals
-                    WHERE signals.kind = 'release'
-                      AND signals.record_local_id = discovery.release_local_id
-                      AND signals.observed_at = discovery.last_seen_at
-                )
-                ORDER BY discovery.first_seen_at ASC, discovery.release_local_id ASC
-                LIMIT ?
+                SELECT DISTINCT mapping.record_local_id
+                FROM record_sources AS mapping
+                JOIN source_references AS reference ON reference.id = mapping.source_reference_id
+                WHERE mapping.record_kind = 'release'
+                  AND reference.source = ? AND reference.native_id = ?
+                ORDER BY mapping.record_local_id
                 """,
-                (selected_limit,),
+                (source, native_id),
             )
             .fetchall()
         )
-        return tuple(self._release_discovery_from_row(row) for row in rows)
+        return tuple(str(row[0]) for row in rows)
 
     def find_release_discovery_variant(
         self,
@@ -2270,9 +2262,9 @@ class Catalog:
     ) -> tuple[EventDiscovery, ...]:
         """List oldest events whose latest discovered version lacks a signal.
 
-        See ``list_release_discoveries_without_current_signal`` (issue #50) for why this
-        is deliberately over-inclusive of already-signalled records and why callers must
-        re-check before recording anything.
+        Deliberately over-inclusive (issue #50): ``last_seen_at`` advances on every refresh
+        that re-sees the event, so an already-signalled event can be listed; callers must
+        re-check the event's current material before recording anything.
         """
         selected_limit = _bounded_limit(limit)
         rows = (
@@ -2441,6 +2433,26 @@ class Catalog:
         )
         return None if row is None else self.get_signal(str(row[0]))
 
+    def find_signal_for_record(
+        self, kind: SignalKind, record_local_id: str, material_version: str
+    ) -> Signal | None:
+        """Find a record's signal for one content version, whichever source recorded it."""
+        if not isinstance(kind, SignalKind):
+            raise ValueError("kind must be a SignalKind")
+        row = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT local_id FROM signals
+                WHERE kind = ? AND record_local_id = ? AND material_version = ?
+                ORDER BY observed_at, local_id LIMIT 1
+                """,
+                (kind.value, record_local_id, material_version),
+            )
+            .fetchone()
+        )
+        return None if row is None else self.get_signal(str(row[0]))
+
     def list_signals(self, kind: SignalKind | None, *, limit: int) -> tuple[Signal, ...]:
         """List signals in stable newest-first order, optionally by closed kind."""
         selected_limit = _bounded_limit(limit)
@@ -2478,37 +2490,12 @@ class Catalog:
             records.append(signal)
         return tuple(records)
 
-    def list_signals_for_record(
-        self, kind: SignalKind, record_local_id: str, *, limit: int
+    def list_signals_without_inbox_entries(
+        self, kind: SignalKind, *, limit: int
     ) -> tuple[Signal, ...]:
-        """List every signal already recorded for one canonical record (issue #50).
-
-        Used by repair to check whether a record already has a signal for its current
-        content under any historical ``material_version`` format, rather than only the
-        one this run's guessed reason would produce.
-        """
-        selected_limit = _bounded_limit(limit)
-        rows = (
-            self._require_connection()
-            .execute(
-                """
-                SELECT local_id FROM signals WHERE kind = ? AND record_local_id = ?
-                ORDER BY observed_at DESC, local_id LIMIT ?
-                """,
-                (kind.value, record_local_id, selected_limit),
-            )
-            .fetchall()
-        )
-        records: list[Signal] = []
-        for row in rows:
-            signal = self.get_signal(str(row[0]))
-            if signal is None:
-                raise sqlite3.IntegrityError("signal disappeared during list")
-            records.append(signal)
-        return tuple(records)
-
-    def list_signals_without_inbox_entries(self, *, limit: int) -> tuple[Signal, ...]:
-        """List oldest signals missing an inbox entry so bounded retries always make progress."""
+        """List oldest signals of one kind that no inbox entry points at, bounded."""
+        if not isinstance(kind, SignalKind):
+            raise ValueError("kind must be a SignalKind")
         selected_limit = _bounded_limit(limit)
         rows = (
             self._require_connection()
@@ -2518,11 +2505,11 @@ class Catalog:
                 FROM signals
                 LEFT JOIN inbox_entries
                     ON inbox_entries.latest_signal_local_id = signals.local_id
-                WHERE inbox_entries.latest_signal_local_id IS NULL
+                WHERE inbox_entries.latest_signal_local_id IS NULL AND signals.kind = ?
                 ORDER BY signals.observed_at ASC, signals.local_id ASC
                 LIMIT ?
                 """,
-                (selected_limit,),
+                (kind.value, selected_limit),
             )
             .fetchall()
         )
@@ -2608,6 +2595,90 @@ class Catalog:
             .fetchone()
         )
         return None if row is None else self.get_inbox_entry(str(row[0]))
+
+    def upsert_inbox_entry(
+        self,
+        kind: SignalKind,
+        subject_local_id: str,
+        latest_signal_local_id: str,
+        *,
+        local_id: str,
+        at: datetime,
+    ) -> InboxEntry:
+        """Insert a subject's one unread inbox entry, or repoint the existing one.
+
+        This is the only inbox insert used by observation writes. On a conflict with the
+        subject's existing entry it moves ``latest_signal_local_id`` and ``updated_at``
+        only: ``state`` is deliberately not in the update list, so a saved item stays
+        saved and a dismissed item stays dismissed when its release changes.
+        """
+        if not isinstance(kind, SignalKind):
+            raise ValueError("kind must be a SignalKind")
+        for name, value in (
+            ("subject_local_id", subject_local_id),
+            ("latest_signal_local_id", latest_signal_local_id),
+            ("local_id", local_id),
+        ):
+            if type(value) is not str or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError("at must be timezone-aware")
+        with self.transaction():
+            signal = self.get_signal(latest_signal_local_id)
+            if signal is None or signal.kind is not kind:
+                raise sqlite3.IntegrityError("inbox signal does not exist")
+            connection = self._require_connection()
+            connection.execute(
+                """
+                INSERT INTO inbox_entries
+                    (local_id, kind, subject_local_id, latest_signal_local_id, state,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'unread', ?, ?)
+                ON CONFLICT (kind, subject_local_id) DO UPDATE SET
+                    latest_signal_local_id = excluded.latest_signal_local_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    local_id,
+                    kind.value,
+                    subject_local_id,
+                    latest_signal_local_id,
+                    _datetime_text(at),
+                    _datetime_text(at),
+                ),
+            )
+            entry = self.get_inbox_entry_for_subject(kind, subject_local_id)
+            if entry is None:
+                raise sqlite3.IntegrityError("inbox entry was not persisted")
+            return entry
+
+    def list_release_subjects_without_inbox_entry(self, *, limit: int) -> tuple[str, ...]:
+        """List one release per release subject that has no inbox entry, oldest first.
+
+        Exact rather than over-inclusive: a subject with an entry in any state is never
+        listed, so the repair pass never touches an item the user already sees or decided.
+        """
+        selected_limit = _bounded_limit(limit)
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT MIN(releases.local_id)
+                FROM releases
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM inbox_entries
+                    WHERE inbox_entries.kind = 'release'
+                      AND inbox_entries.subject_local_id = releases.subject_local_id
+                )
+                GROUP BY releases.subject_local_id
+                ORDER BY MIN(releases.observed_at), MIN(releases.local_id)
+                LIMIT ?
+                """,
+                (selected_limit,),
+            )
+            .fetchall()
+        )
+        return tuple(str(row[0]) for row in rows)
 
     def list_inbox_entries(self, state: InboxState | None, *, limit: int) -> tuple[InboxEntry, ...]:
         """List inbox entries in stable newest-first order, optionally by state."""
