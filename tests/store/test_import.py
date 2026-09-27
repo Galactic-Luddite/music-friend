@@ -391,7 +391,7 @@ def test_accepted_import_text_remains_inert_through_plain_cli_and_mcp(
             "artist-1", WatchlistAction.PIN, datetime(2026, 9, 1, tzinfo=timezone.utc)
         )
     )
-    application.put_signal(
+    application._catalog.put_signal(
         Signal(
             "signal-safe-event",
             SignalKind.EVENT,

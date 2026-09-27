@@ -16,8 +16,9 @@ import io
 import json
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 
 import httpx
@@ -42,6 +43,13 @@ from music_friend.domain import (
     WatchlistOverride,
 )
 from music_friend.mcp import catalog_server
+from music_friend.providers import (
+    Capability,
+    HealthStatus,
+    Page,
+    ProviderCapabilities,
+    ProviderHealth,
+)
 from music_friend.runtimes import cli, mcp_stdio
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
@@ -203,6 +211,7 @@ def _run_refresh(
     *,
     config: LocalConfig | None = None,
     credential_store: object | None = None,
+    now: datetime = NOW,
 ) -> dict[str, object]:
     """Run one refresh through the named shipped entry point; return its public payload."""
     selected_config = LocalConfig() if config is None else config
@@ -218,7 +227,7 @@ def _run_refresh(
                 application=application,
                 config_store=_ConfigStore(selected_config),
                 secret_prompt=lambda _message: "",
-                now=lambda: NOW,
+                now=lambda: now,
                 connector_factory=connector_factory,
                 credential_store_factory=lambda: store,  # type: ignore[arg-type,return-value]
             )
@@ -246,7 +255,7 @@ def _run_refresh(
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mcp_stdio, "create_music_server", create_server)
-        patch.setattr(mcp_stdio, "_utc_now", lambda: NOW)
+        patch.setattr(mcp_stdio, "_utc_now", lambda: now)
         mcp_stdio.run_catalog_stdio_session(
             config=selected_config,
             catalog_path=catalog_path,
@@ -255,6 +264,144 @@ def _run_refresh(
         )
     assert len(captured) == 1
     return catalog_server._refresh_result(captured[0])
+
+
+def _pre_62_release_material(release: Release) -> dict[str, object]:
+    """The release material shape signals were hashed from before issue #62."""
+    return {
+        "artist_refs": release.artist_refs,
+        "date_precision": release.date_precision.value,
+        "release_date": release.release_date.isoformat(),
+        "release_type": release.release_type,
+        "source_refs": tuple(
+            (reference.source, reference.native_id, reference.canonical_url)
+            for reference in release.source_refs
+        ),
+        "title": release.title,
+    }
+
+
+def _pre_53_v1_material_version(
+    kind: SignalKind, material: object, explanation: Explanation, observed_at: datetime
+) -> str:
+    """The exact pre-#53 v1 ``material_version`` a real catalog may still hold."""
+    value = {
+        "kind": kind.value,
+        "material": material,
+        "observed_at": observed_at.isoformat(),
+        "reasons": tuple((reason.kind.value, reason.detail) for reason in explanation.reasons),
+        "version": 1,
+    }
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return f"material:{sha256(encoded.encode('utf-8')).hexdigest()}"
+
+
+def one_release_group_handler() -> Callable[[httpx.Request], httpx.Response]:
+    """A MusicBrainz host that maps artist-0 and always returns one recorded release-group."""
+    live = load_live_release_group_search()
+    one_release_group = live["release-groups"][:1]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "musicbrainz.org"
+        path = request.url.path
+        if path == "/ws/2/url":
+            resources = request.url.params.get_list("resource")
+            urls = [
+                {
+                    "resource": resources[0],
+                    "relations": [{"artist": {"id": LIVE_SEARCH_ARTIST_MBID}}],
+                }
+            ]
+            return httpx.Response(200, json={"url-count": 1, "url-offset": 0, "urls": urls})
+        if path == "/ws/2/release-group":
+            return httpx.Response(
+                200,
+                json={**live, "count": len(one_release_group), "release-groups": one_release_group},
+            )
+        if path.startswith("/ws/2/artist/"):
+            return httpx.Response(200, json={"relations": []})
+        raise AssertionError(f"unexpected MusicBrainz path: {path}")
+
+    return handle
+
+
+def attach_a_second_source(catalog_path: Path) -> Release:
+    """Attach a synthetic Deezer reference to artist-0's one release by a real cross-source
+    discovery merge (issue #42), and return the merged release."""
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        rows = (
+            application._catalog._require_connection()
+            .execute("SELECT local_id FROM releases")
+            .fetchall()
+        )
+        assert len(rows) == 1
+        release = application.get_release(str(rows[0][0]))
+        assert release is not None
+        artist = application.get_artist("artist-0")
+        assert artist is not None
+        application.put_artist(
+            replace(
+                artist,
+                source_refs=artist.source_refs
+                + (SourceReference("deezer", "synthetic-deezer-artist-0", None, NOW),),
+            )
+        )
+        deezer = _SingleReleaseSource(
+            Release(
+                "release:deezer:synthetic-album-0",
+                release.title,
+                release.release_type,
+                release.release_date,
+                release.date_precision,
+                release.artist_refs,
+                (SourceReference("deezer", "synthetic-album-0", None, NOW),),
+                NOW,
+            )
+        )
+        result = application.discover_releases("deezer", deezer, checked_at=NOW)
+        assert result.artists[0].candidates == ()
+        merged = application.get_release(release.local_id)
+        assert merged is not None
+        assert {reference.source for reference in merged.source_refs} == {"musicbrainz", "deezer"}
+        assert application.get_release("release:deezer:synthetic-album-0") is None
+        return merged
+    finally:
+        application.close()
+
+
+class _SingleReleaseSource:
+    """A release source that returns one fixed release for any artist."""
+
+    def __init__(self, release: Release) -> None:
+        self.release = release
+
+    def capabilities(self) -> ProviderCapabilities:
+        allowed = frozenset(Capability)
+        return ProviderCapabilities(allowed, allowed)
+
+    def health(self) -> ProviderHealth:
+        return ProviderHealth(HealthStatus.HEALTHY, self.capabilities())
+
+    def search_artists(self, _query: str, _limit: int) -> Page[Artist]:
+        raise AssertionError("unused")
+
+    def followed_artists(self, _cursor: str | None = None) -> Page[Artist]:
+        raise AssertionError("unused")
+
+    def saved_items(self, _cursor: str | None = None) -> object:
+        raise AssertionError("unused")
+
+    def top_items(self, _time_range: str, _limit: int) -> object:
+        raise AssertionError("unused")
+
+    def top_artists(self, _time_range: str, _limit: int) -> Page[Artist]:
+        raise AssertionError("unused")
+
+    def recent_releases(
+        self, _artist_refs: object, _since: datetime, _cursor: str | None = None
+    ) -> Page[Release]:
+        return Page((self.release,), None)
 
 
 def _metrics(payload: dict[str, object]) -> dict[str, int]:
@@ -853,14 +1000,14 @@ def test_v1_signal_upgrade_safety_creates_no_duplicate_and_preserves_inbox_state
         # 2. Downgrade this real signal to the exact v1 hash the pre-#53 base branch
         #    would have produced for it -- same reason/material/observed_at, only the
         #    hash formula changes (v1 includes observed_at; v2 does not).
-        material = refresh_module._release_material(release)
+        material = _pre_62_release_material(release)
         explanation = Explanation(
             (
                 ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist.display_name),
                 ExplanationReason(ExplanationReasonKind.NEW_RELEASE, release.title),
             )
         )
-        legacy_material_version = refresh_module._legacy_v1_material_version(
+        legacy_material_version = _pre_53_v1_material_version(
             SignalKind.RELEASE, material, explanation, seeded_signal.observed_at
         )
         connection = application._catalog._require_connection()
@@ -916,13 +1063,13 @@ def test_re_observed_release_never_reopens_a_decided_inbox_entry_through_cli(
 
     Proved through ``cli.run_cli`` (``music-friend refresh releases``), the shipped entry
     point, against the same recorded MusicBrainz fixture the sibling tests in this file
-    use. The literal cross-provider-attach case is already fully deduped upstream with
-    zero release-discovery candidates (see
-    ``test_cross_source_release_discovery_merges_into_one_release_with_two_source_refs``
-    in ``tests/tools/test_release_discovery.py``), so it cannot reach the code path this
-    fix touches. The reachable regression is a genuine material change -- a title edit
-    the fold logic does not absorb, picked up on a later run -- against an already-decided
-    subject; that is what this test exercises.
+    use. This test covers a genuine *content* change -- a title edit the fold logic does
+    not absorb, picked up on a later run -- against an already-decided subject: it gets a
+    new ``updated_release`` signal and the one entry is repointed at it, state unchanged.
+    The provenance case -- a second source attached to a decided release, followed by a
+    refresh whose repair pass actually runs -- is covered separately by
+    ``test_second_source_on_a_decided_release_survives_repair_through_cli``, where no new
+    signal may be created at all because the content did not change.
     """
     catalog_path = tmp_path / "catalog.sqlite3"
     _seed(catalog_path, count=1)
@@ -1020,3 +1167,91 @@ def test_re_observed_release_never_reopens_a_decided_inbox_entry_through_cli(
         assert entry.latest_signal_local_id in {signal.local_id for signal in signals}
     finally:
         application.close()
+
+
+@pytest.mark.parametrize("decided", [InboxState.DISMISSED, InboxState.SAVED])
+def test_second_source_on_a_decided_release_survives_repair_through_cli(
+    clock: FakeClock, tmp_path: Path, decided: InboxState
+) -> None:
+    """Issue #57 regression through ``music-friend refresh releases --json``.
+
+    A release the user decided gets a second source through a real cross-source merge. An
+    earlier interrupted run also left a second release committed without its signal, so the
+    next refresh's repair pass genuinely executes (it repairs that orphan). The decided
+    release must keep exactly one inbox entry with its state, gain no new signal (its
+    content did not change), and the run must succeed without an IntegrityError.
+    """
+    catalog_path = tmp_path / "catalog.sqlite3"
+    _seed(catalog_path, count=1)
+    handle = one_release_group_handler()
+    first = _run_refresh("cli", "releases", catalog_path, lambda: httpx.MockTransport(handle))
+    assert first["status"] == "succeeded"
+    assert _metrics(first)["signals_created"] == 1
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        (entry,) = application.list_inbox_entries(None, limit=10)
+        refresh_module.update_inbox_state(application, entry.local_id, decided, updated_at=NOW)
+        (decided_entry,) = application.list_inbox_entries(None, limit=10)
+    finally:
+        application.close()
+    merged = attach_a_second_source(catalog_path)
+    with Catalog.open(catalog_path) as catalog:
+        orphan = Release(
+            "release:synthetic-orphan",
+            "Synthetic Orphan Release",
+            "album",
+            date(2026, 8, 31),
+            ReleaseDatePrecision.DAY,
+            ("artist-0",),
+            (SourceReference("musicbrainz", "synthetic-orphan", None, NOW),),
+            NOW,
+        )
+        catalog.put_release(orphan)
+        catalog.put_release_discovery(
+            ReleaseDiscovery(
+                orphan.local_id,
+                "musicbrainz",
+                "synthetic-orphan",
+                "synthetic orphan release",
+                orphan.release_date,
+                "release:synthetic-orphan-material",
+                NOW,
+                NOW,
+            )
+        )
+        signals_before = catalog.list_signals(SignalKind.RELEASE, limit=10)
+
+    second = _run_refresh(
+        "cli",
+        "releases",
+        catalog_path,
+        lambda: httpx.MockTransport(handle),
+        now=NOW + timedelta(days=21),
+    )
+
+    metrics = _metrics(second)
+    assert second["status"] == "succeeded"
+    assert metrics["signals_repaired"] == 1
+    assert metrics.get("signals_created", 0) == 0
+    assert metrics.get("failures", 0) == 0
+    with Catalog.open(catalog_path) as catalog:
+        entries = catalog.list_inbox_entries(None, limit=10)
+        merged_entries = [
+            item for item in entries if item.subject_local_id == merged.subject_local_id
+        ]
+        assert len(merged_entries) == 1
+        assert merged_entries[0].local_id == decided_entry.local_id
+        assert merged_entries[0].state is decided
+        assert merged_entries[0].latest_signal_local_id == decided_entry.latest_signal_local_id
+        assert merged_entries[0].updated_at == decided_entry.updated_at
+        signals_after = catalog.list_signals(SignalKind.RELEASE, limit=10)
+        assert [
+            signal for signal in signals_after if signal.record_local_id == merged.local_id
+        ] == [signal for signal in signals_before if signal.record_local_id == merged.local_id]
+        assert len(signals_after) == len(signals_before) + 1
+        orphan_entry = catalog.get_inbox_entry_for_subject(SignalKind.RELEASE, orphan.local_id)
+        assert orphan_entry is not None and orphan_entry.state is InboxState.UNREAD
+        stored = catalog.get_release(merged.local_id)
+        assert stored is not None
+        assert {reference.source for reference in stored.source_refs} == {"musicbrainz", "deezer"}

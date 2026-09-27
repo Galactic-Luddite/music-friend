@@ -285,7 +285,19 @@ def _persist_artist_releases(
                 raise ValueError("stored release discovery target is missing")
             if existing.release_local_id != persisted.local_id:
                 raise ValueError("source release identity conflicts with stored state")
-            catalog.put_release(persisted)
+            # Keep every other source's reference: re-observing a release from one source
+            # must never drop provenance another source attached (issue #62).
+            catalog.put_release(
+                replace(
+                    persisted,
+                    source_refs=persisted.source_refs
+                    + tuple(
+                        reference
+                        for reference in existing_release.source_refs
+                        if reference.source != source_name
+                    ),
+                )
+            )
             catalog.put_release_discovery(
                 ReleaseDiscovery(
                     persisted.local_id,

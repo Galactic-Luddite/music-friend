@@ -23,7 +23,6 @@ from music_friend.domain import (
     LocalPreferenceKey,
     RefreshRun,
     Release,
-    ReleaseDiscovery,
     ReleaseDiscoveryResult,
     Signal,
     SignalKind,
@@ -123,11 +122,6 @@ class MusicFriendApplication:
 
     def get_release(self, local_id: str) -> Release | None:
         return self._catalog.get_release(local_id)
-
-    def list_release_discoveries_without_current_signal(
-        self, *, limit: int
-    ) -> tuple[ReleaseDiscovery, ...]:
-        return self._catalog.list_release_discoveries_without_current_signal(limit=limit)
 
     def put_event(self, event: Event) -> None:
         self._catalog.put_event(event)
@@ -278,31 +272,16 @@ class MusicFriendApplication:
     def get_source_limit(self, source: str) -> SourceLimitObservation | None:
         return self._catalog.get_source_limit(source)
 
-    def put_signal(self, signal: Signal) -> None:
-        self._catalog.put_signal(signal)
-
     def get_signal(self, local_id: str) -> Signal | None:
         return self._catalog.get_signal(local_id)
-
-    def find_signal(
-        self,
-        provider: str,
-        kind: SignalKind,
-        provider_native_id: str,
-        material_version: str,
-    ) -> Signal | None:
-        return self._catalog.find_signal(provider, kind, provider_native_id, material_version)
 
     def list_signals(self, kind: SignalKind | None, *, limit: int) -> tuple[Signal, ...]:
         return self._catalog.list_signals(kind, limit=limit)
 
-    def list_signals_for_record(
-        self, kind: SignalKind, record_local_id: str, *, limit: int
+    def list_signals_without_inbox_entries(
+        self, kind: SignalKind, *, limit: int
     ) -> tuple[Signal, ...]:
-        return self._catalog.list_signals_for_record(kind, record_local_id, limit=limit)
-
-    def list_signals_without_inbox_entries(self, *, limit: int) -> tuple[Signal, ...]:
-        return self._catalog.list_signals_without_inbox_entries(limit=limit)
+        return self._catalog.list_signals_without_inbox_entries(kind, limit=limit)
 
     def put_inbox_entry(self, entry: InboxEntry) -> None:
         self._catalog.put_inbox_entry(entry)

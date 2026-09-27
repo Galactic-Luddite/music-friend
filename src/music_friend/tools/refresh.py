@@ -9,9 +9,8 @@ import sys
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 from pathlib import Path
 from typing import NoReturn, TypeVar
 from uuid import uuid4
@@ -40,7 +39,6 @@ from music_friend.domain import (
     RefreshSummary,
     Release,
     ReleaseCandidate,
-    ReleaseDiscovery,
     ReleaseDiscoveryResult,
     ReleaseDiscoveryStatus,
     Signal,
@@ -52,6 +50,7 @@ from music_friend.domain import (
     SourceReference,
     SyncCapabilityStatus,
 )
+from music_friend.domain.observations import ReleaseObservation
 from music_friend.errors import QuotaExhaustedError, RateLimitedError
 from music_friend.providers import MusicSource, Page, ProviderCapabilities, ProviderHealth
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
@@ -66,8 +65,16 @@ from music_friend.tools.release_discovery import (
     _ReleaseDiscoveryInterrupted,
     _SourceCallStopped,
 )
+from music_friend.tools.release_observation import (
+    digest,
+    fingerprint,
+    inbox_id,
+    record_release_observation,
+    signal_id,
+)
 
 _DEADLINE_SECONDS = 600
+_PENDING_MATERIAL = "release:pending-observation"
 _LOCK_STALE_AFTER = timedelta(seconds=_DEADLINE_SECONDS)
 #: Spotify's pause budget: an adaptive source that keeps hitting limits after two
 #: short pauses is treated as genuinely rate-limited for this run, not transiently
@@ -631,7 +638,7 @@ def refresh_once(
             else _DeadlineEventClient(event_client, started_monotonic, clock)
         )
         counts = _RefreshCounts()
-        _repair_missing_signals(application, counts)
+        _repair_missing_signals(application, counts, config.release_sources)
         _repair_inbox_entries(application, checked_at, counts)
         run_id = _run_id()
         deadline_exceeded = False
@@ -649,7 +656,12 @@ def refresh_once(
                 if limited_release_source is None or release_source_name is None:
                     raise AssertionError("release refresh requires a release_source")
                 _run_releases(
-                    application, release_source_name, limited_release_source, checked_at, counts
+                    application,
+                    release_source_name,
+                    limited_release_source,
+                    checked_at,
+                    counts,
+                    config.release_sources,
                 )
                 if limited_release_source.stopped:
                     break
@@ -660,6 +672,7 @@ def refresh_once(
                             additional_release_sources,
                             checked_at,
                             counts,
+                            config.release_sources,
                             started_monotonic=started_monotonic,
                             clock=clock,
                             sleep=sleep,
@@ -869,6 +882,7 @@ def _run_releases(
     source: _PacedSource,
     checked_at: datetime,
     counts: _RefreshCounts,
+    release_sources: tuple[str, ...],
 ) -> None:
     # Run identity mapping before release discovery if using MusicBrainz, through the
     # same paced wrapper as recent_releases so mapping requests count toward the same
@@ -909,9 +923,11 @@ def _run_releases(
     except _ReleaseDiscoveryInterrupted as interrupted:
         _count_releases(
             application,
+            source_name,
             ReleaseDiscoveryResult(interrupted.completed),
             checked_at,
             counts,
+            release_sources,
         )
         counts.release_source_unmapped += interrupted.unmapped
         observed_at = (
@@ -933,7 +949,7 @@ def _run_releases(
         counts.failures += 1
         return
     counts.release_source_unmapped += result.unmapped
-    _count_releases(application, result, checked_at, counts)
+    _count_releases(application, source_name, result, checked_at, counts, release_sources)
     if any(artist.status is ReleaseDiscoveryStatus.FAILED for artist in result.artists):
         return
     application.remove_source_cursor(source_name, SourceCapability.RECENT_RELEASES)
@@ -945,6 +961,7 @@ def _run_additional_release_sources(
     additional_release_sources: Sequence[tuple[str, MusicSource]],
     checked_at: datetime,
     counts: _RefreshCounts,
+    release_sources: tuple[str, ...],
     *,
     started_monotonic: float,
     clock: Callable[[], float],
@@ -978,7 +995,7 @@ def _run_additional_release_sources(
         )
         used.append(paced_extra)
         try:
-            _run_releases(application, extra_name, paced_extra, checked_at, counts)
+            _run_releases(application, extra_name, paced_extra, checked_at, counts, release_sources)
         except Exception:
             counts.partial_sources.append(extra_name)
             continue
@@ -993,9 +1010,11 @@ def _run_additional_release_sources(
 
 def _count_releases(
     application: MusicFriendApplication,
+    source_name: str,
     result: ReleaseDiscoveryResult,
     checked_at: datetime,
     counts: _RefreshCounts,
+    release_sources: tuple[str, ...],
 ) -> None:
     for artist_result in result.artists:
         counts.records_seen += artist_result.records_seen
@@ -1005,7 +1024,14 @@ def _count_releases(
         counts.successes += 1
         if artist_result.status is ReleaseDiscoveryStatus.PARTIAL:
             counts.records_skipped += 1
-        _record_release_candidates(application, artist_result.candidates, checked_at, counts)
+        _record_release_candidates(
+            application,
+            source_name,
+            artist_result.candidates,
+            checked_at,
+            counts,
+            release_sources,
+        )
 
 
 def _run_events(
@@ -1062,32 +1088,58 @@ def _count_events(
 
 def _record_release_candidates(
     application: MusicFriendApplication,
+    source_name: str,
     candidates: tuple[ReleaseCandidate, ...],
     checked_at: datetime,
     counts: _RefreshCounts,
+    release_sources: tuple[str, ...],
 ) -> None:
+    """Record each discovered release through the single write path (issue #62)."""
     for candidate in candidates:
         if candidate.kind.value == "new":
             counts.records_created += 1
-            reason = ExplanationReasonKind.NEW_RELEASE
         else:
             counts.records_updated += 1
-            reason = ExplanationReasonKind.UPDATED_RELEASE
         try:
-            _record_candidate(
-                application,
-                kind=SignalKind.RELEASE,
-                record_local_id=candidate.release.local_id,
-                artist_local_id=candidate.artist_local_id,
-                provider_reference=candidate.release.source_refs,
-                reason=reason,
-                detail=candidate.release.title,
-                material=_release_material(candidate.release),
-                checked_at=checked_at,
-                counts=counts,
+            reference = _single_reference(candidate.release.source_refs)
+            outcome = record_release_observation(
+                application._catalog,
+                ReleaseObservation(
+                    release=candidate.release,
+                    source=reference.source,
+                    native_id=reference.native_id,
+                    monitored_artist_local_id=candidate.artist_local_id,
+                    observed_at=checked_at,
+                ),
+                release_sources=release_sources,
             )
         except Exception:
             counts.failures += 1
+            try:
+                _retry_candidate_next_run(application, candidate, source_name)
+            except Exception:
+                counts.failures += 1
+            continue
+        if outcome.signal_created:
+            counts.signals_created += 1
+
+
+def _retry_candidate_next_run(
+    application: MusicFriendApplication, candidate: ReleaseCandidate, source_name: str
+) -> None:
+    """Make the next run re-emit a candidate whose observation could not be recorded.
+
+    Discovery commits before recording. Resetting the stored material identity makes the
+    next sighting of the release a candidate again, and forgetting the artist's success
+    cursor makes the next run check the artist even inside the freshness window, so a
+    transient write failure is retried through the single write path, not forgotten.
+    """
+    catalog = application._catalog
+    for reference in _source_references(candidate.release.source_refs, source_name):
+        discovery = catalog.get_release_discovery_by_provider(source_name, reference.native_id)
+        if discovery is not None:
+            catalog.put_release_discovery(replace(discovery, material_identity=_PENDING_MATERIAL))
+    catalog.remove_release_check_cursor(source_name, candidate.artist_local_id)
 
 
 def _record_event_candidates(
@@ -1102,15 +1154,11 @@ def _record_event_candidates(
         else:
             counts.records_updated += 1
         try:
-            _record_candidate(
+            _record_event_candidate(
                 application,
-                kind=SignalKind.EVENT,
-                record_local_id=candidate.event.local_id,
+                event=candidate.event,
+                reference=_single_reference(candidate.event.source_refs),
                 artist_local_id=candidate.artist_local_id,
-                provider_reference=candidate.event.source_refs,
-                reason=ExplanationReasonKind.UPCOMING_EVENT,
-                detail=candidate.event.title,
-                material=_event_material(candidate.event),
                 checked_at=checked_at,
                 counts=counts,
             )
@@ -1118,83 +1166,54 @@ def _record_event_candidates(
             counts.failures += 1
 
 
-def _record_candidate(
+def _record_event_candidate(
     application: MusicFriendApplication,
     *,
-    kind: SignalKind,
-    record_local_id: str,
+    event: Event,
+    reference: SourceReference,
     artist_local_id: str,
-    provider_reference: tuple[SourceReference, ...],
-    reason: ExplanationReasonKind,
-    detail: str,
-    material: object,
     checked_at: datetime,
     counts: _RefreshCounts,
     repair: bool = False,
 ) -> None:
-    reference = _single_reference(provider_reference)
+    """Record one event signal; the event's own id is its inbox subject."""
+    catalog = application._catalog
     artist = application.get_artist(artist_local_id)
     if artist is None:
         raise ValueError("candidate artist does not exist")
     explanation = Explanation(
         (
             ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist.display_name),
-            ExplanationReason(reason, detail),
+            ExplanationReason(ExplanationReasonKind.UPCOMING_EVENT, event.title),
         )
     )
-    material_version = _material_version(kind, material, explanation)
-    existing = application.find_signal(
-        reference.source,
-        kind,
-        reference.native_id,
-        material_version,
+    material_version = _event_material_version(_event_material(event), explanation)
+    existing = catalog.find_signal(
+        reference.source, SignalKind.EVENT, reference.native_id, material_version
     )
     if existing is not None:
         return
     signal = Signal(
-        _signal_id(reference.source, kind, reference.native_id, material_version),
-        kind,
-        record_local_id,
+        signal_id(reference.source, SignalKind.EVENT, reference.native_id, material_version),
+        SignalKind.EVENT,
+        event.local_id,
         reference.source,
         reference.native_id,
-        _fingerprint(reference.source, kind, reference.native_id),
+        fingerprint(reference.source, SignalKind.EVENT, reference.native_id),
         material_version,
         explanation,
         checked_at,
     )
-    application.put_signal(signal)
-    subject_local_id = _subject_local_id_for(application, kind, record_local_id)
-    existing_entry = application.get_inbox_entry_for_subject(kind, subject_local_id)
-    if existing_entry is None:
-        application.put_inbox_entry(
-            InboxEntry(
-                _inbox_id(signal.local_id),
-                kind,
-                subject_local_id,
-                signal.local_id,
-                InboxState.UNREAD,
-                checked_at,
-                checked_at,
-            )
-        )
-    elif not repair:
-        # The subject already has its one inbox entry (schema-enforced). A new signal for it
-        # only repoints latest_signal_local_id and updated_at at the new signal; it never
-        # changes state. Re-observation never changes state: material_version still includes
-        # provenance (content-digest exclusion is issue B/#62's job), so a cross-source signal
-        # for an already-decided subject is not evidence the user's decision should be
-        # reopened -- flipping a dismissed/saved item back to unread on a routine refresh is
-        # exactly the #57 duplicate-inbox regression this issue exists to close.
-        application.put_inbox_entry(
-            InboxEntry(
-                existing_entry.local_id,
-                kind,
-                subject_local_id,
-                signal.local_id,
-                existing_entry.state,
-                existing_entry.created_at,
-                checked_at,
-            )
+    catalog.put_signal(signal)
+    # A new sighting repoints the event's one entry (state untouched); a repair only
+    # fills a missing entry and never repoints an existing one.
+    if not repair or catalog.get_inbox_entry_for_subject(SignalKind.EVENT, event.local_id) is None:
+        catalog.upsert_inbox_entry(
+            SignalKind.EVENT,
+            event.local_id,
+            signal.local_id,
+            local_id=inbox_id(signal.local_id),
+            at=checked_at,
         )
     if repair:
         counts.signals_repaired += 1
@@ -1207,175 +1226,81 @@ def _repair_inbox_entries(
     checked_at: datetime,
     counts: _RefreshCounts,
 ) -> None:
-    """Restore unread inbox entries from the bounded set that is actually missing them."""
-    for signal in application.list_signals_without_inbox_entries(limit=500):
-        inbox_id = _inbox_id(signal.local_id)
+    """Restore unread event inbox entries from the bounded set that is actually missing them.
+
+    Release subjects are repaired by ``_repair_missing_signals`` through the single write
+    path; a release signal that no entry points at is normal content history, not a gap.
+    """
+    catalog = application._catalog
+    for signal in catalog.list_signals_without_inbox_entries(SignalKind.EVENT, limit=500):
         try:
-            subject_local_id = _subject_local_id_for(
-                application, signal.kind, signal.record_local_id
-            )
-            if application.get_inbox_entry_for_subject(signal.kind, subject_local_id) is not None:
+            if catalog.get_inbox_entry_for_subject(signal.kind, signal.record_local_id) is not None:
                 continue
-            application.put_inbox_entry(
-                InboxEntry(
-                    inbox_id,
-                    signal.kind,
-                    subject_local_id,
-                    signal.local_id,
-                    InboxState.UNREAD,
-                    checked_at,
-                    checked_at,
-                )
+            catalog.upsert_inbox_entry(
+                signal.kind,
+                signal.record_local_id,
+                signal.local_id,
+                local_id=inbox_id(signal.local_id),
+                at=checked_at,
             )
         except Exception:
             counts.failures += 1
 
 
-def _subject_local_id_for(
-    application: MusicFriendApplication, kind: SignalKind, record_local_id: str
-) -> str:
-    """Resolve a signal's target record to its inbox subject.
+def _repair_missing_signals(
+    application: MusicFriendApplication,
+    counts: _RefreshCounts,
+    release_sources: tuple[str, ...],
+) -> None:
+    """Record releases and events that an interrupted run committed without a signal.
 
-    Events are 1:1 with their subject (the subject id is the event id). A release's
-    subject defaults to its own local_id unless it was explicitly joined to another
-    subject by a reviewed merge (issue D).
+    Releases: every release subject without an inbox entry is re-observed from its stored
+    state through ``record_release_observation``. A subject that already has an entry, in
+    any state, is never listed, so a second run finds nothing to do.
     """
-    if kind is SignalKind.EVENT:
-        return record_local_id
-    release = application.get_release(record_local_id)
-    if release is None:
-        raise ValueError("release does not exist")
-    return release.subject_local_id or release.local_id
-
-
-def _repair_missing_signals(application: MusicFriendApplication, counts: _RefreshCounts) -> None:
-    """Reconstruct bounded initial signals after discovery committed before their signal write.
-
-    ``list_release_discoveries_without_current_signal`` is deliberately over-inclusive
-    (issue #50): it also lists a release that already has a signal for its current
-    content, just recorded at an earlier ``last_seen_at`` than the discovery's latest
-    touch (true of every no-op refresh on an already-seen release). Recording a signal
-    here always guesses the candidate's reason from ``first_seen_at == last_seen_at``,
-    which is only accurate the first time a discovery is ever touched -- on a later
-    no-op touch it guesses ``UPDATED_RELEASE`` even though the original signal (created
-    outside repair, on first discovery) was recorded as ``NEW_RELEASE``. Since the
-    reason feeds ``material_version``, that guess mismatch alone used to make every
-    repair pass write a fresh, wrongly-reasoned duplicate signal for an unchanged
-    release. ``_release_repair_already_recorded`` checks both possible reasons' exact
-    material_version against the store before writing, so an unchanged release's repair
-    is always a genuine no-op, while a release whose material really did change (and
-    whose signal write for that change failed) still gets recorded correctly.
-    """
-    for release_discovery in application.list_release_discoveries_without_current_signal(limit=500):
-        release = application.get_release(release_discovery.release_local_id)
-        if release is None or not release.artist_refs:
+    catalog = application._catalog
+    for release_local_id in catalog.list_release_subjects_without_inbox_entry(limit=500):
+        release = catalog.get_release(release_local_id)
+        if release is None or not release.artist_refs or not release.source_refs:
             counts.failures += 1
             continue
+        reference = release.source_refs[0]
         try:
-            if _release_repair_already_recorded(application, release, release_discovery):
-                continue
-            _record_candidate(
-                application,
-                kind=SignalKind.RELEASE,
-                record_local_id=release.local_id,
-                artist_local_id=release.artist_refs[0],
-                provider_reference=_source_references(
-                    release.source_refs, release_discovery.source
+            outcome = record_release_observation(
+                catalog,
+                ReleaseObservation(
+                    release=release,
+                    source=reference.source,
+                    native_id=reference.native_id,
+                    monitored_artist_local_id=release.artist_refs[0],
+                    observed_at=release.observed_at,
                 ),
-                reason=(
-                    ExplanationReasonKind.NEW_RELEASE
-                    if release_discovery.first_seen_at == release_discovery.last_seen_at
-                    else ExplanationReasonKind.UPDATED_RELEASE
-                ),
-                detail=release.title,
-                material=_release_material(release),
-                checked_at=release_discovery.last_seen_at,
-                counts=counts,
-                repair=True,
+                release_sources=release_sources,
             )
         except Exception:
             counts.failures += 1
-    for event_discovery in application.list_event_discoveries_without_current_signal(limit=500):
-        event = application.get_event(event_discovery.event_local_id)
+            continue
+        if outcome.kind == "created":
+            counts.signals_repaired += 1
+    for event_discovery in catalog.list_event_discoveries_without_current_signal(limit=500):
+        event = catalog.get_event(event_discovery.event_local_id)
         if event is None:
             counts.failures += 1
             continue
         try:
-            _record_candidate(
+            _record_event_candidate(
                 application,
-                kind=SignalKind.EVENT,
-                record_local_id=event.local_id,
+                event=event,
+                reference=_single_reference(
+                    _source_references(event.source_refs, event_discovery.source)
+                ),
                 artist_local_id=event_discovery.artist_local_id,
-                provider_reference=_source_references(event.source_refs, event_discovery.source),
-                reason=ExplanationReasonKind.UPCOMING_EVENT,
-                detail=event.title,
-                material=_event_material(event),
                 checked_at=event_discovery.last_seen_at,
                 counts=counts,
                 repair=True,
             )
         except Exception:
             counts.failures += 1
-
-
-def _release_repair_already_recorded(
-    application: MusicFriendApplication,
-    release: Release,
-    release_discovery: ReleaseDiscovery,
-) -> bool:
-    """Check whether a signal for this release's current content already exists.
-
-    Tries both reasons a normal (non-repair) candidate could have used --
-    ``NEW_RELEASE`` and ``UPDATED_RELEASE`` -- since repair cannot know which one the
-    original, successfully-recorded signal used (see ``_repair_missing_signals``). If
-    either produces the current (v2, content-only) ``material_version`` the store
-    already has, the release's current content is already signaled.
-
-    Also checks the pre-#50 v1 shape (issue #50 upgrade safety): a real catalog already
-    holds signals written before this fix, whose ``material_version`` baked in the
-    original write's ``observed_at``. Recomputing v1 with a *guessed* timestamp cannot
-    work, so instead this replays the v1 formula against every signal already recorded
-    for this record, using that signal's own stored ``observed_at`` -- the exact value
-    that would have been hashed when it was written -- and both reasons. A match proves
-    that existing row already covers this content, whatever its explanation says.
-    """
-    reference = _single_reference(_source_references(release.source_refs, release_discovery.source))
-    artist = application.get_artist(release.artist_refs[0])
-    artist_name = "" if artist is None else artist.display_name
-    material = _release_material(release)
-    reasons = (ExplanationReasonKind.NEW_RELEASE, ExplanationReasonKind.UPDATED_RELEASE)
-    for reason in reasons:
-        explanation = Explanation(
-            (
-                ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist_name),
-                ExplanationReason(reason, release.title),
-            )
-        )
-        material_version = _material_version(SignalKind.RELEASE, material, explanation)
-        if (
-            application.find_signal(
-                reference.source, SignalKind.RELEASE, reference.native_id, material_version
-            )
-            is not None
-        ):
-            return True
-    existing_signals = application.list_signals_for_record(
-        SignalKind.RELEASE, release.local_id, limit=500
-    )
-    for existing in existing_signals:
-        for reason in reasons:
-            explanation = Explanation(
-                (
-                    ExplanationReason(ExplanationReasonKind.MONITORED_ARTIST, artist_name),
-                    ExplanationReason(reason, release.title),
-                )
-            )
-            legacy_version = _legacy_v1_material_version(
-                SignalKind.RELEASE, material, explanation, existing.observed_at
-            )
-            if legacy_version == existing.material_version:
-                return True
-    return False
 
 
 def _single_reference(references: tuple[SourceReference, ...]) -> SourceReference:
@@ -1391,71 +1316,15 @@ def _source_references(
     return tuple(reference for reference in references if reference.source == source)
 
 
-def _material_version(
-    kind: SignalKind,
-    material: object,
-    explanation: Explanation,
-) -> str:
-    """Compute a content-only identity for one candidate's material.
-
-    Deliberately excludes the run's ``checked_at``/``observed_at`` timestamp (issue #50):
-    that value changes on every refresh, so including it made every run's material_version
-    unique regardless of whether the underlying release or event actually changed. Combined
-    with the missing-signal repair pass in ``_repair_missing_signals`` (which re-records a
-    candidate whenever a discovery's ``last_seen_at`` was touched without a signal at that
-    exact timestamp -- true on every no-op run once a discovery has been seen more than
-    once), that made ``find_signal``'s de-dup lookup useless: a same-source repeat of an
-    unchanged release created a fresh signal and inbox item every run. Keeping this a
-    content-only digest lets ``find_signal`` recognize the repeat and no-op, whether the
-    duplicate signal write comes from the normal candidate path or from repair.
-    """
+def _event_material_version(material: object, explanation: Explanation) -> str:
+    """Content-only identity for one event candidate (unchanged since issue #50)."""
     value = {
-        "kind": kind.value,
+        "kind": SignalKind.EVENT.value,
         "material": material,
         "reasons": tuple((reason.kind.value, reason.detail) for reason in explanation.reasons),
         "version": 2,
     }
-    return f"material:{_digest(value)}"
-
-
-def _legacy_v1_material_version(
-    kind: SignalKind,
-    material: object,
-    explanation: Explanation,
-    observed_at: datetime,
-) -> str:
-    """Reproduce the pre-#50 ``material_version`` hash exactly (issue #50 upgrade safety).
-
-    Real catalogs already hold signals written with this v1 shape (``observed_at``
-    included, ``"version": 1``) before ``_material_version`` above was made
-    content-only. ``_release_repair_already_recorded`` replays this against each
-    existing signal's own stored ``observed_at`` to recognize a v1-format signal as
-    already covering the release's current content, so upgrading to v2 never causes a
-    repair pass to treat a real catalog's existing signals as missing and re-record
-    them as duplicates.
-    """
-    value = {
-        "kind": kind.value,
-        "material": material,
-        "observed_at": observed_at.isoformat(),
-        "reasons": tuple((reason.kind.value, reason.detail) for reason in explanation.reasons),
-        "version": 1,
-    }
-    return f"material:{_digest(value)}"
-
-
-def _release_material(release: Release) -> dict[str, object]:
-    return {
-        "artist_refs": release.artist_refs,
-        "date_precision": release.date_precision.value,
-        "release_date": release.release_date.isoformat(),
-        "release_type": release.release_type,
-        "source_refs": tuple(
-            (reference.source, reference.native_id, reference.canonical_url)
-            for reference in release.source_refs
-        ),
-        "title": release.title,
-    }
+    return f"material:{digest(value)}"
 
 
 def _event_material(event: Event) -> dict[str, object]:
@@ -1474,27 +1343,8 @@ def _event_material(event: Event) -> dict[str, object]:
     }
 
 
-def _fingerprint(provider: str, kind: SignalKind, provider_native_id: str) -> str:
-    return f"signal:{_digest((provider, kind.value, provider_native_id))}"
-
-
-def _signal_id(
-    provider: str, kind: SignalKind, provider_native_id: str, material_version: str
-) -> str:
-    return f"mf:{_digest((provider, kind.value, provider_native_id, material_version))}"
-
-
-def _inbox_id(signal_local_id: str) -> str:
-    return f"inbox:{_digest(signal_local_id)}"
-
-
 def _run_id() -> str:
     return f"refresh:{uuid4()}"
-
-
-def _digest(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _status(counts: _RefreshCounts) -> RefreshStatus:

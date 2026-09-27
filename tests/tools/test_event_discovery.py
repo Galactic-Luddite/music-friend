@@ -14,6 +14,9 @@ from music_friend.domain import (
     EventCandidateKind,
     EventDiscoveryStatus,
     IdentityConfidence,
+    RefreshMetricKind,
+    RefreshRun,
+    SignalKind,
     SourceReference,
 )
 from music_friend.providers.ticketmaster import (
@@ -25,6 +28,7 @@ from music_friend.providers.ticketmaster.transport import TicketmasterTransport
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools.event_discovery import discover_ticketmaster_events
+from music_friend.tools.refresh import refresh_once
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
@@ -565,3 +569,48 @@ def test_discover_ticketmaster_events_rejects_invalid_inputs(tmp_path: Path) -> 
                 client=client,
                 checked_at=NOW.replace(tzinfo=None),
             )
+
+
+def test_event_reobservation_is_unchanged(tmp_path: Path) -> None:
+    """Issue #62: an event's inbox subject is its own id, and re-observing it with the same
+    content (after the six-hour cache expires) records nothing new and leaves the entry as
+    it was."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        client = FakeTicketmasterClient()
+        client.attractions["One"] = (_attraction("attraction-1", "One"),)
+        client.events["attraction-1"] = (_event("event-1"),)
+
+        def run(at: datetime) -> RefreshRun:
+            invocation = refresh_once(
+                application,
+                kind="events",
+                source_name="spotify",
+                source=None,
+                config=_config(),
+                event_client=client,  # type: ignore[arg-type]
+                checked_at=at,
+                lock_path=tmp_path / "lock",
+            )
+            assert invocation.run is not None
+            return invocation.run
+
+        first = run(NOW)
+        (entry,) = application.list_inbox_entries(None, limit=10)
+        (signal,) = application.list_signals(SignalKind.EVENT, limit=10)
+        second = run(NOW + timedelta(hours=7))
+
+        def metric(run_record: RefreshRun, kind: RefreshMetricKind) -> int:
+            return {item.kind: item.count for item in run_record.summary.metrics}.get(kind, 0)
+
+        assert metric(first, RefreshMetricKind.SIGNALS_CREATED) == 1
+        assert entry.subject_local_id == signal.record_local_id
+        assert application.get_event(entry.subject_local_id) is not None
+        assert [name for name, _ in client.calls].count("attractions") == 2
+        assert second.status.value == "succeeded"
+        assert metric(second, RefreshMetricKind.SIGNALS_CREATED) == 0
+        assert metric(second, RefreshMetricKind.SIGNALS_REPAIRED) == 0
+        assert application.list_signals(SignalKind.EVENT, limit=10) == (signal,)
+        assert application.list_inbox_entries(None, limit=10) == (entry,)

@@ -88,7 +88,7 @@ def _application(tmp_path: Path) -> MusicFriendApplication:
         Explanation((ExplanationReason(ExplanationReasonKind.NEW_RELEASE, "Release One"),)),
         NOW,
     )
-    application.put_signal(signal)
+    application._catalog.put_signal(signal)
     application.put_inbox_entry(
         InboxEntry(
             "inbox-1",
@@ -672,6 +672,7 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
             "release_type": "album",
             "title": "Release One",
         },
+        "sources": 1,
         "reasons": [{"detail": "Release One", "kind": "new_release"}],
     }
     rendered = json.dumps(explanation, sort_keys=True)

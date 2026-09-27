@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -414,3 +415,74 @@ def _module_name_for_source(path: Path) -> str:
     if parts[-1] == "__init__":
         parts = parts[:-1]
     return ".".join(parts)
+
+
+_OBSERVATION_WRITES = frozenset({"put_signal", "upsert_inbox_entry"})
+
+
+def _observation_write_call_sites() -> frozenset[tuple[str, str, str]]:
+    """Every ``put_signal``/``upsert_inbox_entry`` call in ``src/`` by file and function."""
+    sites: set[tuple[str, str, str]] = set()
+    for path in sorted((SOURCE_ROOT / "music_friend").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _OBSERVATION_WRITES
+                ):
+                    relative = path.relative_to(SOURCE_ROOT / "music_friend").as_posix()
+                    sites.add((relative, function.name, node.func.attr))
+    return frozenset(sites)
+
+
+def _function_source(relative: str, name: str) -> str:
+    text = (SOURCE_ROOT / "music_friend" / relative).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            segment = ast.get_source_segment(text, node)
+            assert segment is not None
+            return segment
+    raise AssertionError(f"{relative}::{name} not found")
+
+
+def test_release_inbox_writes_go_through_record_release_observation() -> None:
+    """Issue #62: the single write path is the only release signal/inbox writer in src/.
+
+    The only other call sites are the event recorder and event inbox repair (both pinned to
+    ``SignalKind.EVENT``) and portable restore, which reloads exported signals verbatim.
+    """
+    sites = _observation_write_call_sites()
+
+    assert sites == {
+        ("tools/release_observation.py", "record_release_observation", "put_signal"),
+        ("tools/release_observation.py", "record_release_observation", "upsert_inbox_entry"),
+        ("tools/refresh.py", "_record_event_candidate", "put_signal"),
+        ("tools/refresh.py", "_record_event_candidate", "upsert_inbox_entry"),
+        ("tools/refresh.py", "_repair_inbox_entries", "upsert_inbox_entry"),
+        ("store/portable.py", "_replay", "put_signal"),
+    }
+    for name in ("_record_event_candidate", "_repair_inbox_entries"):
+        body = _function_source("tools/refresh.py", name)
+        assert "SignalKind.EVENT" in body
+        assert "SignalKind.RELEASE" not in body
+        assert "record_release_observation" not in body
+
+
+def test_superseded_release_signal_helpers_are_removed() -> None:
+    """Issue #62: the provenance-sensitive digests and over-inclusive listing are gone."""
+    text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((SOURCE_ROOT / "music_friend").rglob("*.py"))
+    )
+    for name in (
+        "_material_version",
+        "_legacy_v1_material_version",
+        "_release_repair_already_recorded",
+        "_release_material",
+        "list_release_discoveries_without_current_signal",
+    ):
+        assert len(re.findall(rf"\b{re.escape(name)}\b", text)) == 0, name

@@ -50,6 +50,17 @@ same release discovered through two different sources becomes one release with b
 references attached, not two inbox items; a one-day difference in reported release date across
 sources is treated as the same release, but a different title is not.
 
+A release keeps one inbox item for its whole life. Attaching a second source, or seeing the same
+release again on a later run, never creates a new item. A change to the release's own content (its
+title, type, date, or artists) updates the existing item and adds `updated_release` to its reasons;
+a saved or dismissed item stays saved or dismissed. When two sources disagree about a value, the
+more precise date wins, and otherwise the source listed earlier in `release_sources` wins.
+
+The `release_source_unmapped` refresh metric counts `(watchlisted artist, release source)` pairs
+skipped in a run because the artist has no identity for that source yet. It is summed over the
+release sources that ran, so a run with two release sources that each lack one artist reports 2.
+`music_status` shows the per-source identity picture.
+
 Ticketmaster is optional and does not establish a completeness guarantee for live events. Music
 Friend searches only an explicit country and postal-code area. It uses a default radius of 50 miles
 or 80 kilometers when a configured area omits a radius, searches the next 365 days, asks for up to

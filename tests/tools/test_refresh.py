@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import random
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from music_friend.configuration import LocalConfig
@@ -15,12 +19,16 @@ from music_friend.domain import (
     AffinityEvidenceKind,
     Artist,
     CatalogItemBatch,
+    Event,
+    EventDiscovery,
     Explanation,
     ExplanationReason,
     ExplanationReasonKind,
     IdentityConfidence,
+    InboxEntry,
     InboxState,
     RefreshMetricKind,
+    RefreshRun,
     Release,
     ReleaseDatePrecision,
     Signal,
@@ -32,6 +40,7 @@ from music_friend.domain import (
     SourceReference,
 )
 from music_friend.errors import QuotaExhaustedError, RateLimitedError
+from music_friend.mcp import catalog_server
 from music_friend.providers import (
     Capability,
     HealthStatus,
@@ -40,8 +49,10 @@ from music_friend.providers import (
     ProviderHealth,
 )
 from music_friend.providers.ticketmaster import TicketmasterAttraction, TicketmasterEvent
+from music_friend.runtimes import cli
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
+from music_friend.tools import refresh as refresh_module
 from music_friend.tools.refresh import (
     RefreshInvocation,
     _acquire_lock,
@@ -54,6 +65,7 @@ from music_friend.tools.refresh import (
     update_inbox_state,
 )
 from music_friend.tools.release_discovery import _persist_artist_releases, _SourceCallStopped
+from tests.runtimes import test_refresh_entry_points as entry_points
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
@@ -463,8 +475,18 @@ def test_later_release_reversion_creates_a_fresh_unread_signal(tmp_path: Path) -
             checked_at=NOW + timedelta(days=2),
         )
 
-        assert len(application.list_signals(None, limit=10)) == 3
-        assert len(application.list_inbox_entries(InboxState.UNREAD, limit=10)) == 1
+        # Content-only signal identity (issue #62): reverting to the original content
+        # reuses the original content's signal rather than minting a third, and the one
+        # inbox entry is repointed at it with a newer updated_at.
+        signals = application.list_signals(None, limit=10)
+        assert len(signals) == 2
+        entries = application.list_inbox_entries(InboxState.UNREAD, limit=10)
+        assert len(entries) == 1
+        original_signal = next(
+            signal for signal in signals if signal.explanation.reasons[-1].detail == "Original"
+        )
+        assert entries[0].latest_signal_local_id == original_signal.local_id
+        assert entries[0].updated_at == NOW + timedelta(days=2)
 
 
 def test_material_event_change_creates_a_fresh_unread_signal(tmp_path: Path) -> None:
@@ -1475,12 +1497,15 @@ def test_refresh_repairs_a_signal_left_without_an_inbox_entry_after_a_transient_
         def __init__(self, catalog: Catalog) -> None:
             super().__init__(catalog)
             self.fail_next_inbox_write = True
+            upsert = catalog.upsert_inbox_entry
 
-        def put_inbox_entry(self, entry: object) -> None:
-            if self.fail_next_inbox_write:
-                self.fail_next_inbox_write = False
-                raise RuntimeError("transient inbox failure")
-            super().put_inbox_entry(entry)  # type: ignore[arg-type]
+            def failing_upsert(*args: Any, **kwargs: Any) -> InboxEntry:
+                if self.fail_next_inbox_write:
+                    self.fail_next_inbox_write = False
+                    raise RuntimeError("transient inbox failure")
+                return upsert(*args, **kwargs)
+
+            catalog.upsert_inbox_entry = failing_upsert  # type: ignore[method-assign]
 
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = FailOnceInboxApplication(catalog)
@@ -1516,12 +1541,15 @@ def test_refresh_recovers_a_signal_after_discovery_committed_but_signal_write_fa
         def __init__(self, catalog: Catalog) -> None:
             super().__init__(catalog)
             self.fail_next_signal_write = True
+            put_signal = catalog.put_signal
 
-        def put_signal(self, signal: Signal) -> None:
-            if self.fail_next_signal_write:
-                self.fail_next_signal_write = False
-                raise RuntimeError("transient signal failure")
-            super().put_signal(signal)
+            def failing_put_signal(signal: Signal) -> None:
+                if self.fail_next_signal_write:
+                    self.fail_next_signal_write = False
+                    raise RuntimeError("transient signal failure")
+                put_signal(signal)
+
+            catalog.put_signal = failing_put_signal  # type: ignore[method-assign]
 
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = FailOnceSignalApplication(catalog)
@@ -1559,12 +1587,15 @@ def test_refresh_recovers_a_changed_release_signal_when_an_earlier_version_exist
         def __init__(self, catalog: Catalog) -> None:
             super().__init__(catalog)
             self.fail_next_signal_write = False
+            put_signal = catalog.put_signal
 
-        def put_signal(self, signal: Signal) -> None:
-            if self.fail_next_signal_write:
-                self.fail_next_signal_write = False
-                raise RuntimeError("transient signal failure")
-            super().put_signal(signal)
+            def failing_put_signal(signal: Signal) -> None:
+                if self.fail_next_signal_write:
+                    self.fail_next_signal_write = False
+                    raise RuntimeError("transient signal failure")
+                put_signal(signal)
+
+            catalog.put_signal = failing_put_signal  # type: ignore[method-assign]
 
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = FailSelectedSignalApplication(catalog)
@@ -1607,28 +1638,39 @@ def test_inbox_repair_progresses_past_more_than_five_hundred_orphaned_signals(
 ) -> None:
     """Catches a newest-first signal scan starving older orphaned inbox entries forever.
 
-    Each signal targets its own release (its own inbox subject), since the schema now
-    forbids a second inbox entry for one subject -- 501 orphaned signals sharing a subject
-    could never each get an entry, by design.
+    Each signal targets its own event (its own inbox subject), since the schema forbids a
+    second inbox entry for one subject. Release subjects are repaired through the single
+    write path instead (see the release variant below).
     """
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = MusicFriendApplication(catalog)
         artist = _artist("one", "One")
         application.put_artist(artist)
         for index in range(501):
-            release = _release(f"release-{index}", artist)
-            application.put_release(release)
-            application.put_signal(
+            event = Event(
+                f"event-{index}",
+                "Show",
+                (artist.local_id,),
+                "Venue",
+                "City",
+                NOW + timedelta(days=10),
+                "minute",
+                (),
+                (SourceReference("ticketmaster", f"event-{index}", None, NOW),),
+                NOW,
+            )
+            application.put_event(event)
+            application._catalog.put_signal(
                 Signal(
                     f"signal:{index}",
-                    SignalKind.RELEASE,
-                    release.local_id,
-                    "spotify",
-                    f"release-{index}",
+                    SignalKind.EVENT,
+                    event.local_id,
+                    "ticketmaster",
+                    f"event-{index}",
                     f"fingerprint-{index}",
                     f"material-{index}",
                     Explanation(
-                        (ExplanationReason(ExplanationReasonKind.NEW_RELEASE, release.title),)
+                        (ExplanationReason(ExplanationReasonKind.UPCOMING_EVENT, event.title),)
                     ),
                     NOW + timedelta(seconds=index),
                 )
@@ -1636,7 +1678,7 @@ def test_inbox_repair_progresses_past_more_than_five_hundred_orphaned_signals(
 
         _refresh(application, FakeMusicSource(), kind="catalog", lock_path=tmp_path / "lock")
 
-        remaining = application.list_signals_without_inbox_entries(limit=500)
+        remaining = application.list_signals_without_inbox_entries(SignalKind.EVENT, limit=500)
         assert tuple(signal.local_id for signal in remaining) == ("signal:500",)
 
         _refresh(
@@ -1647,7 +1689,46 @@ def test_inbox_repair_progresses_past_more_than_five_hundred_orphaned_signals(
             checked_at=NOW + timedelta(hours=1),
         )
 
-        assert application.list_signals_without_inbox_entries(limit=500) == ()
+        assert application.list_signals_without_inbox_entries(SignalKind.EVENT, limit=500) == ()
+
+
+def test_release_repair_progresses_past_more_than_five_hundred_subjects_without_entries(
+    tmp_path: Path,
+) -> None:
+    """Catches the bounded release repair starving subjects beyond its per-run bound."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        application.put_artist(artist)
+        for index in range(501):
+            application.put_release(_release(f"release-{index}", artist))
+
+        first = _refresh(
+            application, FakeMusicSource(), kind="catalog", lock_path=tmp_path / "lock"
+        )
+
+        assert first.run is not None
+        assert _metric(first.run, RefreshMetricKind.SIGNALS_REPAIRED) == 500
+        assert len(catalog.list_release_subjects_without_inbox_entry(limit=500)) == 1
+
+        second = _refresh(
+            application,
+            FakeMusicSource(),
+            kind="catalog",
+            lock_path=tmp_path / "lock",
+            checked_at=NOW + timedelta(hours=1),
+        )
+
+        assert second.run is not None
+        assert _metric(second.run, RefreshMetricKind.SIGNALS_REPAIRED) == 1
+        assert catalog.list_release_subjects_without_inbox_entry(limit=500) == ()
+        connection = catalog._require_connection()
+        assert connection.execute("SELECT COUNT(*) FROM inbox_entries").fetchone()[0] == 501
+        assert connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 501
+
+
+def _metric(run: RefreshRun, kind: RefreshMetricKind) -> int:
+    return {metric.kind: metric.count for metric in run.summary.metrics}.get(kind, 0)
 
 
 def test_refresh_rejects_invalid_invocation_contract_before_lock_or_provider_io(
@@ -2727,3 +2808,218 @@ def test_additional_release_sources_rejects_a_malformed_entry(tmp_path: Path) ->
                 checked_at=NOW,
                 lock_path=tmp_path / "lock",
             )
+
+
+@pytest.fixture
+def entry_clock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> entry_points.FakeClock:
+    """The shipped-entry-point harness clock: fake pacing time, state under tmp_path."""
+    fake = entry_points.FakeClock()
+    monkeypatch.setattr(time, "monotonic", fake.monotonic)
+    monkeypatch.setattr(time, "sleep", fake.sleep)
+    monkeypatch.setattr(refresh_module, "_deadline_clock", fake.monotonic)
+    monkeypatch.setattr(cli, "user_data_path", lambda *_args, **_kwargs: tmp_path)
+    return fake
+
+
+@pytest.mark.usefixtures("entry_clock")
+def test_attached_source_reference_never_creates_a_second_inbox_item(tmp_path: Path) -> None:
+    """Issue #62 / #57 AC: after a cross-source merge gives a release a second source, the
+    next two refreshes -- ``music-friend refresh releases`` and MCP ``refresh_music`` --
+    create and repair nothing, keep the inbox as it was, and ``explain_inbox_item`` reports
+    both sources."""
+    catalog_path = tmp_path / "catalog.sqlite3"
+    entry_points._seed(catalog_path, count=1)
+    handle = entry_points.one_release_group_handler()
+    first = entry_points._run_refresh(
+        "cli", "releases", catalog_path, lambda: httpx.MockTransport(handle)
+    )
+    assert first["status"] == "succeeded"
+    merged = entry_points.attach_a_second_source(catalog_path)
+    with Catalog.open(catalog_path) as catalog:
+        inbox_before = catalog.list_inbox_entries(None, limit=10)
+        signals_before = catalog.list_signals(None, limit=10)
+    assert len(inbox_before) == 1
+
+    for entry_point, days in (("cli", 21), ("mcp", 42)):
+        payload = entry_points._run_refresh(
+            entry_point,
+            "releases",
+            catalog_path,
+            lambda: httpx.MockTransport(handle),
+            now=entry_points.NOW + timedelta(days=days),
+        )
+        metrics = entry_points._metrics(payload)
+        assert payload["status"] == "succeeded", entry_point
+        assert metrics.get("signals_created", 0) == 0, entry_point
+        assert metrics.get("signals_repaired", 0) == 0, entry_point
+
+    application = MusicFriendApplication(Catalog.open(catalog_path))
+    try:
+        assert application.list_inbox_entries(None, limit=10) == inbox_before
+        assert len(application.list_signals(None, limit=10)) == len(signals_before)
+        explanation = catalog_server._explain_inbox(application, inbox_before[0].local_id)
+    finally:
+        application.close()
+    assert explanation["sources"] == 2
+    assert explanation["record"]["local_id"] == merged.local_id  # type: ignore[index]
+
+
+def test_repair_records_missing_inbox_entry_once(tmp_path: Path) -> None:
+    """Crash recovery: a release committed without its signal or inbox entry gets exactly
+    one of each on the next run, and a third run changes nothing."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        application.put_release(_release("release-1", artist))
+
+        second = _refresh(application, FakeMusicSource(), kind="events", lock_path=tmp_path / "l")
+        signals = application.list_signals(None, limit=10)
+        entries = application.list_inbox_entries(None, limit=10)
+        third = _refresh(
+            application,
+            FakeMusicSource(),
+            kind="events",
+            lock_path=tmp_path / "l",
+            checked_at=NOW + timedelta(hours=1),
+        )
+
+        assert second.run is not None and third.run is not None
+        assert _metric(second.run, RefreshMetricKind.SIGNALS_REPAIRED) == 1
+        assert len(signals) == 1
+        assert len(entries) == 1
+        assert entries[0].state is InboxState.UNREAD
+        assert entries[0].latest_signal_local_id == signals[0].local_id
+        assert _metric(third.run, RefreshMetricKind.SIGNALS_REPAIRED) == 0
+        assert _metric(third.run, RefreshMetricKind.FAILURES) == 0
+        assert application.list_signals(None, limit=10) == signals
+        assert application.list_inbox_entries(None, limit=10) == entries
+
+
+def test_release_source_unmapped_counts_artist_source_pairs(tmp_path: Path) -> None:
+    """A two-source run with one artist unmapped on each source reports 2, not 1 or 0."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        first_artist = Artist(
+            "artist:first",
+            "First",
+            (
+                SourceReference("spotify", "first", None, NOW),
+                SourceReference("musicbrainz", "mb-first", None, NOW),
+            ),
+            IdentityConfidence.SOURCE_ONLY,
+            NOW,
+        )
+        second_artist = Artist(
+            "artist:second",
+            "Second",
+            (
+                SourceReference("spotify", "second", None, NOW),
+                SourceReference("deezer", "dz-second", None, NOW),
+            ),
+            IdentityConfidence.SOURCE_ONLY,
+            NOW,
+        )
+        _watch(application, first_artist)
+        _watch(application, second_artist)
+        musicbrainz = FakeMusicSource()
+        musicbrainz.releases[("mb-first", None)] = Page((), None)
+        deezer = FakeMusicSource()
+        deezer.releases[("dz-second", None)] = Page((), None)
+
+        result = refresh_once(
+            application,
+            kind="releases",
+            source_name="musicbrainz",
+            source=None,
+            release_source=musicbrainz,
+            release_source_name="musicbrainz",
+            additional_release_sources=(("deezer", deezer),),
+            config=LocalConfig(release_sources=("musicbrainz", "deezer")),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / "lock",
+            rng=_MaxJitterRandom(0),
+        )
+
+        assert result.run is not None
+        assert musicbrainz.release_calls == ["mb-first"]
+        assert deezer.release_calls == ["dz-second"]
+        assert _metric(result.run, RefreshMetricKind.RELEASE_SOURCE_UNMAPPED) == 2
+
+
+def test_repair_records_an_interrupted_event_once_and_counts_it_as_repaired(
+    tmp_path: Path,
+) -> None:
+    """An event committed with its discovery but without a signal is recorded by the next
+    run as a repair (never as created), with an unread entry whose subject is the event."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        event = Event(
+            "event:interrupted",
+            "Show",
+            (artist.local_id,),
+            "Venue",
+            "City",
+            NOW + timedelta(days=10),
+            "minute",
+            (),
+            (SourceReference("ticketmaster", "interrupted", None, NOW),),
+            NOW,
+        )
+        catalog.put_event(event)
+        catalog.put_event_discovery(
+            EventDiscovery(
+                event.local_id,
+                "ticketmaster",
+                "interrupted",
+                artist.local_id,
+                "variant:interrupted",
+                "material:interrupted",
+                None,
+                NOW,
+                NOW,
+                NOW,
+                NOW + timedelta(hours=6),
+            )
+        )
+
+        first = _refresh(application, FakeMusicSource(), kind="events", lock_path=tmp_path / "l")
+        second = _refresh(
+            application,
+            FakeMusicSource(),
+            kind="events",
+            lock_path=tmp_path / "l",
+            checked_at=NOW + timedelta(hours=1),
+        )
+
+        assert first.run is not None and second.run is not None
+        assert _metric(first.run, RefreshMetricKind.SIGNALS_REPAIRED) == 1
+        assert _metric(first.run, RefreshMetricKind.SIGNALS_CREATED) == 0
+        assert _metric(second.run, RefreshMetricKind.SIGNALS_REPAIRED) == 0
+        (entry,) = application.list_inbox_entries(None, limit=10)
+        assert entry.kind is SignalKind.EVENT
+        assert entry.subject_local_id == event.local_id
+        assert entry.state is InboxState.UNREAD
+        assert len(application.list_signals(SignalKind.EVENT, limit=10)) == 1
+
+
+def test_release_repair_counts_a_stored_release_without_provenance_as_a_failure(
+    tmp_path: Path,
+) -> None:
+    """A release subject that cannot be re-observed (no source reference) is reported as a
+    failure every run instead of being silently skipped or crashing the refresh."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        catalog.put_release(replace(_release("unsourced", artist), source_refs=()))
+
+        result = _refresh(application, FakeMusicSource(), kind="events", lock_path=tmp_path / "l")
+
+        assert result.run is not None
+        assert _metric(result.run, RefreshMetricKind.FAILURES) == 1
+        assert _metric(result.run, RefreshMetricKind.SIGNALS_REPAIRED) == 0
+        assert application.list_inbox_entries(None, limit=10) == ()
