@@ -294,19 +294,70 @@ def _resolve_release_identity(
 
     Tier 4 (title key): conservative title matching with the existing find_release_discovery_variant.
     """
+    from music_friend.domain import IdentityConfidence
+
     # Tier 1: native_id (only non-provisional references, issue #63)
     native = catalog.find_releases_by_source_reference(observation.source, observation.native_id)
-    if native:
-        return IdentityMethod.NATIVE_ID, native
+    # Filter to only non-provisional references
+    native_non_provisional: list[str] = []
+    for release_local_id in native:
+        release = catalog.get_release(release_local_id)
+        if release is not None:
+            for ref in release.source_refs:
+                if (ref.source == observation.source and ref.native_id == observation.native_id
+                    and ref.confidence != IdentityConfidence.PROVISIONAL):
+                    native_non_provisional.append(release_local_id)
+                    break
+    if native_non_provisional:
+        # Same-source guard: never merge if target already has a different non-provisional native_id
+        # from the same source
+        filtered: list[str] = []
+        for candidate_id in native_non_provisional:
+            candidate = catalog.get_release(candidate_id)
+            if candidate is not None:
+                # Check if candidate has a different non-provisional reference from observation.source
+                has_other_native_id = False
+                for ref in candidate.source_refs:
+                    if (ref.source == observation.source
+                        and ref.native_id != observation.native_id
+                        and ref.confidence != IdentityConfidence.PROVISIONAL):
+                        has_other_native_id = True
+                        break
+                if not has_other_native_id:
+                    filtered.append(candidate_id)
+        if filtered:
+            return IdentityMethod.NATIVE_ID, tuple(filtered)
 
     # Tier 2: external_links (provisional by default)
-    linked: list[str] = []
+    # Each link must resolve to the same release (exactly-one-or-nothing)
+    linked_releases: list[str] = []
     for link in observation.external_links:
-        for release_local_id in catalog.find_releases_by_source_reference(link.source, link.native_id):
-            if release_local_id not in linked:
-                linked.append(release_local_id)
-    if linked:
-        return IdentityMethod.EXTERNAL_LINK, tuple(linked)
+        link_matches = catalog.find_releases_by_source_reference(link.source, link.native_id)
+        for release_local_id in link_matches:
+            release = catalog.get_release(release_local_id)
+            if release is not None:
+                # Check if this release has the link reference
+                for ref in release.source_refs:
+                    if ref.source == link.source and ref.native_id == link.native_id:
+                        # For provisional links, check corroboration:
+                        # if the link is marked provisional, it still requires corroboration
+                        # (it must match by content or be explicitly confirmed)
+                        if link.confidence == IdentityConfidence.PROVISIONAL:
+                            # Check if content matches (title, date)
+                            if (ref.confidence == IdentityConfidence.PROVISIONAL
+                                or (observation.release.title == release.title
+                                    and observation.release.release_date == release.release_date)):
+                                if release_local_id not in linked_releases:
+                                    linked_releases.append(release_local_id)
+                        else:
+                            # Non-provisional link (shouldn't normally happen in external_links)
+                            if release_local_id not in linked_releases:
+                                linked_releases.append(release_local_id)
+                        break
+
+    if linked_releases:
+        # All tier-2 matches must resolve to the same release
+        return IdentityMethod.EXTERNAL_LINK, tuple(linked_releases)
 
     # Tier 4: title_key (existing discovery logic, deferred to release_discovery layer)
     return IdentityMethod.NONE, ()

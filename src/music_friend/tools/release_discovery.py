@@ -23,7 +23,7 @@ from music_friend.domain import (
     SourceReference,
 )
 from music_friend.providers import MusicSource, Page
-from music_friend.store import Catalog
+from music_friend.store import Catalog, fold_title_key
 
 _SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_RELEASES_PER_ARTIST = 100
