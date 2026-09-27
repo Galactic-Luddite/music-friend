@@ -1370,11 +1370,35 @@ def _repair_missing_signals(
 ) -> None:
     """Record releases and events that an interrupted run committed without a signal.
 
-    Releases: every release subject without an inbox entry is re-observed from its stored
-    state through ``record_release_observation``. A subject that already has an entry, in
-    any state, is never listed, so a second run finds nothing to do.
+    Releases: a release whose discovery committed new content but whose observation never
+    ran (``observation_pending``, issue #70) is re-observed from its stored state, which
+    records the updated signal and repoints the subject's one entry without touching its
+    state. Then every release subject without an inbox entry is re-observed the same way.
+    Recording clears the marker and creates the entry, so a second run finds nothing to do.
     """
     catalog = application._catalog
+    for discovery in catalog.list_release_observations_pending(limit=500):
+        release = catalog.get_release(discovery.release_local_id)
+        if release is None or not release.artist_refs:
+            counts.failures += 1
+            continue
+        try:
+            outcome = record_release_observation(
+                catalog,
+                ReleaseObservation(
+                    release=release,
+                    source=discovery.source,
+                    native_id=discovery.provider_native_id,
+                    monitored_artist_local_id=release.artist_refs[0],
+                    observed_at=release.observed_at,
+                ),
+                release_sources=release_sources,
+            )
+        except Exception:
+            counts.failures += 1
+            continue
+        if outcome.signal_created:
+            counts.signals_repaired += 1
     for release_local_id in catalog.list_release_subjects_without_inbox_entry(limit=500):
         release = catalog.get_release(release_local_id)
         if release is None or not release.artist_refs or not release.source_refs:

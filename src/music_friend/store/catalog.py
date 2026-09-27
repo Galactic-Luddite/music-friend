@@ -2198,6 +2198,48 @@ class Catalog:
             if updated != 1:
                 raise sqlite3.IntegrityError("release discovery does not exist")
 
+    def set_release_observation_pending(self, release_local_id: str, pending: bool) -> None:
+        """Mark whether a release's committed content still awaits its signal and inbox write.
+
+        Clearing is tolerant of a release with no discovery row (a release recorded from
+        another path has nothing pending); setting requires the discovery row to exist.
+        """
+        if type(pending) is not bool:
+            raise ValueError("pending must be a boolean")
+        with self.transaction():
+            updated = (
+                self._require_connection()
+                .execute(
+                    "UPDATE release_discoveries SET observation_pending = ? "
+                    "WHERE release_local_id = ?",
+                    (1 if pending else 0, release_local_id),
+                )
+                .rowcount
+            )
+            if pending and updated != 1:
+                raise sqlite3.IntegrityError("release discovery does not exist")
+
+    def list_release_observations_pending(self, *, limit: int) -> tuple[ReleaseDiscovery, ...]:
+        """List discovered releases whose content was committed without its observation."""
+        if type(limit) is not int or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        rows = (
+            self._require_connection()
+            .execute(
+                """
+                SELECT release_local_id, source, provider_native_id, normalized_title, release_date,
+                       material_identity, first_seen_at, last_seen_at
+                FROM release_discoveries
+                WHERE observation_pending = 1
+                ORDER BY first_seen_at, release_local_id
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            .fetchall()
+        )
+        return tuple(self._release_discovery_from_row(row) for row in rows)
+
     def list_link_harvest_pending(self, source: str, *, limit: int) -> tuple[ReleaseDiscovery, ...]:
         """List discovered releases of one source whose links are still to be harvested."""
         if type(source) is not str or not source:

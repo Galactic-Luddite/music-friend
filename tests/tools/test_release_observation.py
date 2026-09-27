@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from music_friend.domain import (
     InboxState,
     Release,
     ReleaseDatePrecision,
+    ReleaseDiscovery,
     SignalKind,
     SourceReference,
 )
@@ -823,3 +825,57 @@ def test_a_confirmed_holder_with_another_id_of_the_source_is_not_a_tier_one_matc
         assert outcome.method is IdentityMethod.NONE  # type: ignore[attr-defined]
         assert outcome.release_local_id == "release:deezer:al-2"  # type: ignore[attr-defined]
         assert _entries(catalog) == 2
+
+
+def test_marker_clears_only_with_the_signal_and_inbox_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #70: the pending marker, signal and inbox write commit together or not at all.
+
+    A failure injected at the inbox write rolls back the signal and keeps the marker, so the
+    repair pass still sees the release as incomplete; a clean retry records it and clears it.
+    """
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        _artist(catalog)
+        release = _release("musicbrainz", "rg-pending")
+        catalog.put_release(release)
+        catalog.put_release_discovery(
+            ReleaseDiscovery(
+                release.local_id,
+                "musicbrainz",
+                "rg-pending",
+                "synthetic record",
+                release.release_date,
+                "release:synthetic-material",
+                NOW,
+                NOW,
+            )
+        )
+        catalog.set_release_observation_pending(release.local_id, True)
+
+        def fail(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("synthetic failure at the inbox write")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(catalog, "upsert_inbox_entry", fail)
+            with pytest.raises(RuntimeError, match="synthetic failure"):
+                _observe(catalog, release)
+        assert catalog.list_signals(SignalKind.RELEASE, limit=10) == ()
+        assert [
+            item.release_local_id for item in catalog.list_release_observations_pending(limit=10)
+        ] == [release.local_id]
+
+        _observe(catalog, release)
+        assert len(catalog.list_signals(SignalKind.RELEASE, limit=10)) == 1
+        assert catalog.list_release_observations_pending(limit=10) == ()
+
+
+def test_observation_pending_marker_rejects_invalid_inputs(tmp_path: Path) -> None:
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        with pytest.raises(ValueError, match="pending"):
+            catalog.set_release_observation_pending("release:none", 1)  # type: ignore[arg-type]
+        with pytest.raises(sqlite3.IntegrityError, match="release discovery"):
+            catalog.set_release_observation_pending("release:none", True)
+        catalog.set_release_observation_pending("release:none", False)
+        with pytest.raises(ValueError, match="limit"):
+            catalog.list_release_observations_pending(limit=0)

@@ -292,6 +292,7 @@ def _persist_artist_releases(
                 )
                 if harvest_links:
                     catalog.set_link_harvest_pending(persisted.local_id, True)
+                catalog.set_release_observation_pending(persisted.local_id, True)
                 candidates.append(
                     ReleaseCandidate(persisted, artist_local_id, ReleaseCandidateKind.NEW)
                 )
@@ -328,6 +329,9 @@ def _persist_artist_releases(
                 )
             )
             if existing.material_identity != material_identity:
+                # Committed with the content; cleared only when the single write path records
+                # the signal and inbox entry, so a run killed in between is repaired (#70).
+                catalog.set_release_observation_pending(persisted.local_id, True)
                 candidates.append(
                     ReleaseCandidate(persisted, artist_local_id, ReleaseCandidateKind.UPDATED)
                 )

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fixed a refresh that stops between saving a changed release and updating its inbox item
+  (issue #70). The next refresh now finishes the update: the item points at the changed release,
+  keeps its saved or dismissed state, and is never duplicated. Schema migration 016 adds the
+  marker that records an unfinished update.
 - Added the release identity ladder (issue #63). Two sources' reports of one release now join by
   strong keys first: a source's own album id, then the streaming links MusicBrainz lists for each
   new release group (one extra paced MusicBrainz request per new release group; a run that runs
