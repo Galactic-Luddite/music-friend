@@ -39,7 +39,11 @@ from music_friend.domain import (
     SourceLimitState,
     SourceReference,
 )
-from music_friend.errors import QuotaExhaustedError, RateLimitedError
+from music_friend.errors import (
+    InvalidSourceResponseError,
+    QuotaExhaustedError,
+    RateLimitedError,
+)
 from music_friend.mcp import catalog_server
 from music_friend.providers import (
     Capability,
@@ -48,6 +52,7 @@ from music_friend.providers import (
     ProviderCapabilities,
     ProviderHealth,
 )
+from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.ticketmaster import TicketmasterAttraction, TicketmasterEvent
 from music_friend.runtimes import cli
 from music_friend.store import Catalog
@@ -65,6 +70,11 @@ from music_friend.tools.refresh import (
     update_inbox_state,
 )
 from music_friend.tools.release_discovery import _persist_artist_releases, _SourceCallStopped
+from tests.providers.musicbrainz.live_fixtures import (
+    LIVE_SEARCH_ARTIST_MBID,
+    load_live_release_group_search,
+    release_browse_with_synthetic_streaming_links,
+)
 from tests.runtimes import test_refresh_entry_points as entry_points
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
@@ -3023,3 +3033,218 @@ def test_release_repair_counts_a_stored_release_without_provenance_as_a_failure(
         assert _metric(result.run, RefreshMetricKind.FAILURES) == 1
         assert _metric(result.run, RefreshMetricKind.SIGNALS_REPAIRED) == 0
         assert application.list_inbox_entries(None, limit=10) == ()
+
+
+# Issue #63: bounded, resumable link harvest and identity metrics.
+
+
+class _HarvestTransport:
+    """A MusicBrainz transport serving recorded responses and counting link harvests."""
+
+    def __init__(self, groups: list[dict[str, Any]], clock: FakeClock) -> None:
+        self.groups = groups
+        self.clock = clock
+        self.harvested: list[str] = []
+        #: After this many harvests, jump the clock past the refresh deadline.
+        self.deadline_after: int | None = None
+        #: Harvest requests still to answer with an invalid response.
+        self.failing_harvests = 0
+
+    def get(self, path: str, query: dict[str, Any] | None = None) -> object:
+        if path == "release-group":
+            live = load_live_release_group_search()
+            return {**live, "count": len(self.groups), "release-groups": self.groups}
+        if path == "release":
+            assert query is not None
+            self.harvested.append(str(query["release-group"]))
+            if self.failing_harvests:
+                self.failing_harvests -= 1
+                raise InvalidSourceResponseError()
+            if self.deadline_after is not None and len(self.harvested) >= self.deadline_after:
+                self.clock.value = 10_000.0
+            return release_browse_with_synthetic_streaming_links()
+        if path.startswith("artist/"):
+            return {"relations": []}
+        raise AssertionError(f"unexpected MusicBrainz path: {path}")
+
+    def close(self) -> None:
+        pass
+
+
+def _harvest_refresh(
+    application: MusicFriendApplication,
+    transport: _HarvestTransport,
+    clock: FakeClock,
+    lock_path: Path,
+    checked_at: datetime,
+) -> RefreshInvocation:
+    return refresh_once(
+        application,
+        kind="releases",
+        source_name="spotify",
+        source=None,
+        config=LocalConfig(release_sources=("musicbrainz",)),
+        event_client=None,
+        checked_at=checked_at,
+        lock_path=lock_path,
+        release_source=MusicBrainzSource(transport=transport, clock=lambda: checked_at),
+        release_source_name="musicbrainz",
+        monotonic=clock.monotonic,
+        sleeper=clock.sleep,
+        rng=_MaxJitterRandom(0),
+    )
+
+
+def _mapped_artist(application: MusicFriendApplication) -> Artist:
+    artist = Artist(
+        "artist:one",
+        "One",
+        (
+            SourceReference("spotify", "one", None, NOW),
+            SourceReference("musicbrainz", LIVE_SEARCH_ARTIST_MBID, None, NOW),
+        ),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+    _watch(application, artist)
+    return artist
+
+
+def _recorded_release_groups() -> list[dict[str, Any]]:
+    groups = list(load_live_release_group_search()["release-groups"])
+    assert len({group["id"] for group in groups}) == len(groups) == 2
+    return groups
+
+
+def test_link_harvest_is_bounded_and_resumable(tmp_path: Path) -> None:
+    """N new release groups make exactly N harvest requests through the paced source; a run
+    that hits the deadline leaves the rest ``link_harvest_pending`` and the next run
+    harvests exactly those, feeding the links through the identity ladder."""
+    groups = _recorded_release_groups()
+    with Catalog.open(tmp_path / "complete.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        _mapped_artist(application)
+        clock = FakeClock()
+        transport = _HarvestTransport(groups, clock)
+
+        result = _harvest_refresh(application, transport, clock, tmp_path / "lock-a", NOW)
+
+        assert result.run is not None and result.run.status.value == "succeeded"
+        assert sorted(transport.harvested) == sorted(group["id"] for group in groups)
+        assert catalog.list_link_harvest_pending("musicbrainz", limit=10) == ()
+
+    with Catalog.open(tmp_path / "resumed.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        _mapped_artist(application)
+        clock = FakeClock()
+        transport = _HarvestTransport(groups, clock)
+        transport.deadline_after = 1
+
+        first = _harvest_refresh(application, transport, clock, tmp_path / "lock-b", NOW)
+
+        assert first.run is not None and first.run.status.value == "partial"
+        assert len(transport.harvested) == 1
+        pending = catalog.list_link_harvest_pending("musicbrainz", limit=10)
+        assert len(pending) == 1
+        assert len(catalog.list_inbox_entries(None, limit=10)) == 2
+        waiting = pending[0].release_local_id
+        assert all(
+            reference.source == "musicbrainz" for reference in _stored_refs(catalog, waiting)
+        )
+
+        clock.value = 0.0
+        transport.deadline_after = None
+        second = _harvest_refresh(
+            application, transport, clock, tmp_path / "lock-b", NOW + timedelta(hours=1)
+        )
+
+        assert second.run is not None and second.run.status.value == "succeeded"
+        assert len(transport.harvested) == 2
+        assert sorted(transport.harvested) == sorted(group["id"] for group in groups)
+        assert catalog.list_link_harvest_pending("musicbrainz", limit=10) == ()
+        assert {
+            (reference.source, reference.confidence)
+            for reference in _stored_refs(catalog, waiting)
+            if reference.source != "musicbrainz"
+        } == {
+            ("deezer", IdentityConfidence.PROVISIONAL),
+            ("spotify", IdentityConfidence.PROVISIONAL),
+        }
+        assert len(catalog.list_inbox_entries(None, limit=10)) == 2
+
+    with Catalog.open(tmp_path / "failed.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        _mapped_artist(application)
+        clock = FakeClock()
+        transport = _HarvestTransport(groups, clock)
+        transport.failing_harvests = 1
+
+        failed = _harvest_refresh(application, transport, clock, tmp_path / "lock-c", NOW)
+
+        # A failed harvest request stays pending and is retried next run, not dropped.
+        assert failed.run is not None
+        assert _metric(failed.run, RefreshMetricKind.FAILURES) == 1
+        assert len(transport.harvested) == 2
+        assert len(catalog.list_link_harvest_pending("musicbrainz", limit=10)) == 1
+
+
+def _stored_refs(catalog: Catalog, release_local_id: str) -> tuple[SourceReference, ...]:
+    stored = catalog.get_release(release_local_id)
+    assert stored is not None
+    return stored.source_refs
+
+
+def test_identity_metrics_count_ambiguous_and_conflicting_reports(tmp_path: Path) -> None:
+    """``release_identity_ambiguous`` and ``release_identity_conflict`` increment when a
+    refreshed report's key names two subjects, or contradicts a provisional link."""
+    with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        artist = _artist("one", "One")
+        _watch(application, artist)
+        for index in (1, 2):
+            catalog.put_release(
+                Release(
+                    f"release:held-{index}",
+                    f"Held {index}",
+                    "album",
+                    date(2026, 8, 1),
+                    ReleaseDatePrecision.DAY,
+                    (artist.local_id,),
+                    (
+                        SourceReference("musicbrainz", f"rg-held-{index}", None, NOW),
+                        SourceReference("spotify", "shared", None, NOW),
+                    ),
+                    NOW,
+                )
+            )
+        catalog.put_release(
+            Release(
+                "release:mb-linked",
+                "A Different Record",
+                "album",
+                date(2026, 1, 1),
+                ReleaseDatePrecision.DAY,
+                (artist.local_id,),
+                (
+                    SourceReference("musicbrainz", "rg-linked", None, NOW),
+                    SourceReference("spotify", "linked", None, NOW, IdentityConfidence.PROVISIONAL),
+                ),
+                NOW,
+            )
+        )
+        source = FakeMusicSource()
+        source.releases[("one", None)] = Page(
+            (_release("shared", artist), _release("linked", artist)), None
+        )
+
+        result = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
+
+        assert result.run is not None
+        assert _metric(result.run, RefreshMetricKind.RELEASE_IDENTITY_AMBIGUOUS) == 1
+        assert _metric(result.run, RefreshMetricKind.RELEASE_IDENTITY_CONFLICT) == 1
+        linked = catalog.get_release("release:mb-linked")
+        assert linked is not None
+        assert [reference.source for reference in linked.source_refs] == ["musicbrainz"]
+        # Nothing is hidden: the repair pass gives each seeded release its item, and both
+        # refreshed reports stay their own items.
+        assert len(catalog.list_inbox_entries(None, limit=10)) == 5

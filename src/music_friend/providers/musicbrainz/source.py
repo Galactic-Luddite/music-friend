@@ -11,6 +11,7 @@ from music_friend import __version__
 from music_friend.domain import (
     Artist,
     CatalogItemBatch,
+    IdentityConfidence,
     Release,
     SourceReference,
 )
@@ -34,6 +35,21 @@ _DEFAULT_USER_AGENT = (
 )
 
 _DEEZER_ARTIST_URL = re.compile(r"https://www\.deezer\.com/artist/(\d+)")
+#: Release url-rels harvested as provisional cross-source links (issue #63).
+_RELEASE_LINK_URLS = (
+    (
+        "deezer",
+        re.compile(r"https://www\.deezer\.com/album/(\d{1,20})"),
+        "https://www.deezer.com/album/",
+    ),
+    (
+        "spotify",
+        re.compile(r"https://open\.spotify\.com/album/([0-9A-Za-z]{22})"),
+        "https://open.spotify.com/album/",
+    ),
+)
+_RELEASE_LINK_TYPES = frozenset({"free streaming", "streaming"})
+_RELEASE_GROUP_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _url_entries(response: object) -> dict[str, Mapping[str, object]]:
@@ -215,6 +231,66 @@ class MusicBrainzSource:
         if len(deezer_ids) == 1:
             return next(iter(deezer_ids))
         return None
+
+    def release_group_links(self, release_group_id: str) -> tuple[SourceReference, ...]:
+        """Harvest one release group's streaming links as provisional references (issue #63).
+
+        Calls ``GET /ws/2/release?release-group=<rgid>&inc=url-rels`` once. Release-group-level
+        url-rels carry no streaming links; the per-release ``free streaming``/``streaming``
+        relations do (live probe 2026-09-26, recorded in ``tests/providers/musicbrainz``). A
+        provider is linked only when every release of the group names exactly one distinct
+        album id for it; zero or several distinct ids link nothing (exactly one or none). Every
+        link is ``PROVISIONAL``: it counts only after the linked provider's own report
+        corroborates it.
+        """
+        if (
+            type(release_group_id) is not str
+            or _RELEASE_GROUP_ID.fullmatch(release_group_id) is None
+        ):
+            raise ValueError("release_group_id must be a MusicBrainz identifier")
+        response = self._transport.get(
+            "release",
+            query={"release-group": release_group_id, "inc": "url-rels", "limit": "100"},
+        )
+        if not isinstance(response, Mapping):
+            raise InvalidSourceResponseError(
+                "musicbrainz release browse response must be an object"
+            )
+        releases = response.get("releases")
+        if not isinstance(releases, list):
+            raise InvalidSourceResponseError("musicbrainz release browse response missing releases")
+        found: dict[str, set[str]] = {source: set() for source, _, _ in _RELEASE_LINK_URLS}
+        for release in releases:
+            if not isinstance(release, Mapping):
+                continue
+            relations = release.get("relations")
+            if not isinstance(relations, list):
+                continue
+            for relation in relations:
+                if not isinstance(relation, Mapping):
+                    continue
+                if relation.get("type") not in _RELEASE_LINK_TYPES:
+                    continue
+                url = relation.get("url")
+                resource = url.get("resource") if isinstance(url, Mapping) else None
+                if not isinstance(resource, str):
+                    continue
+                for source, pattern, _ in _RELEASE_LINK_URLS:
+                    match = pattern.fullmatch(resource)
+                    if match is not None:
+                        found[source].add(match.group(1))
+        now = self._now()
+        return tuple(
+            SourceReference(
+                source=source,
+                native_id=next(iter(found[source])),
+                canonical_url=prefix + next(iter(found[source])),
+                observed_at=now,
+                confidence=IdentityConfidence.PROVISIONAL,
+            )
+            for source, _, prefix in _RELEASE_LINK_URLS
+            if len(found[source]) == 1
+        )
 
     def search_artist_by_name(self, name: str, limit: int = 3) -> list[dict[str, object]]:
         """Search for artists by name in MusicBrainz.

@@ -72,7 +72,11 @@ class ObservationOutcome:
     inbox_local_id: RecordId | None
     method: IdentityMethod | None = None
     signal_created: bool = False
+    #: ``identity_conflict`` observations this recording wrote (issue #63).
+    identity_conflicts: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in _OUTCOME_KINDS:
             raise ValueError("kind must be a known observation outcome")
+        if type(self.identity_conflicts) is not int or self.identity_conflicts < 0:
+            raise ValueError("identity_conflicts must be a non-negative integer")

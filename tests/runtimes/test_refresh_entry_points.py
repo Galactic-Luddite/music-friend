@@ -55,7 +55,9 @@ from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
 from music_friend.tools import refresh as refresh_module
 from tests.providers.musicbrainz.live_fixtures import (
+    LIVE_BROWSE_RELEASE_GROUP_ID,
     LIVE_SEARCH_ARTIST_MBID,
+    load_live_release_browse,
     load_live_release_group_search,
 )
 
@@ -169,6 +171,9 @@ class MusicBrainzServer:
             return httpx.Response(200, json={**live, "count": 0, "release-groups": []})
         if path.startswith("/ws/2/artist/"):
             return httpx.Response(200, json={"relations": []})
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         raise AssertionError(f"unexpected MusicBrainz path: {path}")
 
 
@@ -318,8 +323,14 @@ def one_release_group_handler() -> Callable[[httpx.Request], httpx.Response]:
                 200,
                 json={**live, "count": len(one_release_group), "release-groups": one_release_group},
             )
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         if path.startswith("/ws/2/artist/"):
             return httpx.Response(200, json={"relations": []})
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         raise AssertionError(f"unexpected MusicBrainz path: {path}")
 
     return handle
@@ -726,12 +737,16 @@ def test_map_then_discover_within_one_refresh_adds_the_reference_and_one_inbox_i
                     "release-groups": one_release_group,
                 },
             )
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         raise AssertionError(f"unexpected MusicBrainz path: {path}")
 
     payload = _run_refresh(entry, "releases", catalog_path, lambda: httpx.MockTransport(handle))
 
     assert payload["status"] == "succeeded"
-    assert request_log == ["/ws/2/url", "/ws/2/release-group"]
+    # One link harvest for the one new release group (issue #63).
+    assert request_log == ["/ws/2/url", "/ws/2/release-group", "/ws/2/release"]
     assert _metrics(payload)["signals_created"] == 1
     with Catalog.open(catalog_path) as catalog:
         artist = catalog.get_artist("artist-0")
@@ -863,6 +878,9 @@ def test_same_source_repeat_through_cli_creates_no_new_inbox_item(
             # already-mapped artist's url-rels; an empty relation list is a harmless,
             # already-mapped no-op here.
             return httpx.Response(200, json={"relations": []})
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         raise AssertionError(f"unexpected MusicBrainz path: {path}")
 
     def _run_at(now: datetime) -> dict[str, object]:
@@ -957,6 +975,9 @@ def test_v1_signal_upgrade_safety_creates_no_duplicate_and_preserves_inbox_state
             )
         if path.startswith("/ws/2/artist/"):
             return httpx.Response(200, json={"relations": []})
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         raise AssertionError(f"unexpected MusicBrainz path: {path}")
 
     def _run_at(now: datetime) -> dict[str, object]:
@@ -1099,6 +1120,9 @@ def test_re_observed_release_never_reopens_a_decided_inbox_entry_through_cli(
             )
         if path.startswith("/ws/2/artist/"):
             return httpx.Response(200, json={"relations": []})
+        if path == "/ws/2/release":
+            assert request.url.params["release-group"] == LIVE_BROWSE_RELEASE_GROUP_ID
+            return httpx.Response(200, json=load_live_release_browse())
         raise AssertionError(f"unexpected MusicBrainz path: {path}")
 
     def _run_at(now: datetime) -> dict[str, object]:

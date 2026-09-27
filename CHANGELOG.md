@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Added the release identity ladder (issue #63). Two sources' reports of one release now join by
+  strong keys first: a source's own album id, then the streaming links MusicBrainz lists for each
+  new release group (one extra paced MusicBrainz request per new release group; a run that runs
+  out of time finishes the rest on the next run). A harvested link stays provisional until the
+  linked service's own report agrees on the title (a deluxe edition, a different remixer, or a
+  remix of the original never does), the date (same day, or one day apart) and an artist; a
+  contradicted link is dropped and both releases keep their own items. A key that names two
+  releases, or a link between two releases that already have separate items, is recorded instead
+  of merged: new refresh metrics `release_identity_ambiguous` and `release_identity_conflict`,
+  `music_status` reports open conflicts as `identity.conflicts`, and
+  `music-friend data inbox duplicates` lists them (tier `external_link`) for a reviewed merge,
+  which closes them. The typographic title folding from #56 is now one shared title key used by
+  every title comparison. Schema migration 015 adds per-link provisional state, the harvest
+  queue and the conflict record.
 - Added `music-friend data inbox duplicates [--merge --yes]` and
   `music-friend data inbox unmerge MERGE_ID --yes` (issue #64) to find, merge, and reversibly
   unmerge cross-subject duplicate releases -- two releases that ended up in different inbox

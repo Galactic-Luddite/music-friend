@@ -454,6 +454,22 @@ def test_release_source_unmapped_and_single_inbox_item_are_documented() -> None:
     assert "`sources` (how many sources report the record)" in mcp
 
 
+def test_release_identity_ladder_is_documented() -> None:
+    """Issue #63: identity conflicts, their metrics and the harvest request budget."""
+    limits = (ROOT / "docs" / "limits.md").read_text(encoding="utf-8")
+    mcp = (ROOT / "docs" / "mcp.md").read_text(encoding="utf-8")
+    operations = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+    skill = SKILL.read_text(encoding="utf-8")
+
+    assert "| MusicBrainz release browse with url-rels | once per new release group |" in limits
+    for metric in ("release_identity_ambiguous", "release_identity_conflict"):
+        assert f"`{metric}`" in limits
+        assert f"`{metric}`" in mcp
+    assert "`identity.conflicts`" in mcp
+    assert "`identity.conflicts`" in skill
+    assert "tier `external_link`" in operations
+
+
 def test_public_markdown_files_include_contributor_guidance() -> None:
     """The public residue scan covers the checkout-only contributor guide."""
     assert ROOT / ("AGENTS.md") in _public_markdown_files()

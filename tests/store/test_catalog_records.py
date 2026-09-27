@@ -25,9 +25,10 @@ from music_friend.domain import (
     SignalKind,
     SourceReference,
 )
-from music_friend.store import Catalog
+from music_friend.store import Catalog, fold_title_key, release_title_keys_compatible
 
 OFFSET = timezone(timedelta(hours=5, minutes=45))
+NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 OBSERVED = datetime(2026, 8, 31, 23, 17, 41, 123456, tzinfo=OFFSET)
 LATER = datetime(2026, 9, 1, 1, 2, 3, 654321, tzinfo=timezone(timedelta(hours=-7)))
 
@@ -657,30 +658,154 @@ def test_releases_map_many_to_one_onto_subjects(catalog: Catalog) -> None:
         assert found.local_id == "entry-shared"
 
 
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        pytest.param("I Won’t Stop", "I Won't Stop", id="curly-vs-straight-apostrophe"),
+        pytest.param("Rock–Paper–Scissors", "Rock-Paper-Scissors", id="en-dash-vs-hyphen"),
+        pytest.param("Rock—Paper—Scissors", "Rock-Paper-Scissors", id="em-dash-vs-hyphen"),
+        pytest.param("Café Nights", "Café Nights", id="nfc-vs-nfd-accent"),
+        pytest.param("Wait…", "Wait...", id="ellipsis-character-vs-dots"),
+        pytest.param("Double  Space", "Double Space", id="doubled-whitespace"),
+        pytest.param("‘Quoted’ Title", "'Quoted' Title", id="curly-single-quote-pair"),
+        pytest.param("“Quoted” Title", '"Quoted" Title', id="curly-double-quote-pair"),
+    ],
+)
+def test_title_key_folds_typographic_punctuation(left: str, right: str) -> None:
+    """AC (issue #56): titles differing only by typographic punctuation, Unicode
+    form, or whitespace collapse to the same comparison key."""
+    assert fold_title_key(left) == fold_title_key(right)
 
 
-def test_title_key_folds_typographic_punctuation() -> None:
-    """fold_title_key() normalizes typographic variants and punctuation (issue #56, #59)."""
-    from music_friend.store.catalog import fold_title_key
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        pytest.param("Stop", "Stops", id="different-real-word"),
+        pytest.param("Cafe", "Café", id="different-accented-letter"),
+        pytest.param("Niño", "Nino", id="tilde-n-vs-plain-n"),
+    ],
+)
+def test_title_key_keeps_real_differences(left: str, right: str) -> None:
+    """Negative test (issue #56): titles differing by real characters, including a
+    different accented letter, must not collapse to the same comparison key."""
+    assert fold_title_key(left) != fold_title_key(right)
 
-    # Test various typographic replacements
-    assert fold_title_key("Artist – Album") == "artist - album"  # en-dash to hyphen
-    assert fold_title_key("Mix—Remaster") == "mix-remaster"  # em-dash to hyphen
-    assert fold_title_key("It's a Track") == "it's a track"  # curly apostrophe to straight
-    assert fold_title_key("Song (Remix)") == "song (remix)"  # parentheses unchanged
-    assert fold_title_key("The QUICK Brown") == "the quick brown"  # case folding
-    assert fold_title_key("Double  Spaced") == "double spaced"  # whitespace collapse
+
+def test_identity_ladder_storage_rejects_invalid_input(catalog: Catalog) -> None:
+    """Issue #63 storage contracts: strict inputs and no silent re-pointing."""
+    artist = Artist(
+        "artist-ladder",
+        "Ladder Artist",
+        (SourceReference("synthetic", "artist-ladder", None, NOW),),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+    catalog.put_artist(artist)
+    for local_id in ("release-a", "release-b"):
+        catalog.put_release(
+            Release(
+                local_id,
+                "Ladder Record",
+                "album",
+                date(2026, 8, 14),
+                ReleaseDatePrecision.DAY,
+                (artist.local_id,),
+                (SourceReference("synthetic", local_id, None, NOW),),
+                NOW,
+            )
+        )
+    with pytest.raises(ValueError, match="source and native_id"):
+        catalog.find_release_reference_holders("", "x")
+    with pytest.raises(sqlite3.IntegrityError, match="release does not exist"):
+        catalog.join_new_release_to_subject("release-missing", "release-a")
+    with pytest.raises(sqlite3.IntegrityError, match="target subject does not exist"):
+        catalog.join_new_release_to_subject("release-b", "subject-missing")
+    catalog.join_new_release_to_subject("release-b", "release-b")
+    catalog.join_new_release_to_subject("release-b", "release-a")
+    joined = catalog.get_release("release-b")
+    assert joined is not None and joined.subject_local_id == "release-a"
+    with pytest.raises(ValueError, match="pending"):
+        catalog.set_link_harvest_pending("release-a", 1)  # type: ignore[arg-type]
+    with pytest.raises(sqlite3.IntegrityError, match="release discovery does not exist"):
+        catalog.set_link_harvest_pending("release-a", True)
+    with pytest.raises(ValueError, match="source"):
+        catalog.list_link_harvest_pending("", limit=1)
+    with pytest.raises(ValueError, match="limit"):
+        catalog.list_link_harvest_pending("synthetic", limit=0)
+    with pytest.raises(ValueError, match="title"):
+        release_title_keys_compatible(
+            1,  # type: ignore[arg-type]
+            date(2026, 8, 14),
+            ReleaseDatePrecision.DAY,
+            "x",
+            date(2026, 8, 14),
+            ReleaseDatePrecision.DAY,
+        )
+    with pytest.raises(ValueError, match="release_date"):
+        release_title_keys_compatible(
+            "x",
+            NOW,
+            ReleaseDatePrecision.DAY,
+            "x",
+            date(2026, 8, 14),
+            ReleaseDatePrecision.DAY,
+        )
+    with pytest.raises(ValueError, match="date_precision"):
+        release_title_keys_compatible(
+            "x",
+            date(2026, 8, 14),
+            "day",  # type: ignore[arg-type]
+            "x",
+            date(2026, 8, 14),
+            ReleaseDatePrecision.DAY,
+        )
+    assert not release_title_keys_compatible(
+        "x",
+        date(2026, 8, 14),
+        ReleaseDatePrecision.MONTH,
+        "x",
+        date(2026, 8, 15),
+        ReleaseDatePrecision.DAY,
+    )
 
 
-def test_title_key_keeps_real_differences() -> None:
-    """fold_title_key() preserves meaningful differences in titles (issue #50, #56)."""
-    from music_friend.store.catalog import fold_title_key
+def test_a_release_whose_subject_has_an_item_is_never_joined(catalog: Catalog) -> None:
+    artist = Artist(
+        "artist-held",
+        "Held Artist",
+        (SourceReference("synthetic", "artist-held", None, NOW),),
+        IdentityConfidence.SOURCE_ONLY,
+        NOW,
+    )
+    catalog.put_artist(artist)
+    for local_id in ("release-held", "release-other"):
+        catalog.put_release(
+            Release(
+                local_id,
+                "Held Record",
+                "album",
+                date(2026, 8, 14),
+                ReleaseDatePrecision.DAY,
+                (artist.local_id,),
+                (SourceReference("synthetic", local_id, None, NOW),),
+                NOW,
+            )
+        )
+    signal = Signal(
+        "signal-held",
+        SignalKind.RELEASE,
+        "release-held",
+        "synthetic",
+        "release-held",
+        "fingerprint-held",
+        "material-held",
+        Explanation((ExplanationReason(ExplanationReasonKind.NEW_RELEASE, "Held Record"),)),
+        NOW,
+    )
+    catalog.put_signal(signal)
+    catalog.upsert_inbox_entry(
+        SignalKind.RELEASE, "release-held", signal.local_id, local_id="inbox-held", at=NOW
+    )
 
-    # Titles that should remain different after folding
-    key1 = fold_title_key("Album")
-    key2 = fold_title_key("Album Deluxe")
-    assert key1 != key2
-
-    key1 = fold_title_key("Song A")
-    key2 = fold_title_key("Song B")
-    assert key1 != key2
+    with pytest.raises(sqlite3.IntegrityError, match="already has an inbox entry"):
+        catalog.join_new_release_to_subject("release-held", "release-other")

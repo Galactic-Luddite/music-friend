@@ -562,7 +562,9 @@ def create_music_server(
         name="music_status",
         description=(
             "Inspect local Music Friend status: whether the inbox has unread "
-            "entries and a summary of the most recent refresh_music run. "
+            "entries, a summary of the most recent refresh_music run, and "
+            "identity.conflicts: releases a source linked that were kept "
+            "separate (the user can review them with the CLI). "
             "Purpose: a cheap first call to orient before deciding what to do "
             "next. When to use: at the start of a session, or after "
             "refresh_music to see whether it produced anything. Call before: "
@@ -1105,6 +1107,7 @@ def _status(
         "latest_refresh": None if not latest else _refresh_run(latest[0]),
         "refresh": {"running": bool(refresh_running)},
         "source_limits": {"spotify": _source_limit_status(application, "spotify", checked_at)},
+        "identity": {"conflicts": application.count_open_identity_conflicts()},
     }
 
     # Add MusicBrainz identity mapping status if configured
@@ -1129,6 +1132,7 @@ def _status(
             "source": "musicbrainz",
             "mapped": mapped_count,
             "unmapped": unmapped_count,
+            "conflicts": application.count_open_identity_conflicts(),
         }
 
     return status_dict
