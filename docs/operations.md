@@ -11,7 +11,7 @@ and listening-history summaries.
 | Setup and connection | `doctor`, `setup`, `connect spotify`, `disconnect spotify`, `version` | Check every onboarding prerequisite locally, enter the Spotify client identifier and optional event area, authorize or remove the Spotify credential |
 | Inspect | `status`, `diagnostics`, `watchlist list`, `inbox list`, `inbox show ITEM_ID` | Read local state without contacting a provider |
 | Refresh | `refresh catalog`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
-| Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete`, `data dedupe-inbox` | Move, protect, or erase local data |
+| Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete`, `data inbox duplicates`, `data inbox unmerge` | Move, protect, or erase local data |
 | Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional six-hour refresh |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
 
@@ -63,23 +63,33 @@ music-friend data restore backup.json --confirm RESTORE
 
 Without a TTY and without `--yes` or `--confirm`, these commands refuse to proceed and exit with code 2.
 
-## Cross-source duplicate inbox items
+## Cross-subject duplicate releases
 
 ```bash
-music-friend data dedupe-inbox
-music-friend data dedupe-inbox --apply
+music-friend data inbox duplicates
+music-friend data inbox duplicates --merge --yes
+music-friend data inbox unmerge MERGE_ID --yes
 ```
 
-Titles that differ only in typographic punctuation or Unicode form (a curly vs. straight
-apostrophe, an en/em dash vs. a hyphen, NFD vs. NFC accents, doubled whitespace) now dedupe across
-sources at discovery time (issue #56). `data dedupe-inbox` finds existing inbox rows, created
-before that fix, that the same normalized title key would now treat as one release. It scans
-release-kind inbox items sharing an artist, a release date, and a normalized title, and reports
-each duplicate pair as `keep` (the earliest row) and `dismiss` (the later one).
+Two releases discovered through different sources or before a title-normalization fix can end up
+in distinct inbox subjects for the same real-world release. `data inbox duplicates` is dry-run by
+default: it scans stored releases for pairs in different subjects that share a folded title, the
+same artist set, and the same release date, and lists each pair with its titles and both subjects'
+inbox states. It contacts no provider and writes nothing.
 
-It is dry-run by default: it only lists candidate pairs. Only `--apply` marks each `dismiss` row
-`dismissed` -- the same state `update_inbox_item`/`inbox show` already use, so the row is never
-deleted and the decision can be reversed the same way any other dismiss decision can.
+`--merge --yes` merges every listed pair: the later release's subject is re-pointed onto the
+earlier one's, the two inbox entries collapse (the more-decided one wins; ties go to the more
+recently updated, then to the entry with the smaller id), and a merge id is printed for each
+merged pair. Run `data inbox duplicates` again afterward to confirm it lists nothing -- every
+merged pair now shares one subject.
+
+`data inbox unmerge MERGE_ID --yes` reverses one merge: it restores the pre-merge inbox state,
+signal, and timestamps and re-points the affected releases back to their original subjects, but
+only if nothing has changed the winning entry since the merge (compare-and-swap on its
+`updated_at`). If the user made a new decision on the winner after the merge, the unmerge is
+refused and the reason is printed; nothing is changed.
+
+This command replaces the retired `music-friend data dedupe-inbox` (see CHANGELOG).
 
 ## Check prerequisites
 
