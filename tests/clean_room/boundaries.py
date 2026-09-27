@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import weakref
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping
@@ -157,6 +158,7 @@ class BoundaryPolicy:
 
 
 _ORIGINAL_SOCKET = socket.socket
+_ORIGINAL_SOCKETPAIR = socket.socketpair
 _ORIGINAL_CREATE_CONNECTION = socket.create_connection
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
 _ORIGINAL_GETHOSTBYNAME = socket.gethostbyname
@@ -555,34 +557,56 @@ def _policy() -> BoundaryPolicy:
     return _POLICY
 
 
-class GuardedSocket(_ORIGINAL_SOCKET):
-    """Reject outbound network operations, except on the process's own AF_UNIX
-    loopback plumbing.
+#: Identifies sockets created by our own wrapped ``socket.socketpair()`` (see
+#: ``_guarded_socketpair`` below), never any other socket -- including an
+#: ordinary AF_UNIX socket a test or the code under test opens itself. A
+#: ``WeakSet`` so a closed/garbage-collected socket's identity is never
+#: reused to falsely mark an unrelated later socket as a self-pipe end.
+_SELF_PIPE_SOCKETS: weakref.WeakSet[Any] = weakref.WeakSet()
 
-    ``asyncio``'s event loop wakes itself across threads (used by
+
+def _guarded_socketpair(
+    family: int = socket.AF_UNIX, type: int = socket.SOCK_STREAM, proto: int = 0
+) -> tuple[Any, Any]:
+    """Wrap ``socket.socketpair()`` and tag both ends as exempt self-pipe sockets.
+
+    This is the ONLY path that may mark a socket exempt from the network
+    boundary below: ``asyncio``'s internal self-pipe (used by
     ``run_in_executor``/``asyncio.to_thread``, and therefore by
-    ``refresh_music``'s off-event-loop refresh, issue #65) with an internal
-    self-pipe: a same-process ``socket.socketpair()`` whose sockets are
-    ``AF_UNIX`` on POSIX, never ``AF_INET``/``AF_INET6``. That pipe is local
-    interpreter plumbing, not the "network operation" this boundary exists to
-    certify (real egress to an external host) -- but because ``socket.socket``
-    is replaced process-wide for the whole pytest session (see
-    ``pytest_configure`` below), blocking every socket ``send``/``connect``
-    indiscriminately also blocks the self-pipe's wakeup write, which
-    ``asyncio`` cannot recover from: the exception is swallowed inside
+    ``refresh_music``'s off-event-loop refresh, issue #65) is created by
+    calling this exact function, never by constructing a plain AF_UNIX socket
+    directly. Recognizing every AF_UNIX socket as exempt (an earlier version
+    of this fix) was wrong: a local daemon reachable over AF_UNIX (for
+    example a Docker socket) is egress this boundary must still reject, and a
+    real listening/connecting AF_UNIX socket the code under test opens itself
+    must never pass silently. Only the two ends this function itself returns
+    are exempt.
+    """
+    one, two = _ORIGINAL_SOCKETPAIR(family, type, proto)
+    _SELF_PIPE_SOCKETS.add(one)
+    _SELF_PIPE_SOCKETS.add(two)
+    return one, two
+
+
+class GuardedSocket(_ORIGINAL_SOCKET):
+    """Reject outbound network operations, except on the process's own
+    asyncio self-pipe (see ``_guarded_socketpair`` above).
+
+    Because ``socket.socket`` is replaced process-wide for the whole pytest
+    session (see ``pytest_configure`` below), blocking every socket ``send``/
+    ``connect`` indiscriminately also blocks the self-pipe's wakeup write,
+    which ``asyncio`` cannot recover from: the exception is swallowed inside
     ``Future._call_set_state``'s callback machinery, so the main loop's
     selector never gets woken and hangs forever. Confirmed with a minimal
     repro (a bare ``socket.socket`` subclass blocking ``send`` + one
-    ``asyncio.to_thread`` call) before this fix; every other socket-family
-    combination -- any real ``AF_INET``/``AF_INET6`` attempt -- is still
-    rejected exactly as before.
+    ``asyncio.to_thread`` call). Every other socket -- any real AF_INET/
+    AF_INET6 attempt, and any other AF_UNIX socket (bind/connect to a real
+    filesystem path or an abstract-namespace address) -- is still rejected
+    exactly as before.
     """
 
     def _is_self_pipe(self) -> bool:
-        try:
-            return self.family == socket.AF_UNIX
-        except OSError:
-            return False
+        return self in _SELF_PIPE_SOCKETS
 
     def bind(self, address: Any) -> None:
         if self._is_self_pipe():
@@ -764,6 +788,7 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     _POLICY = _build_policy()
     socket.socket = GuardedSocket
+    socket.socketpair = _guarded_socketpair
     socket.create_connection = blocked_create_connection
     socket.getaddrinfo = blocked_dns_lookup
     socket.gethostbyname = blocked_dns_lookup

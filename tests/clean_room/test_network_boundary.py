@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -328,3 +329,110 @@ def test_child_evidence_normalizes_external_certification_inputs(
     )
 
     assert evidence["argv"] == ["{phase1-python}", "{phase1-wheelhouse}"]
+
+
+def test_af_unix_connect_to_a_filesystem_path_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC (issue #65 round 2): an AF_UNIX socket that is NOT one of asyncio's own
+    self-pipe ends is still full egress and must still be rejected -- exempting
+    every AF_UNIX socket (the round-1 fix) wrongly let this through, since a local
+    daemon reachable over AF_UNIX (e.g. a Docker socket) is egress too."""
+    policy = BoundaryPolicy(allowed_write_roots=(), allowed_children=())
+    monkeypatch.setattr(boundaries, "_POLICY", policy)
+    # AF_UNIX paths are limited to ~104 bytes on macOS/BSD; tmp_path under pytest
+    # can exceed that, so use a short path directly under the system temp root.
+    socket_path = tempfile.mktemp(suffix=".sock", prefix="mf-cr-")
+
+    # The listener must be a genuine, unguarded socket (not the module-patched
+    # socket.socket, which is GuardedSocket in this session): it is test setup,
+    # not the thing under test.
+    listener = boundaries._ORIGINAL_SOCKET(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(socket_path)
+        listener.listen(1)
+
+        guarded = boundaries.GuardedSocket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            with pytest.raises(BoundaryViolation, match="network operation blocked: connect"):
+                guarded.connect(socket_path)
+        finally:
+            guarded.close()
+    finally:
+        listener.close()
+        Path(socket_path).unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="abstract-namespace AF_UNIX is Linux-only")
+def test_af_unix_connect_to_an_abstract_namespace_address_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC (issue #65 round 2): an abstract-namespace AF_UNIX address (leading NUL
+    byte, no filesystem path at all) is still rejected -- it is not one of the
+    two ends asyncio's own ``socket.socketpair()`` call returns."""
+    policy = BoundaryPolicy(allowed_write_roots=(), allowed_children=())
+    monkeypatch.setattr(boundaries, "_POLICY", policy)
+    abstract_address = "\0clean-room-test-abstract"
+
+    listener = boundaries._ORIGINAL_SOCKET(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(abstract_address)
+        listener.listen(1)
+
+        guarded = boundaries.GuardedSocket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            with pytest.raises(BoundaryViolation, match="network operation blocked: connect"):
+                guarded.connect(abstract_address)
+        finally:
+            guarded.close()
+    finally:
+        listener.close()
+
+
+def test_af_inet_and_af_inet6_connect_are_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard (issue #65 round 2): real AF_INET/AF_INET6 egress attempts
+    must still be rejected exactly as before the self-pipe exemption existed."""
+    policy = BoundaryPolicy(allowed_write_roots=(), allowed_children=())
+    monkeypatch.setattr(boundaries, "_POLICY", policy)
+
+    for family, address in (
+        (socket.AF_INET, ("127.0.0.1", 9)),
+        (socket.AF_INET6, ("::1", 9)),
+    ):
+        guarded = boundaries.GuardedSocket(family, socket.SOCK_STREAM)
+        try:
+            with pytest.raises(BoundaryViolation, match="network operation blocked: connect"):
+                guarded.connect(address)
+        finally:
+            guarded.close()
+
+
+def test_asyncio_to_thread_still_wakes_the_event_loop_under_the_guard(
+    boundary_policy: BoundaryPolicy,
+) -> None:
+    """AC (issue #65 round 2): explicitly proves the thing the self-pipe exemption
+    exists to keep working, rather than relying on the broader suite passing.
+
+    Before the round-1 fix, this hung forever: the worker thread's
+    ``call_soon_threadsafe`` wakeup write to the self-pipe was silently rejected by
+    the guard, so the main loop's selector never woke up. A bounded wait here turns
+    any regression back into a fast, explicit test failure instead of a CI hang.
+    """
+    import asyncio
+    import queue
+    import threading
+
+    result: queue.Queue[str] = queue.Queue()
+
+    def run() -> None:
+        async def work() -> str:
+            return await asyncio.to_thread(lambda: "done")
+
+        result.put(asyncio.run(work()))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive(), "asyncio.to_thread hung under the clean-room guard"
+    assert result.get_nowait() == "done"
