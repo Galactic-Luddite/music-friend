@@ -383,14 +383,18 @@ def test_finished_at_is_read_from_the_clock_when_the_run_completes_not_started_a
         assert result.run.finished_at > result.run.started_at
 
 
-def test_materially_changed_release_reopens_the_subjects_one_entry_instead_of_duplicating(
+def test_materially_changed_release_repoints_the_subjects_one_entry_without_reopening_it(
     tmp_path: Path,
 ) -> None:
-    """Catches a changed discovery duplicating the subject's inbox entry instead of reopening it.
+    """Catches a changed discovery either duplicating the subject's inbox entry, or reopening
+    the user's decision, instead of quietly repointing it at the new signal.
 
     The schema's ``UNIQUE (kind, subject_local_id)`` constraint forbids a second inbox entry
-    for the same release; a material change must resurface it by reopening the existing entry
-    to unread rather than by creating a second one.
+    for the same release, so a material change updates the existing entry in place. Reopening
+    it to unread would violate "re-observation never changes state" -- material_version still
+    includes provenance (content-digest exclusion is issue B/#62's job), so a routine refresh
+    that picks up a changed/cross-source signal must never flip a dismissed or saved decision
+    back to unread.
     """
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = MusicFriendApplication(catalog)
@@ -418,8 +422,10 @@ def test_materially_changed_release_reopens_the_subjects_one_entry_instead_of_du
         entries = application.list_inbox_entries(None, limit=10)
         assert len(entries) == 1
         assert entries[0].local_id == original.local_id
-        assert entries[0].state is InboxState.UNREAD
-        assert len(application.list_signals(None, limit=10)) == 2
+        assert entries[0].state is InboxState.DISMISSED
+        signals = application.list_signals(None, limit=10)
+        assert len(signals) == 2
+        assert entries[0].latest_signal_local_id in {signal.local_id for signal in signals}
 
 
 def test_later_release_reversion_creates_a_fresh_unread_signal(tmp_path: Path) -> None:

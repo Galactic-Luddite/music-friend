@@ -1178,16 +1178,20 @@ def _record_candidate(
             )
         )
     elif not repair:
-        # The subject already has its one inbox entry (schema-enforced). A genuinely new
-        # signal for it -- a material change -- reopens that same entry to unread and points
-        # it at the new signal, rather than creating a second entry for the same subject.
+        # The subject already has its one inbox entry (schema-enforced). A new signal for it
+        # only repoints latest_signal_local_id and updated_at at the new signal; it never
+        # changes state. Re-observation never changes state: material_version still includes
+        # provenance (content-digest exclusion is issue B/#62's job), so a cross-source signal
+        # for an already-decided subject is not evidence the user's decision should be
+        # reopened -- flipping a dismissed/saved item back to unread on a routine refresh is
+        # exactly the #57 duplicate-inbox regression this issue exists to close.
         application.put_inbox_entry(
             InboxEntry(
                 existing_entry.local_id,
                 kind,
                 subject_local_id,
                 signal.local_id,
-                InboxState.UNREAD,
+                existing_entry.state,
                 existing_entry.created_at,
                 checked_at,
             )
