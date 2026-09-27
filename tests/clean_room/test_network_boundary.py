@@ -3,7 +3,6 @@ from __future__ import annotations
 import socket
 import subprocess
 import sys
-import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -331,16 +330,25 @@ def test_child_evidence_normalizes_external_certification_inputs(
     assert evidence["argv"] == ["{phase1-python}", "{phase1-wheelhouse}"]
 
 
-def test_af_unix_connect_to_a_filesystem_path_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_af_unix_connect_to_a_filesystem_path_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """AC (issue #65 round 2): an AF_UNIX socket that is NOT one of asyncio's own
     self-pipe ends is still full egress and must still be rejected -- exempting
     every AF_UNIX socket (the round-1 fix) wrongly let this through, since a local
     daemon reachable over AF_UNIX (e.g. a Docker socket) is egress too."""
     policy = BoundaryPolicy(allowed_write_roots=(), allowed_children=())
     monkeypatch.setattr(boundaries, "_POLICY", policy)
-    # AF_UNIX paths are limited to ~104 bytes on macOS/BSD; tmp_path under pytest
-    # can exceed that, so use a short path directly under the system temp root.
-    socket_path = tempfile.mktemp(suffix=".sock", prefix="mf-cr-")
+    # AF_UNIX paths are limited to ~104-108 bytes (macOS/BSD/Linux); pytest's own
+    # tmp_path can already exceed that once nested under the clean-room harness's
+    # own basetemp. Chdir into tmp_path (pytest restores cwd automatically) and
+    # bind a short *relative* filename there -- short enough to fit the limit on
+    # every platform, and still inside a write root the clean-room harness's own
+    # filesystem-write boundary allows (unlike the system temp root, which the
+    # harness does not declare allowed and this test's own cleanup would then
+    # violate under MF_CLEAN_ROOM_ACTIVE=1).
+    monkeypatch.chdir(tmp_path)
+    socket_path = "s.sock"
 
     # The listener must be a genuine, unguarded socket (not the module-patched
     # socket.socket, which is GuardedSocket in this session): it is test setup,
@@ -358,7 +366,6 @@ def test_af_unix_connect_to_a_filesystem_path_is_rejected(monkeypatch: pytest.Mo
             guarded.close()
     finally:
         listener.close()
-        Path(socket_path).unlink(missing_ok=True)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="abstract-namespace AF_UNIX is Linux-only")
