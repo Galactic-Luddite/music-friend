@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import random
-import time
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2643,11 +2642,15 @@ def test_no_transaction_spans_a_source_call(tmp_path: Path) -> None:
 
 
 def test_per_artist_transaction_is_short(tmp_path: Path) -> None:
-    """AC (issue #65): a 100-release-per-artist transaction commits in under 200 ms.
+    """AC (issue #65): a 100-release-per-artist transaction is one short transaction,
+    not 100 small ones or one long-running one.
 
-    ``_MAX_RELEASES_PER_ARTIST`` bounds a single artist's persisted release batch
-    at 100; this measures the wall time of one full refresh over exactly that many
-    brand-new synthetic releases for a single watched artist.
+    Structural, not timing-based (a wall-clock assertion here is flaky under CI load,
+    per round-1 review): ``_MAX_RELEASES_PER_ARTIST`` bounds a single artist's
+    persisted release batch at 100. This asserts the persist step opens exactly one
+    outermost transaction for the whole 100-release batch (never one transaction per
+    release, and never more than one BEGIN/COMMIT pair), by wrapping
+    ``Catalog.transaction`` to count and record every entry's nesting depth.
     """
     with Catalog.open(tmp_path / "catalog.sqlite3") as catalog:
         application = MusicFriendApplication(catalog)
@@ -2659,13 +2662,26 @@ def test_per_artist_transaction_is_short(tmp_path: Path) -> None:
         )
         source.releases[("one", None)] = Page(releases, None)
 
-        started = time.perf_counter()
-        result = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
-        elapsed = time.perf_counter() - started
+        outermost_entries: list[int] = []
+        original_transaction = type(catalog).transaction
+
+        @contextmanager
+        def counting_transaction(self: Catalog) -> Iterator[None]:
+            depth_before = self._transaction_depth  # type: ignore[attr-defined]
+            if depth_before == 0:
+                outermost_entries.append(1)
+            with original_transaction(self):
+                yield
+
+        with patch.object(Catalog, "transaction", counting_transaction):
+            result = _refresh(application, source, kind="releases", lock_path=tmp_path / "lock")
 
         assert result.run is not None
         assert len(application.list_inbox_entries(None, limit=200)) == 100
-        assert elapsed < 0.2
+        # Exactly one outermost transaction covers the whole 100-release batch --
+        # not 100 separate transactions, and not left open across anything else in
+        # this refresh (release discovery is the only writer this run touches).
+        assert len(outermost_entries) == 1
 
 
 def test_additional_release_sources_rejects_a_malformed_entry(tmp_path: Path) -> None:
