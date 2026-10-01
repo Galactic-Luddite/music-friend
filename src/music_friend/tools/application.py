@@ -48,6 +48,11 @@ from music_friend.store.portable import (
     import_catalog,
     purge_source,
 )
+from music_friend.store.recent_history import (
+    HistorySyncState,
+    IncompleteInterval,
+    RecentHistoryStore,
+)
 from music_friend.store.spotify_history import (
     HistorySummary,
     SpotifyHistoryImportResult,
@@ -277,6 +282,40 @@ class MusicFriendApplication:
 
     def get_source_limit(self, source: str) -> SourceLimitObservation | None:
         return self._catalog.get_source_limit(source)
+
+    def recent_history_store(self) -> RecentHistoryStore:
+        return RecentHistoryStore(self._catalog)
+
+    def get_recent_history_state(self, provider: str) -> HistorySyncState | None:
+        return self.recent_history_store().get_state(provider)
+
+    def list_recent_history_intervals(self, provider: str) -> tuple[IncompleteInterval, ...]:
+        return self.recent_history_store().list_intervals(provider)
+
+    def recent_history_status(self, provider: str) -> dict[str, object]:
+        state = self.get_recent_history_state(provider)
+        first_archive, last_archive = self.recent_history_store().archive_bounds()
+        limit = self.get_source_limit(provider)
+        return {
+            "attempt_outcome": None if state is None else state.attempt_outcome,
+            "last_attempt_at": None if state is None else state.last_attempt_at.isoformat(),
+            "last_successful_check_at": None
+            if state is None or state.last_successful_check_at is None
+            else state.last_successful_check_at.isoformat(),
+            "newest_observed_played_at": None if state is None else state.newest_observed_played_at,
+            "archive_first_played_at": first_archive,
+            "archive_cutoff": last_archive,
+            "interval_completeness": "unknown" if state is None else state.interval_completeness,
+            "coverage_reason": "not_checked" if state is None else state.coverage_reason,
+            "needs_repair": False if state is None else state.needs_repair,
+            "retry_at": None
+            if limit is None or limit.retry_at is None
+            else limit.retry_at.isoformat(),
+            "incomplete_intervals": [
+                {"lower": interval.lower, "upper": interval.upper, "reason": interval.reason}
+                for interval in self.list_recent_history_intervals(provider)
+            ],
+        }
 
     def get_signal(self, local_id: str) -> Signal | None:
         return self._catalog.get_signal(local_id)

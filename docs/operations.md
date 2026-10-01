@@ -12,7 +12,7 @@ and listening-history summaries.
 | Inspect | `status`, `diagnostics`, `watchlist list`, `inbox list`, `inbox show ITEM_ID` | Read local state without contacting a provider |
 | Refresh | `refresh catalog`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
 | Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete`, `data inbox duplicates`, `data inbox unmerge` | Move, protect, or erase local data |
-| Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional six-hour refresh |
+| Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional daily refresh |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
 
 ## Agent-driven setup
@@ -327,3 +327,9 @@ same named schedule. Remove it when it is no longer wanted.
 
 `music-friend skill install` copies the packaged runtime skill into a client's skills directory.
 See the [install guide](install.md#optional-agent-skill) for destinations and replacement rules.
+`refresh catalog` and `refresh all` also check Spotify recently played history before catalog
+work. The history component remains fresh for 20 hours after a terminal check and makes no request
+while fresh, disconnected from the required permission, cooling down, or quota exhausted. `--force`
+does not bypass history freshness. An eligible check accepts at most two 50-item pages and reports
+its own outcome, request/page counts, observations, and coverage facts in JSON. Partial checks keep
+accepted observations and an incomplete interval without advancing the last successful check.

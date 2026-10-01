@@ -19,6 +19,7 @@ from music_friend.domain import (
     Release,
     ReleaseDatePrecision,
     SourceReference,
+    canonical_history_timestamp,
 )
 from music_friend.errors import InvalidSourceResponseError
 from music_friend.providers import (
@@ -27,6 +28,7 @@ from music_friend.providers import (
     Page,
     ProviderCapabilities,
     ProviderHealth,
+    RecentPlay,
     require_capability,
 )
 from music_friend.providers.spotify.config import SpotifySettings
@@ -41,6 +43,7 @@ _SPOTIFY_ID = re.compile(r"[A-Za-z0-9]{1,64}\Z")
 _CURSOR = re.compile(r"[A-Za-z0-9_-]{1,512}\Z")
 _TIME_RANGES = frozenset({"short_term", "medium_term", "long_term"})
 _MAX_OFFSET = 1_000_000
+_RECENT_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 
 
 class _TokenProvider(Protocol):
@@ -272,6 +275,44 @@ class SpotifySource:
                 raise InvalidSourceResponseError() from error
         return Page(tuple(releases[key] for key in sorted(releases)))
 
+    def recent_plays(
+        self, after_ms: int | None = None, cursor: str | None = None
+    ) -> Page[RecentPlay]:
+        if after_ms is not None and (type(after_ms) is not int or after_ms < 0):
+            raise ValueError("after_ms must be a non-negative integer or None")
+        if after_ms is not None and cursor is not None:
+            raise ValueError("after_ms and cursor are mutually exclusive")
+        cursor_after = _decode_cursor(cursor, "recent_plays", "after")
+        query: tuple[tuple[str, str], ...] = (("limit", "50"),)
+        after = str(after_ms) if after_ms is not None else cursor_after
+        if after is not None:
+            query += (("after", after),)
+        deadline = self._call_deadline()
+        self._authorize(Capability.RECENT_PLAYS)
+        data = self._execute(SpotifyOperation.RECENTLY_PLAYED, query=query, deadline=deadline)
+        try:
+            raw_items = _items(data, maximum=50)
+            next_value = _nullable_text(data.get("next"), "recent plays next")
+            cursors = _object(data.get("cursors"), "recent plays cursors")
+            after_value = cursors.get("after")
+            if after_value is not None and (
+                type(after_value) is not str or not after_value.isdigit()
+            ):
+                raise _SourceFailure("recent plays cursor must be numeric")
+            normalized = tuple(_recent_play(item) for item in raw_items)
+            next_cursor = None
+            if next_value is not None:
+                if (
+                    not normalized
+                    or after_value is None
+                    or (after is not None and int(after_value) <= int(after))
+                ):
+                    raise _SourceFailure("recent plays continuation cannot advance")
+                next_cursor = _encode_cursor("recent_plays", "after", after_value)
+            return Page(normalized, next_cursor)
+        except _SourceFailure as error:
+            raise InvalidSourceResponseError() from error
+
     def _authorize(self, capability: Capability) -> None:
         require_capability(self._capabilities, capability)
 
@@ -312,6 +353,32 @@ def _nullable_text(value: object, field: str) -> str | None:
     if type(value) is not str or not value or len(value) > 4096:
         raise _SourceFailure(f"{field} must be bounded text or null")
     return value
+
+
+def _recent_play(value: object) -> RecentPlay:
+    wrapper = _object(value, "recent play")
+    played_at = _nullable_text(wrapper.get("played_at"), "played_at")
+    if played_at is None or _RECENT_TIMESTAMP.fullmatch(played_at) is None:
+        raise _SourceFailure("played_at must be a precise UTC timestamp")
+    try:
+        _, _, played_at = canonical_history_timestamp(played_at)
+    except ValueError as error:
+        raise _SourceFailure("played_at must be a valid precise UTC timestamp") from error
+    track = _object(wrapper.get("track"), "track")
+    uri = _nullable_text(track.get("uri"), "track uri")
+    name = _nullable_text(track.get("name"), "track name")
+    artists = track.get("artists")
+    if not isinstance(artists, list) or not artists:
+        raise _SourceFailure("track artists must be non-empty")
+    artist = _nullable_text(_object(artists[0], "primary artist").get("name"), "artist name")
+    album = _nullable_text(_object(track.get("album"), "album").get("name"), "album name")
+    context_value = wrapper.get("context")
+    context_uri = None
+    if context_value is not None:
+        context_uri = _nullable_text(_object(context_value, "context").get("uri"), "context uri")
+    if uri is None or name is None or artist is None or album is None:
+        raise _SourceFailure("recent play metadata is incomplete")
+    return RecentPlay(uri, name, artist, album, played_at, context_uri)
 
 
 def _id(value: object, field: str) -> str:
@@ -387,7 +454,11 @@ def _decode_cursor(cursor: str | None, operation: str, field: str) -> str | None
         if value["v"] != 1 or value["op"] != operation:
             raise _SourceFailure("cursor binding is invalid")
         cursor_value = value[field]
-        if field == "after":
+        if field == "after" and operation == "recent_plays":
+            if type(cursor_value) is not str or not cursor_value.isdigit():
+                raise _SourceFailure("cursor after must be numeric")
+            result = cursor_value
+        elif field == "after":
             result = _id(cursor_value, "cursor after")
         else:
             if type(cursor_value) is not int or not 0 <= cursor_value <= _MAX_OFFSET:

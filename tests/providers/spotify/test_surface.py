@@ -101,12 +101,12 @@ EXPECTED_IMPORTS = {
         "from datetime import datetime",
         (
             "from music_friend.domain import Artist, CatalogItem, CatalogItemBatch, Release, "
-            "ReleaseDatePrecision, SourceReference"
+            "ReleaseDatePrecision, SourceReference, canonical_history_timestamp"
         ),
         "from music_friend.errors import InvalidSourceResponseError",
         (
             "from music_friend.providers import Capability, HealthStatus, Page, "
-            "ProviderCapabilities, ProviderHealth, require_capability"
+            "ProviderCapabilities, ProviderHealth, RecentPlay, require_capability"
         ),
         "from music_friend.providers.spotify.config import SpotifySettings",
         (
@@ -254,6 +254,11 @@ EXPECTED_PUBLIC_CALLABLES = {
             "Page[Release]",
         ),
         (
+            "SpotifySource.recent_plays",
+            "self, after_ms: int | None=None, cursor: str | None=None",
+            "Page[RecentPlay]",
+        ),
+        (
             "SpotifySource.saved_items",
             "self, cursor: str | None=None",
             "CatalogItemBatch",
@@ -325,6 +330,7 @@ EXPECTED_RETURN_ROOTS = {
         "SpotifySource.followed_artists": ("Page",),
         "SpotifySource.health": ("ProviderHealth",),
         "SpotifySource.recent_releases": ("Page",),
+        "SpotifySource.recent_plays": ("Page",),
         "SpotifySource.saved_items": ("CatalogItemBatch",),
         "SpotifySource.search_artists": ("Page",),
         "SpotifySource.top_items": ("CatalogItemBatch",),
@@ -381,6 +387,7 @@ EXPECTED_PUBLIC_CLASS_ASSIGNMENTS = {
         "SpotifyOperation.ARTIST_RELEASES",
         "SpotifyOperation.FOLLOWED_ARTISTS",
         "SpotifyOperation.HEALTH",
+        "SpotifyOperation.RECENTLY_PLAYED",
         "SpotifyOperation.SAVED_TRACKS",
         "SpotifyOperation.SEARCH_ARTISTS",
         "SpotifyOperation.TOKEN",
@@ -401,6 +408,7 @@ EXPECTED_OPERATIONS = {
     "ARTIST_RELEASES": "artist_releases",
     "FOLLOWED_ARTISTS": "followed_artists",
     "HEALTH": "health",
+    "RECENTLY_PLAYED": "recently_played",
     "SAVED_TRACKS": "saved_tracks",
     "SEARCH_ARTISTS": "search_artists",
     "TOKEN": "token",
@@ -431,6 +439,15 @@ EXPECTED_REQUESTS = {
         (("type", "artist"),),
     ),
     "HEALTH": ("GET", "_API_ORIGIN", "/v1/me", (), frozenset(), frozenset(), ()),
+    "RECENTLY_PLAYED": (
+        "GET",
+        "_API_ORIGIN",
+        "/v1/me/player/recently-played",
+        ("query_keys",),
+        frozenset({"limit", "after", "before"}),
+        frozenset(),
+        (),
+    ),
     "SAVED_TRACKS": (
         "GET",
         "_API_ORIGIN",

@@ -28,7 +28,9 @@ from music_friend.providers.spotify.transport import SpotifyTransport
 
 CLIENT_ID = "synthetic-client-id"
 SELECTED_CAPABILITIES = frozenset(Capability)
-SELECTED_SCOPES = "user-follow-read user-library-read user-read-private user-top-read"
+SELECTED_SCOPES = (
+    "user-follow-read user-library-read user-read-private user-read-recently-played user-top-read"
+)
 OBSERVED_AT = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 
 

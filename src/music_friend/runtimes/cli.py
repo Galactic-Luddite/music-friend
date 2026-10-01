@@ -705,6 +705,7 @@ def _status_command(
             "source_limits": {
                 "spotify": _source_limit_diagnostics(application, "spotify", _checked_at(now))
             },
+            "history": _history_status(application),
         }
     )
     return _emit(payload, structured, stdout)
@@ -1355,6 +1356,16 @@ def _refresh_payload(value: object) -> dict[str, object]:
                 payload["retry_after"] = value.retry_after
             if value.remaining is not None:
                 payload["remaining"] = value.remaining
+            if value.history is not None:
+                payload["history"] = {
+                    "outcome": value.history.outcome,
+                    "reason": value.history.reason,
+                    "attempts": value.history.attempts,
+                    "pages": value.history.pages,
+                    "observations": value.history.observations,
+                    "fresh": value.history.fresh,
+                    "interval_completeness": value.history.interval_completeness,
+                }
             return payload
     raise ValueError("refresh result is invalid")
 
@@ -1387,7 +1398,12 @@ def _diagnostics(
         "source_limits": {
             "spotify": _source_limit_diagnostics(application, "spotify", _checked_at(now))
         },
+        "history": _history_status(application),
     }
+
+
+def _history_status(application: MusicFriendApplication) -> dict[str, object]:
+    return application.recent_history_status("spotify")
 
 
 def _source_limit_diagnostics(

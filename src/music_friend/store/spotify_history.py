@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from music_friend.domain import canonical_history_timestamp
 from music_friend.domain.text import sanitize_display_name
 from music_friend.store.catalog import Catalog
 
@@ -53,6 +54,19 @@ class HistoryRanking:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationRanking:
+    name: str
+    observation_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryCoverageInterval:
+    lower: str | None
+    upper: str | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class HistorySummary:
     since: str | None
     until: str | None
@@ -64,6 +78,16 @@ class HistorySummary:
     brief_count: int
     top_artists: tuple[HistoryRanking, ...]
     top_tracks: tuple[HistoryRanking, ...]
+    api_observation_count: int = 0
+    combined_observation_count: int = 0
+    api_top_artists: tuple[ObservationRanking, ...] = ()
+    api_top_tracks: tuple[ObservationRanking, ...] = ()
+    candidate_overlap_count: int = 0
+    ambiguous_overlap_count: int = 0
+    duration_observation_count: int = 0
+    duration_unknown_count: int = 0
+    combined_observations_potentially_duplicated: bool = True
+    incomplete_intervals: tuple[HistoryCoverageInterval, ...] = ()
 
 
 def _text(
@@ -343,6 +367,56 @@ def summarize_history(
             for row in rows
         )
 
+    api_rows = connection.execute(
+        "SELECT played_at_seconds, played_at_fraction, track_uri, track_name, primary_artist_name FROM recent_play_observations ORDER BY played_at_seconds, played_at_fraction"
+    ).fetchall()
+    if since_text is not None:
+        since_key = canonical_history_timestamp(since_text)[:2]
+        api_rows = [
+            row
+            for row in api_rows
+            if (int(row[0]), str(row[1]).ljust(18, "0"))
+            >= (since_key[0], since_key[1].ljust(18, "0"))
+        ]
+    if until_text is not None:
+        until_key = canonical_history_timestamp(until_text)[:2]
+        api_rows = [
+            row
+            for row in api_rows
+            if (int(row[0]), str(row[1]).ljust(18, "0"))
+            < (until_key[0], until_key[1].ljust(18, "0"))
+        ]
+    archive_keys: Counter[tuple[int, str, str]] = Counter()
+    for played_at, track_uri in connection.execute(
+        "SELECT played_at, track_uri FROM listening_history"
+    ):
+        seconds, fraction, _ = canonical_history_timestamp(str(played_at))
+        archive_keys[(seconds, fraction, str(track_uri))] += 1
+    api_keys = {(int(row[0]), str(row[1]), str(row[2])) for row in api_rows}
+    candidate_overlap_count = sum(1 for key in api_keys if archive_keys[key] >= 1)
+    ambiguous_overlap_count = sum(1 for key in api_keys if archive_keys[key] > 1)
+
+    def api_rank(index: int) -> tuple[ObservationRanking, ...]:
+        counts = Counter(str(row[index]) for row in api_rows)
+        return tuple(
+            ObservationRanking(name, count)
+            for name, count in sorted(
+                counts.items(), key=lambda item: (-item[1], item[0].casefold(), item[0])
+            )[:limit]
+        )
+
+    api_count = len(api_rows)
+    interval_rows = connection.execute(
+        "SELECT lower_seconds,lower_fraction,upper_seconds,upper_fraction,reason FROM history_incomplete_intervals WHERE provider='spotify' ORDER BY id"
+    ).fetchall()
+
+    def precise(seconds: object, fraction: object) -> str | None:
+        if seconds is None:
+            return None
+        base = datetime.fromtimestamp(int(str(seconds)), timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        digits = "" if fraction is None else str(fraction)
+        return base + (("." + digits) if digits else "") + "Z"
+
     return HistorySummary(
         since=since_text,
         until=until_text,
@@ -354,12 +428,26 @@ def summarize_history(
         brief_count=int(aggregate[5]),
         top_artists=rankings("artist_name", "artist_name"),
         top_tracks=rankings("track_uri, track_name", "track_name"),
+        api_observation_count=api_count,
+        combined_observation_count=int(aggregate[2]) + api_count,
+        api_top_artists=api_rank(4),
+        api_top_tracks=api_rank(3),
+        candidate_overlap_count=candidate_overlap_count,
+        ambiguous_overlap_count=ambiguous_overlap_count,
+        duration_observation_count=int(aggregate[2]),
+        duration_unknown_count=api_count,
+        incomplete_intervals=tuple(
+            HistoryCoverageInterval(precise(row[0], row[1]), precise(row[2], row[3]), str(row[4]))
+            for row in interval_rows
+        ),
     )
 
 
 __all__ = [
     "HistoryArgumentError",
     "HistoryRanking",
+    "HistoryCoverageInterval",
+    "ObservationRanking",
     "HistorySummary",
     "SpotifyHistoryImportResult",
     "import_spotify_history",

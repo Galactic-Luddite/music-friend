@@ -166,6 +166,15 @@ def test_exact_operation_matrix_matches_independent_literal_oracle() -> None:
             (),
             "access-value",
         ),
+        (
+            SpotifyOperation.RECENTLY_PLAYED,
+            "GET",
+            "api.spotify.com",
+            "/v1/me/player/recently-played",
+            (("limit", "50"),),
+            (),
+            "access-value",
+        ),
     )
     transport, handler = _transport([httpx.Response(200, json={"ok": True}) for _ in cases])
 
@@ -179,9 +188,29 @@ def test_exact_operation_matrix_matches_independent_literal_oracle() -> None:
     assert actual == expected
     assert handler.requests[2].url.params["type"] == "artist"
     assert handler.requests[3].url.params["type"] == "artist"
-    assert "artist_id" not in handler.requests[-1].url.params
+    assert "artist_id" not in handler.requests[-2].url.params
     assert handler.requests[0].headers.get("authorization") is None
     assert handler.requests[1].headers["authorization"] == "Bearer access-value"
+
+
+@pytest.mark.parametrize(
+    "response,error",
+    [
+        (httpx.Response(500, json={}), SourceUnavailableError),
+        (httpx.Response(429, headers={"Retry-After": "10"}, json={}), RateLimitedError),
+    ],
+)
+def test_recently_played_never_retries_transport_failures(
+    response: httpx.Response, error: type[Exception]
+) -> None:
+    transport, handler = _transport([response, httpx.Response(200, json={})])
+    with pytest.raises(error):
+        transport.execute(
+            SpotifyOperation.RECENTLY_PLAYED,
+            query=(("limit", "50"),),
+            **{"access_" + "token": "access-value"},
+        )
+    assert len(handler.requests) == 1
 
 
 def test_public_surface_exposes_only_declared_transport_interfaces() -> None:

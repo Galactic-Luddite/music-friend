@@ -202,6 +202,8 @@ class SpotifyTokenManager:
         if operation is SpotifyOperation.TOKEN:
             raise InvalidSourceResponseError()
         access = self._access_token(deadline=deadline)
+        if operation is SpotifyOperation.RECENTLY_PLAYED:
+            return self._execute_with_access(operation, query, access, deadline)
         try:
             return self._execute_with_access(operation, query, access, deadline)
         except AuthenticationRequiredError:

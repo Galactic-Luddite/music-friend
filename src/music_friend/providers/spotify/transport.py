@@ -53,6 +53,7 @@ class SpotifyOperation(str, Enum):
     TOP_TRACKS = "top_tracks"
     TOP_ARTISTS = "top_artists"
     ARTIST_RELEASES = "artist_releases"
+    RECENTLY_PLAYED = "recently_played"
 
 
 class _TransportFailure(str, Enum):
@@ -129,6 +130,12 @@ _REQUESTS: Mapping[SpotifyOperation, _RequestDefinition] = MappingProxyType(
             _API_ORIGIN,
             "/v1/artists/{artist_id}/albums",
             query_keys=frozenset({"artist_id", "include_groups", "limit", "offset"}),
+        ),
+        SpotifyOperation.RECENTLY_PLAYED: _RequestDefinition(
+            "GET",
+            _API_ORIGIN,
+            "/v1/me/player/recently-played",
+            query_keys=frozenset({"limit", "after", "before"}),
         ),
     }
 )
@@ -219,7 +226,11 @@ class SpotifyTransport:
                 raise InvalidSourceResponseError()
             hard_deadline = min(hard_deadline, float(deadline))
 
-        attempts = 2 if definition.method == "GET" else 1
+        attempts = (
+            1
+            if operation is SpotifyOperation.RECENTLY_PLAYED
+            else (2 if definition.method == "GET" else 1)
+        )
         failure_reason: _TransportFailure | None = None
         for attempt in range(attempts):
             remaining = hard_deadline - self._clock()

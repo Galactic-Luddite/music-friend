@@ -47,7 +47,9 @@ Register this exact redirect URI with Spotify: `http://127.0.0.1/callback`. Duri
 Music Friend opens a temporary loopback listener on an available local port, so the browser uses a
 callback such as `http://127.0.0.1:49152/callback` for that connection. Verify Spotify’s current
 redirect-URI policy when registering the application. Music Friend requests read scopes for
-profile, followed artists, saved music, and top artists. It does not ask for a Spotify password in
+profile, followed artists, saved music, top artists, and recently played tracks. Existing
+connections must reconnect explicitly to grant `user-read-recently-played`; until then history
+refresh reports `permission_required` without contacting Spotify. It does not ask for a Spotify password in
 the CLI or MCP conversation.
 
 The app prefers an approved operating-system credential store. If one is unavailable, interactive

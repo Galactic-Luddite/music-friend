@@ -1,5 +1,10 @@
 # Changelog
 
+- Added bounded Spotify recently played synchronization to catalog/all refreshes. It preserves
+  archive and API evidence separately, reports incomplete coverage and unknown duration honestly,
+  exports the new local state in portable format 6, and keeps all status and summary reads local
+  (Refs #73).
+
 ## [Unreleased]
 
 - Fixed a refresh that stops between saving a changed release and updating its inbox item

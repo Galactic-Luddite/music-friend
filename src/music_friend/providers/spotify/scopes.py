@@ -16,6 +16,7 @@ _SCOPES_BY_CAPABILITY: Mapping[Capability, frozenset[str]] = MappingProxyType(
         Capability.TOP_ITEMS: frozenset({"user-top-read"}),
         Capability.TOP_ARTISTS: frozenset({"user-top-read"}),
         Capability.RECENT_RELEASES: frozenset(),
+        Capability.RECENT_PLAYS: frozenset({"user-read-recently-played"}),
     }
 )
 _SUPPORTED_CAPABILITIES = frozenset(_SCOPES_BY_CAPABILITY)

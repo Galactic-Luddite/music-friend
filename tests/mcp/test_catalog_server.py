@@ -277,7 +277,7 @@ def test_listening_history_summary_names_its_evidence_boundary(tmp_path: Path) -
         {"since": "2026-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z", "limit": 5},
     )
 
-    assert result["evidence_boundary"] == "imported Spotify music history"
+    assert result["evidence_boundary"] == "local Spotify archive and recently played observations"
     assert result["play_count"] == 1
     assert result["top_artists"] == [
         {"name": "Artist One", "play_count": 1, "milliseconds_played": 123000}
@@ -605,6 +605,19 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
         "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 1, "conflicts": 0},
+        "history": {
+            "attempt_outcome": None,
+            "last_attempt_at": None,
+            "last_successful_check_at": None,
+            "newest_observed_played_at": None,
+            "archive_first_played_at": None,
+            "archive_cutoff": None,
+            "interval_completeness": "unknown",
+            "coverage_reason": "not_checked",
+            "needs_repair": False,
+            "retry_at": None,
+            "incomplete_intervals": [],
+        },
     }
     assert _call(server, "search_catalog", {"query": "Artist", "limit": 1}) == {
         "items": [

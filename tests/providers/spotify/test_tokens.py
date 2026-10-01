@@ -109,6 +109,26 @@ def test_code_exchange_persists_exact_grant_without_returning_token_payload() ->
     assert manager._access_token() == "access-value"
 
 
+def test_recently_played_401_is_not_replayed_or_refreshed() -> None:
+    responses = Responses(
+        [_token_response(scope="user-read-recently-played"), httpx.Response(401, json={})]
+    )
+    store = MemoryStore()
+    manager = _manager(responses, store, [10.0])
+    manager._exchange_authorization_code(
+        "code-value",
+        redirect_uri="http://127.0.0.1/callback",
+        verifier="verifier-value",
+        granted_scopes=frozenset({"user-read-recently-played"}),
+    )
+    with pytest.raises(AuthenticationRequiredError):
+        manager._execute(SpotifyOperation.RECENTLY_PLAYED, query=(("limit", "50"),), deadline=1e20)
+    assert [request.url.path for request in responses.requests] == [
+        "/api/token",
+        "/v1/me/player/recently-played",
+    ]
+
+
 def test_access_expiry_triggers_exactly_one_safe_refresh() -> None:
     responses = Responses(
         [

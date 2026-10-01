@@ -57,6 +57,129 @@ def _record(payload: dict[str, object], kind: str) -> dict[str, object]:
     return next(record for record in records if isinstance(record, dict) and record["kind"] == kind)
 
 
+def _history_v6_payload(record: dict[str, object]) -> dict[str, object]:
+    return {
+        "format": "music-friend-catalog",
+        "version": 6,
+        "exported_at": "2030-01-01T00:00:00Z",
+        "records": [record],
+    }
+
+
+def _history_state_record() -> dict[str, object]:
+    return {
+        "kind": "history_sync_state",
+        "local_id": "spotify",
+        "provider": "spotify",
+        "last_attempt_at": "2030-01-01T00:00:00Z",
+        "last_successful_check_at": None,
+        "needs_repair": True,
+        "newest_played_at_seconds": 1893456000,
+        "newest_played_at_fraction": "123456789",
+        "requested_after_ms": 1893456000122,
+        "attempt_outcome": "running",
+        "interval_completeness": "incomplete",
+        "coverage_reason": "running",
+    }
+
+
+def _recent_observation_record() -> dict[str, object]:
+    return {
+        "kind": "recent_play_observation",
+        "local_id": "spotify:key",
+        "provider": "spotify",
+        "observation_key": "key",
+        "played_at_seconds": 1893456000,
+        "played_at_fraction": "123456789",
+        "track_uri": "spotify:track:synthetic",
+        "track_name": "Synthetic",
+        "primary_artist_name": "Synthetic artist",
+        "album_name": "Synthetic album",
+        "context_uri": None,
+        "observed_at": "2030-01-01T00:00:00Z",
+    }
+
+
+def _history_interval_record() -> dict[str, object]:
+    return {
+        "kind": "history_incomplete_interval",
+        "local_id": "spotify:1",
+        "provider": "spotify",
+        "lower_seconds": 1893456000,
+        "lower_fraction": "1",
+        "upper_seconds": 1893456001,
+        "upper_fraction": "2",
+        "reason": "bounded_window",
+        "recorded_at": "2030-01-01T00:00:00Z",
+    }
+
+
+@pytest.mark.parametrize(
+    ("record_factory", "field", "value"),
+    (
+        (_history_state_record, "newest_played_at_seconds", "not-an-integer"),
+        (_history_state_record, "newest_played_at_fraction", "12x"),
+        (_history_state_record, "newest_played_at_fraction", None),
+        (_history_state_record, "requested_after_ms", -1),
+        (_history_state_record, "needs_repair", 1),
+        (_history_state_record, "attempt_outcome", "invented"),
+        (_history_state_record, "interval_completeness", "complete"),
+        (_recent_observation_record, "played_at_seconds", 10**30),
+        (_recent_observation_record, "played_at_fraction", "120"),
+        (_recent_observation_record, "track_name", "Synthetic\x00unsafe"),
+        (_history_interval_record, "lower_seconds", "not-an-integer"),
+        (_history_interval_record, "lower_fraction", "10"),
+        (_history_interval_record, "upper_fraction", None),
+    ),
+)
+def test_v6_history_records_reject_invalid_fields_without_mutating_destination(
+    catalog: Catalog,
+    tmp_path: Path,
+    record_factory: Callable[[], dict[str, object]],
+    field: str,
+    value: object,
+) -> None:
+    existing = datetime(2029, 1, 1, tzinfo=timezone.utc)
+    catalog.set_check_time("existing", existing)
+    record = record_factory()
+    record[field] = value
+    source = tmp_path / f"invalid-{record['kind']}-{field}.json"
+    _write_payload(source, _history_v6_payload(record))
+
+    with pytest.raises(ValueError):
+        import_catalog(catalog, source)
+
+    assert catalog.get_check_time("existing") == existing
+    connection = catalog._require_connection()
+    assert connection.execute("SELECT count(*) FROM history_sync_state").fetchone()[0] == 0
+    assert (
+        connection.execute("SELECT count(*) FROM history_incomplete_intervals").fetchone()[0] == 0
+    )
+    assert connection.execute("SELECT count(*) FROM recent_play_observations").fetchone()[0] == 0
+
+
+def test_v6_history_interval_rejects_reversed_bounds_without_mutating_destination(
+    catalog: Catalog, tmp_path: Path
+) -> None:
+    existing = datetime(2029, 1, 1, tzinfo=timezone.utc)
+    catalog.set_check_time("existing", existing)
+    record = _history_interval_record()
+    record["lower_seconds"] = 1893456002
+    source = tmp_path / "invalid-history-interval-order.json"
+    _write_payload(source, _history_v6_payload(record))
+
+    with pytest.raises(ValueError):
+        import_catalog(catalog, source)
+
+    assert catalog.get_check_time("existing") == existing
+    assert (
+        catalog._require_connection()
+        .execute("SELECT count(*) FROM history_incomplete_intervals")
+        .fetchone()[0]
+        == 0
+    )
+
+
 def test_import_validates_stages_and_preserves_ids_and_mappings(
     catalog: Catalog, catalog_path: Path
 ) -> None:
@@ -508,7 +631,7 @@ def test_export_import_round_trip_preserves_interested_record_without_live_sourc
     "mutate",
     [
         lambda value: value.update(format="wrong"),
-        lambda value: value.update(version=6),
+        lambda value: value.update(version=7),
         lambda value: value.update(version=True),
         lambda value: value.update(exported_at="2026-09-01T12:00:00"),
         lambda value: value["records"].append(dict(value["records"][0])),
