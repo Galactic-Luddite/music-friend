@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from music_friend.domain import SourceLimitState
-from music_friend.errors import InvalidSourceResponseError, RateLimitedError
+from music_friend.domain import SourceLimitObservation, SourceLimitState
+from music_friend.errors import InvalidSourceResponseError, QuotaExhaustedError, RateLimitedError
 from music_friend.providers import Capability, Page, ProviderCapabilities, RecentPlay
 from music_friend.providers.spotify.config import SpotifySettings
 from music_friend.providers.spotify.source import SpotifySource
@@ -73,6 +73,34 @@ def test_sync_missing_permission_makes_zero_calls(catalog: Catalog) -> None:
     assert source.calls == []
 
 
+@pytest.mark.parametrize(
+    ("state", "retry_at", "expected"),
+    (
+        (SourceLimitState.QUOTA_EXHAUSTED, None, "quota_exhausted"),
+        (
+            SourceLimitState.COOLING_DOWN,
+            datetime(2030, 1, 2, 1, tzinfo=timezone.utc),
+            "cooling_down",
+        ),
+    ),
+)
+def test_saved_history_limits_skip_without_source_calls(
+    catalog: Catalog,
+    state: SourceLimitState,
+    retry_at: datetime | None,
+    expected: str,
+) -> None:
+    checked_at = datetime(2030, 1, 2, tzinfo=timezone.utc)
+    app = MusicFriendApplication(catalog)
+    app.put_source_limit(SourceLimitObservation("spotify", state, checked_at, retry_at, False, 1))
+    source = Source([])
+
+    result = sync_recent_history(app, "spotify", source, checked_at=checked_at)
+
+    assert result.outcome == expected
+    assert source.calls == []
+
+
 def test_partial_advances_boundary_without_success(catalog: Catalog) -> None:
     app = MusicFriendApplication(catalog)
     source = Source(
@@ -90,6 +118,46 @@ def test_partial_advances_boundary_without_success(catalog: Catalog) -> None:
     later = Source([Page(())])
     sync_recent_history(app, "spotify", later, checked_at=datetime(2030, 1, 3, tzinfo=timezone.utc))
     assert later.calls[0][0] == 1893456059999
+
+
+def test_stalled_cursor_retains_pages_and_requires_repair(catalog: Catalog) -> None:
+    app = MusicFriendApplication(catalog)
+    source = Source(
+        [
+            Page((play("2030-01-01T00:00:00Z"),), "same"),
+            Page((play("2030-01-01T00:01:00Z", "spotify:track:b"),), "same"),
+        ]
+    )
+
+    result = sync_recent_history(
+        app, "spotify", source, checked_at=datetime(2030, 1, 2, tzinfo=timezone.utc)
+    )
+
+    assert (result.outcome, result.reason, result.observations) == (
+        "bounded_partial",
+        "stalled_cursor",
+        2,
+    )
+    state = app.get_recent_history_state("spotify")
+    assert state is not None and state.needs_repair
+
+
+def test_oversized_page_records_invalid_response_without_observations(catalog: Catalog) -> None:
+    source = Source(
+        [Page(tuple(play("2030-01-01T00:00:00Z", f"spotify:track:{index}") for index in range(51)))]
+    )
+    app = MusicFriendApplication(catalog)
+
+    result = sync_recent_history(
+        app, "spotify", source, checked_at=datetime(2030, 1, 2, tzinfo=timezone.utc)
+    )
+
+    assert (result.outcome, result.reason, result.observations) == (
+        "failed",
+        "invalid_response",
+        0,
+    )
+    assert app.recent_history_store().list_observations("spotify") == ()
 
 
 def test_later_partial_preserves_previous_success_and_forces_repair(catalog: Catalog) -> None:
@@ -142,6 +210,34 @@ def test_paced_recent_history_does_not_retry_429() -> None:
         paced.recent_plays()
     assert len(source.calls) == 1
     assert paced.stopped and paced.current_observation().state is SourceLimitState.COOLING_DOWN
+
+
+def test_paced_recent_history_checkpoints_quota_without_retry() -> None:
+    class Exhausted(Source):
+        def recent_plays(
+            self, after_ms: int | None = None, cursor: str | None = None
+        ) -> Page[RecentPlay]:
+            self.calls.append((after_ms, cursor))
+            raise QuotaExhaustedError()
+
+    source = Exhausted([])
+    paced = _PacedSource(
+        source,
+        source_name="spotify",
+        started_at=0.0,
+        checked_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        monotonic=lambda: 0.0,
+        sleeper=lambda _delay: pytest.fail("history must not pause/retry"),
+        saved_limit=None,
+        rng=random.Random(1),
+    )
+
+    with pytest.raises(QuotaExhaustedError):
+        paced.recent_plays()
+
+    assert len(source.calls) == 1
+    assert paced.stopped
+    assert paced.current_observation().state is SourceLimitState.QUOTA_EXHAUSTED
 
 
 def test_invalid_provider_timestamp_records_failed_repair_outcome(catalog: Catalog) -> None:
