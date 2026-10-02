@@ -31,6 +31,7 @@ from music_friend.domain import (
     DAILY_REFRESH_MINUTES,
     InboxEntry,
     InboxState,
+    RefreshKind,
     RefreshMetricKind,
     RefreshRun,
     WatchlistEntry,
@@ -84,10 +85,10 @@ AuthorizerFactory = Callable[
 
 _USAGE = (
     "Usage: music-friend doctor | setup [--release-sources spotify,musicbrainz,deezer] | connect spotify | disconnect spotify | status | "
-    "refresh catalog|releases|events|all [--force] | watchlist list | inbox list|show | "
+    "refresh catalog|history|releases|events|all [--force] | watchlist list | inbox list|show | "
     "data export|import|import-spotify|backup|restore|delete | "
     "data inbox duplicates [--merge --yes] | data inbox unmerge MERGE_ID --yes | "
-    "diagnostics | schedule install|status|remove | version\n"
+    "diagnostics | schedule install [--kind catalog|history|releases|events|all]|status|remove | version\n"
     "       music-friend skill install (--client codex|claude | "
     "--target SKILLS_DIRECTORY) [--replace]\n"
 )
@@ -276,7 +277,7 @@ def run_cli(
             return 2
         return _skill_install_command(command[2:], stdout, stderr)
     if (
-        len(command) == 2
+        len(command) >= 2
         and command[0] == "schedule"
         and command[1]
         in {
@@ -285,7 +286,7 @@ def run_cli(
             "remove",
         }
     ):
-        return _schedule_command(command[1], structured, stdout, stderr)
+        return _schedule_command(command[1], command[2:], structured, stdout, stderr)
 
     store = LocalConfigStore() if config_store is None else config_store
     if not callable(getattr(store, "load", None)) or not callable(getattr(store, "save", None)):
@@ -411,7 +412,7 @@ def _run_local_command(
     if (
         len(argv) >= 2
         and argv[0] == "refresh"
-        and argv[1] in {"catalog", "releases", "events", "all"}
+        and argv[1] in {"catalog", "history", "releases", "events", "all"}
         and (len(argv) == 2 or (len(argv) == 3 and argv[2] == "--force"))
     ):
         force = len(argv) == 3
@@ -910,7 +911,28 @@ def _refresh(
     release_source_name = release_sources[0]
     needs_catalog = kind in ("catalog", "all")
     needs_releases = kind in ("releases", "all")
-    needs_spotify_source = needs_catalog or (needs_releases and "spotify" in release_sources)
+    needs_spotify_source = (
+        kind == "history" or needs_catalog or (needs_releases and "spotify" in release_sources)
+    )
+    if kind == "history":
+        with _spotify_source(
+            config,
+            connector_factory=connector_factory,
+            credential_store_factory=credential_store_factory,
+            now=now,
+        ) as history_source:
+            return refresh_once(
+                application,
+                kind=kind,
+                source_name="spotify",
+                source=history_source,
+                config=config,
+                event_client=None,
+                checked_at=checked_at,
+                lock_path=lock_path,
+                force=force,
+                now=lambda: _checked_at(now),
+            )
     with _ticketmaster_client(
         connector_factory=connector_factory,
         credential_store_factory=credential_store_factory,
@@ -1259,10 +1281,29 @@ def _inbox_unmerge_command(
     return _emit(payload, structured, stdout, text=message)
 
 
-def _schedule_command(action: str, structured: bool, stdout: TextIO, stderr: TextIO) -> int:
+def _schedule_command(
+    action: str,
+    arguments: list[str],
+    structured: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if action == "install" and not arguments:
+        schedule_kind = RefreshKind.ALL
+    elif action == "install" and len(arguments) == 2 and arguments[0] == "--kind":
+        try:
+            schedule_kind = RefreshKind(arguments[1])
+        except ValueError:
+            print(_USAGE, end="", file=stderr)
+            return 2
+    elif arguments:
+        print(_USAGE, end="", file=stderr)
+        return 2
+    else:
+        schedule_kind = RefreshKind.ALL
     platform = _schedule_platform()
     root = Path.home()
-    command = _scheduled_refresh_command()
+    command = _scheduled_refresh_command(schedule_kind)
     try:
         if action == "install":
             install_schedule(
@@ -1301,13 +1342,13 @@ def _schedule_command(action: str, structured: bool, stdout: TextIO, stderr: Tex
         return 1
 
 
-def _scheduled_refresh_command() -> tuple[str, ...]:
+def _scheduled_refresh_command(kind: RefreshKind = RefreshKind.ALL) -> tuple[str, ...]:
     return (
         str(Path(sys.executable).absolute()),
         "-m",
         "music_friend.runtimes.cli",
         "refresh",
-        "all",
+        kind.value,
         "--json",
     )
 

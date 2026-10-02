@@ -93,12 +93,13 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
             "kind": {
                 "description": (
                     "Which local record kinds to refresh from the provider: "
-                    "'catalog' (watched artists' tracks/releases), 'releases' "
+                    "'catalog' (watched artists' tracks/releases), 'history' "
+                    "(recent listening observations only), 'releases' "
                     "(new release discovery for watched artists), 'events' "
                     "(new Ticketmaster event discovery for watched artists), "
                     "or 'all' for every kind in one bounded run."
                 ),
-                "enum": ["catalog", "releases", "events", "all"],
+                "enum": ["catalog", "history", "releases", "events", "all"],
                 "type": "string",
             },
             "force": {
@@ -327,7 +328,10 @@ class RefreshCallback(Protocol):
     """
 
     def __call__(
-        self, kind: Literal["catalog", "releases", "events", "all"], *, force: bool = False
+        self,
+        kind: Literal["catalog", "history", "releases", "events", "all"],
+        *,
+        force: bool = False,
     ) -> object: ...
 
 
@@ -581,7 +585,8 @@ def create_music_server(
         name="refresh_music",
         description=(
             "Run one bounded refresh of local music data for watched artists: "
-            "'catalog' pulls tracks/releases, 'releases' discovers new "
+            "'catalog' pulls tracks/releases, 'history' pulls only recent "
+            "listening observations, 'releases' discovers new "
             "releases, 'events' discovers new Ticketmaster events, and 'all' "
             "runs every kind in one call. Purpose: pull fresh provider data "
             "into the local catalog and inbox. When to use: when data looks "
@@ -597,7 +602,7 @@ def create_music_server(
         annotations=_OPEN_WORLD_MUTATING,
     )
     async def refresh_music(
-        kind: Literal["catalog", "releases", "events", "all"],
+        kind: Literal["catalog", "history", "releases", "events", "all"],
         force: bool = False,
     ) -> CallToolResult:
         async def action() -> dict[str, object]:
@@ -1008,16 +1013,20 @@ def _tool_result(result: dict[str, object]) -> CallToolResult:
     )
 
 
-def _refresh_kind(value: object) -> Literal["catalog", "releases", "events", "all"]:
+def _refresh_kind(
+    value: object,
+) -> Literal["catalog", "history", "releases", "events", "all"]:
     if value == "catalog":
         return "catalog"
+    if value == "history":
+        return "history"
     if value == "releases":
         return "releases"
     if value == "events":
         return "events"
     if value == "all":
         return "all"
-    raise _InvalidArguments("kind must be one of: catalog, releases, events, all")
+    raise _InvalidArguments("kind must be one of: catalog, history, releases, events, all")
 
 
 def _refresh_force(value: object) -> bool:

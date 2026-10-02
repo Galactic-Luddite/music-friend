@@ -213,12 +213,12 @@ def test_cli_help_lists_the_complete_operational_command_surface(tmp_path: Path)
         "connect spotify",
         "disconnect spotify",
         "status",
-        "refresh catalog|releases|events|all",
+        "refresh catalog|history|releases|events|all",
         "watchlist list",
         "inbox list|show",
         "data export|import|import-spotify|backup|restore|delete",
         "diagnostics",
-        "schedule install|status|remove",
+        "schedule install [--kind catalog|history|releases|events|all]|status|remove",
         "version",
     ):
         assert command in stdout

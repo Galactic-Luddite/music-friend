@@ -20,6 +20,7 @@ NOW = datetime(2026, 9, 2, tzinfo=timezone.utc)
     ("kind", "expected"),
     (
         (RefreshKind.CATALOG, ("catalog",)),
+        (RefreshKind.HISTORY, ()),
         (RefreshKind.RELEASES, ("releases",)),
         (RefreshKind.EVENTS, ("events",)),
         (RefreshKind.ALL, ("catalog", "releases", "events")),

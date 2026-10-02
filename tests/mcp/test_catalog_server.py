@@ -35,7 +35,7 @@ from music_friend.domain import (
 from music_friend.mcp import catalog_server, create_music_server
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.refresh import RefreshInvocation
+from music_friend.tools.refresh import HistoryRefreshResult, RefreshInvocation
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
@@ -854,7 +854,7 @@ def test_list_inbox_returns_a_compact_summary_without_a_follow_up_call(tmp_path:
     application.close()
 
 
-@pytest.mark.parametrize("kind", ("catalog", "releases", "events", "all"))
+@pytest.mark.parametrize("kind", ("catalog", "history", "releases", "events", "all"))
 def test_catalog_server_accepts_each_bounded_refresh_kind(tmp_path: Path, kind: str) -> None:
     application = _application(tmp_path)
     calls: list[str] = []
@@ -1107,6 +1107,39 @@ def test_refresh_result_carries_reason_retry_after_and_remaining() -> None:
     assert payload["reason"] == "quota_exhausted"
     assert payload["remaining"] == 2
     assert "retry_after" not in payload
+
+
+def test_mcp_history_only_refresh_reports_business_attempts_and_observations() -> None:
+    run = RefreshRun(
+        "run-history",
+        "spotify",
+        RefreshKind.HISTORY,
+        RefreshStatus.SUCCEEDED,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+
+    payload = catalog_server._refresh_result(
+        RefreshInvocation(
+            run,
+            already_running=False,
+            history=HistoryRefreshResult(
+                "terminal_nonempty", "recent_plays", 1, 1, 7, True, "incomplete"
+            ),
+        )
+    )
+
+    assert payload["kind"] == "history"
+    assert payload["history"] == {
+        "outcome": "terminal_nonempty",
+        "reason": "recent_plays",
+        "attempts": 1,
+        "pages": 1,
+        "observations": 7,
+        "fresh": True,
+        "interval_completeness": "incomplete",
+    }
 
 
 def _blocking_refresh(artist_count: int, delay_seconds: float) -> tuple[object, threading.Event]:

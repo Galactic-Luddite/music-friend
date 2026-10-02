@@ -67,6 +67,7 @@ class LocalPreferenceKey(str, Enum):
 
 class RefreshKind(str, Enum):
     CATALOG = "catalog"
+    HISTORY = "history"
     RELEASES = "releases"
     EVENTS = "events"
     ALL = "all"

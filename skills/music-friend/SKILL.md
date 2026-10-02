@@ -24,7 +24,9 @@ signature, status footer, or advice to retry unless the local result specificall
   A non-zero `identity.conflicts` means some releases a source linked were kept as separate
   items; tell the person they can review them with `music-friend data inbox duplicates`.
 - To update local information, ask for confirmation and then call `refresh_music` with one of
-  `catalog`, `releases`, `events`, or `all`. A `kind: "events"` call with no event area configured
+  `catalog`, `history`, `releases`, `events`, or `all`. Use `kind: "history"` when only recent
+  listening observations are needed; it does not run catalog, release, or event work. A
+  `kind: "events"` call with no event area configured
   returns `{"status": "skipped", "reason": "event_area_not_configured"}` and makes no provider
   request; report that no event area is set rather than "no nearby events". A `kind: "all"` call
   with the same missing configuration still runs catalog and release discovery and adds

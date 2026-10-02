@@ -115,6 +115,80 @@ def test_migrations_are_idempotent(catalog_path: Path) -> None:
     reopened.close()
 
 
+def test_history_refresh_kind_migration_preserves_existing_runs_and_accepts_history() -> None:
+    migrations = bundled_migrations()
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        apply_migrations(connection, tuple(item for item in migrations if item.version <= 17))
+        existing_runs = (
+            (
+                "prior-all",
+                "spotify",
+                "all",
+                "succeeded",
+                "2030-01-01",
+                "2030-01-01",
+                '{"metrics":[{"kind":"source_requests","count":7}]}',
+            ),
+            (
+                "prior-catalog",
+                "spotify",
+                "catalog",
+                "succeeded",
+                "2030-01-02",
+                "2030-01-02",
+                '{"metrics":[{"kind":"source_requests","count":3}]}',
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO refresh_runs
+                (local_id, source, kind, status, started_at, finished_at, summary_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            existing_runs,
+        )
+        connection.execute(
+            """
+            INSERT INTO recent_play_observations (
+                provider, observation_key, played_at_seconds, played_at_fraction,
+                track_uri, track_name, primary_artist_name, album_name, context_uri, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "spotify",
+                "observation",
+                1893456000,
+                "123456789",
+                "spotify:track:synthetic",
+                "Synthetic Track",
+                "Synthetic Artist",
+                "Synthetic Album",
+                None,
+                "2030-01-02",
+            ),
+        )
+
+        apply_migrations(connection, tuple(item for item in migrations if item.version == 18))
+        connection.execute(
+            """
+            INSERT INTO refresh_runs
+                (local_id, source, kind, status, started_at, finished_at, summary_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("history", "spotify", "history", "succeeded", "2030-01-02", "2030-01-02", "{}"),
+        )
+
+        assert connection.execute(
+            "SELECT local_id, source, kind, status, started_at, finished_at, summary_json "
+            "FROM refresh_runs WHERE local_id != 'history' ORDER BY local_id"
+        ).fetchall() == sorted(existing_runs)
+        assert connection.execute(
+            "SELECT observation_key FROM recent_play_observations"
+        ).fetchall() == [("observation",)]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_failed_migration_rolls_back_schema_and_version() -> None:
     with closing(sqlite3.connect(":memory:", isolation_level=None)) as connection:
         broken = Migration(
@@ -373,25 +447,10 @@ def test_existing_database_is_never_deleted_when_migration_fails(
 
     assert catalog_path.is_file()
     with closing(sqlite3.connect(catalog_path)) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [
-            (1,),
-            (2,),
-            (3,),
-            (4,),
-            (5,),
-            (6,),
-            (7,),
-            (8,),
-            (9,),
-            (10,),
-            (11,),
-            (12,),
-            (13,),
-            (14,),
-            (15,),
-            (16,),
-            (17,),
-        ]
+        assert (
+            connection.execute("SELECT version FROM schema_migrations").fetchall()
+            == ALL_MIGRATION_VERSIONS
+        )
 
 
 def test_populated_v1_catalog_upgrades_to_v3_without_data_loss(catalog_path: Path) -> None:

@@ -157,6 +157,7 @@ def test_oversized_page_records_invalid_response_without_observations(catalog: C
         "invalid_response",
         0,
     )
+    assert result.attempts == 1
     assert app.recent_history_store().list_observations("spotify") == ()
 
 

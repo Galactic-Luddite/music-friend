@@ -29,6 +29,7 @@ from music_friend.domain import (
     IdentityConfidence,
     InboxEntry,
     InboxState,
+    RefreshKind,
     RefreshMetricKind,
     RefreshRun,
     Release,
@@ -391,6 +392,146 @@ def test_public_refresh_keeps_recent_history_current_and_source_separated(
     assert summary.duration_unknown_count == 2
     assert summary.api_top_artists[0].name == "API Artist"
     assert summary.api_top_artists[0].observation_count == 2
+
+
+def test_history_only_refresh_uses_no_other_provider_or_repair_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class HistoryOnlySource(FakeHistoryMusicSource):
+        def health(self) -> ProviderHealth:
+            raise AssertionError("history refresh must not probe provider health")
+
+        def followed_artists(self, _cursor: str | None = None) -> Page[Artist]:
+            raise AssertionError("history refresh must not read the catalog")
+
+        def saved_items(self, _cursor: str | None = None) -> object:
+            raise AssertionError("history refresh must not read saved items")
+
+        def top_artists(self, _time_range: str, _limit: int) -> Page[Artist]:
+            raise AssertionError("history refresh must not read top artists")
+
+        def recent_releases(
+            self,
+            _artist_refs: Sequence[SourceReference],
+            _since: datetime,
+            _cursor: str | None = None,
+        ) -> Page[Release]:
+            raise AssertionError("history refresh must not discover releases")
+
+    monkeypatch.setattr(
+        refresh_module,
+        "_repair_missing_signals",
+        lambda *_args, **_kwargs: pytest.fail("history refresh must not repair signals"),
+    )
+    monkeypatch.setattr(
+        refresh_module,
+        "_repair_inbox_entries",
+        lambda *_args, **_kwargs: pytest.fail("history refresh must not repair inbox entries"),
+    )
+    source = HistoryOnlySource(
+        [
+            Page(
+                (
+                    RecentPlay(
+                        "spotify:track:history-only",
+                        "History Only",
+                        "History Artist",
+                        "History Album",
+                        "2026-09-01T11:00:00.123456789Z",
+                    ),
+                )
+            )
+        ]
+    )
+    clock = FakeClock()
+    with Catalog.open(tmp_path / "history-only.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        result = refresh_once(
+            application,
+            kind="history",
+            source_name="spotify",
+            source=source,
+            config=_config(),
+            event_client=object(),  # type: ignore[arg-type]
+            checked_at=NOW,
+            lock_path=tmp_path / "history-only.lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+        summary = application.summarize_history()
+
+    assert result.run is not None and result.run.kind is RefreshKind.HISTORY
+    assert result.history is not None
+    assert (result.history.outcome, result.history.attempts, result.history.observations) == (
+        "first_snapshot",
+        1,
+        1,
+    )
+    assert summary.api_observation_count == 1
+    assert source.history_calls == [(None, None)]
+
+    with Catalog.open(tmp_path / "history-only.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        fresh = refresh_once(
+            application,
+            kind="history",
+            source_name="spotify",
+            source=source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW + timedelta(hours=1),
+            lock_path=tmp_path / "history-only.lock",
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            rng=_MaxJitterRandom(0),
+        )
+
+    assert fresh.history is not None and fresh.history.outcome == "skipped_fresh"
+    assert source.history_calls == [(None, None)]
+
+
+@pytest.mark.parametrize(
+    ("limit", "granted", "expected"),
+    (
+        (None, False, "permission_required"),
+        (SourceLimitState.QUOTA_EXHAUSTED, True, "quota_exhausted"),
+        (SourceLimitState.COOLING_DOWN, True, "cooling_down"),
+    ),
+)
+def test_history_only_local_skips_make_no_recent_play_calls(
+    tmp_path: Path,
+    limit: SourceLimitState | None,
+    granted: bool,
+    expected: str,
+) -> None:
+    class LocalSkipSource(FakeHistoryMusicSource):
+        def capabilities(self) -> ProviderCapabilities:
+            available = frozenset({Capability.RECENT_PLAYS})
+            return ProviderCapabilities(available, available if granted else frozenset())
+
+    source = LocalSkipSource([])
+    with Catalog.open(tmp_path / f"history-{expected}.sqlite3") as catalog:
+        application = MusicFriendApplication(catalog)
+        if limit is not None:
+            retry_at = NOW + timedelta(hours=1) if limit is SourceLimitState.COOLING_DOWN else None
+            application.put_source_limit(
+                SourceLimitObservation("spotify", limit, NOW, retry_at, False, 1)
+            )
+        result = refresh_once(
+            application,
+            kind="history",
+            source_name="spotify",
+            source=source,
+            config=_config(),
+            event_client=None,
+            checked_at=NOW,
+            lock_path=tmp_path / f"history-{expected}.lock",
+        )
+
+    assert result.history is not None and result.history.outcome == expected
+    assert result.history.attempts == 0
+    assert source.history_calls == []
 
 
 def test_release_refresh_creates_an_unread_item_then_preserves_saved_and_dismissed_history(

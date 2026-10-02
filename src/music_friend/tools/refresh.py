@@ -311,8 +311,8 @@ def sync_recent_history(
     first = state is None or state.newest_observed_played_at is None
     try:
         while attempts < 2:
-            page = source.recent_plays(after_ms=after_ms if attempts == 0 else None, cursor=cursor)
             attempts += 1
+            page = source.recent_plays(after_ms=after_ms if attempts == 1 else None, cursor=cursor)
             pages += 1
             if len(page.items) > 50:
                 raise InvalidSourceResponseError()
@@ -366,7 +366,7 @@ def sync_recent_history(
     except RateLimitedError:
         store.finish_partial(provider, outcome="failed", reason="rate_limited")
         return HistoryRefreshResult(
-            "failed", "rate_limited", attempts + 1, pages, observations, False, "incomplete"
+            "failed", "rate_limited", attempts, pages, observations, False, "incomplete"
         )
     except (
         AdditionalScopeRequiredError,
@@ -387,7 +387,7 @@ def sync_recent_history(
             reason = "invalid_response"
         store.finish_partial(provider, outcome="failed", reason=reason)
         return HistoryRefreshResult(
-            "failed", reason, attempts + 1, pages, observations, False, "incomplete"
+            "failed", reason, attempts, pages, observations, False, "incomplete"
         )
 
 
@@ -772,7 +772,7 @@ def refresh_once(
         type(release_source_name) is not str or not release_source_name
     ):
         raise ValueError("release_source_name must be text")
-    if source is None and "catalog" in components:
+    if source is None and ("catalog" in components or selected_kind is RefreshKind.HISTORY):
         raise ValueError("source is required for catalog refresh")
     if source is None and "releases" in components and release_source is None:
         raise ValueError("source or release_source is required for release refresh")
@@ -873,7 +873,7 @@ def refresh_once(
         counts = _RefreshCounts()
         history_result: HistoryRefreshResult | None = None
         if (
-            "catalog" in components
+            selected_kind in {RefreshKind.CATALOG, RefreshKind.ALL, RefreshKind.HISTORY}
             and limited_source is not None
             and isinstance(source, RecentPlaySource)
         ):
@@ -883,8 +883,9 @@ def refresh_once(
                 limited_source,
                 checked_at=checked_at,
             )
-        _repair_missing_signals(application, counts, config.release_sources)
-        _repair_inbox_entries(application, checked_at, counts)
+        if selected_kind is not RefreshKind.HISTORY:
+            _repair_missing_signals(application, counts, config.release_sources)
+            _repair_inbox_entries(application, checked_at, counts)
         run_id = _run_id()
         deadline_exceeded = False
         extra_sources: list[_PacedSource] = []
@@ -934,7 +935,9 @@ def refresh_once(
         )
         counts.limit_pauses = sum(paced.pauses for paced in paced_sources)
         if limited_source is not None and (
-            "catalog" in components or limited_source is limited_release_source
+            "catalog" in components
+            or selected_kind is RefreshKind.HISTORY
+            or limited_source is limited_release_source
         ):
             # Persist the learned pacing rate (and any cooldown) so the next invocation
             # starts from where this one left off, whether it hit a limit or recovered.
@@ -1080,6 +1083,8 @@ def _refresh_kind(value: RefreshKind | str) -> RefreshKind:
 
 
 def _components(kind: RefreshKind) -> tuple[str, ...]:
+    if kind is RefreshKind.HISTORY:
+        return ()
     if kind is RefreshKind.CATALOG:
         return ("catalog",)
     if kind is RefreshKind.RELEASES:

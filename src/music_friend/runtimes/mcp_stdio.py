@@ -198,8 +198,10 @@ def run_catalog_stdio_session(
                 release_source_name = release_sources[0]
                 needs_catalog = kind in ("catalog", "all")
                 needs_releases = kind in ("releases", "all")
-                needs_spotify_source = needs_catalog or (
-                    needs_releases and "spotify" in release_sources
+                needs_spotify_source = (
+                    kind == "history"
+                    or needs_catalog
+                    or (needs_releases and "spotify" in release_sources)
                 )
                 with ExitStack() as stack:
                     source: MusicSource | None = None
