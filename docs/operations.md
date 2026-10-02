@@ -10,9 +10,9 @@ and listening-history summaries.
 |-------|----------|--------------|
 | Setup and connection | `doctor`, `setup`, `connect spotify`, `disconnect spotify`, `version` | Check every onboarding prerequisite locally, enter the Spotify client identifier and optional event area, authorize or remove the Spotify credential |
 | Inspect | `status`, `diagnostics`, `watchlist list`, `inbox list`, `inbox show ITEM_ID` | Read local state without contacting a provider |
-| Refresh | `refresh catalog`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
+| Refresh | `refresh catalog`, `refresh history`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
 | Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete`, `data inbox duplicates`, `data inbox unmerge` | Move, protect, or erase local data |
-| Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional six-hour refresh |
+| Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional daily refresh |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
 
 ## Agent-driven setup
@@ -121,6 +121,7 @@ approved native credential store.
 music-friend status --json
 music-friend refresh catalog --json
 music-friend refresh catalog --force --json
+music-friend refresh history --json
 music-friend refresh releases --json
 music-friend refresh events --json
 music-friend refresh all --json
@@ -189,8 +190,9 @@ reports `{"status": "partial", "reason": "already_running", "retry_after": "..."
 `retry_after` is when the held lock becomes stale and can be taken over (omitted if the lock file
 is unreadable).
 
-The `source_requests` metric counts every provider request the run made -- Spotify, MusicBrainz
-(identity mapping included), Deezer, and Ticketmaster. `signals_repaired` counts inbox signals
+The `source_requests` metric counts provider operation calls made by the run -- Spotify,
+MusicBrainz (identity mapping included), Deezer, and Ticketmaster. Local preflight checks and
+separate OAuth token activity are outside that count. `signals_repaired` counts inbox signals
 reconstructed at the start of a run for discoveries an earlier, interrupted run committed without
 their signal; they are reported separately so `signals_created` counts only the current run's own
 findings.
@@ -207,7 +209,7 @@ events portion is identifiable without the whole run being reported as skipped o
 
 ### Refresh command exit codes
 
-`refresh catalog|releases|events|all` exits `0` for a `succeeded` or `skipped` outcome, `3` for
+`refresh catalog|history|releases|events|all` exits `0` for a `succeeded` or `skipped` outcome, `3` for
 `partial`, and `1` for `failed` or an already-running refresh (reported as `partial`). `diagnostics`
 and the other inspection commands exit `0` on success and `1` on an unexpected internal error;
 `doctor` uses its own `0`/`5` convention documented above.
@@ -299,7 +301,7 @@ passed on the command line, or any secret or environment value.
 
 ### Provider-not-configured
 
-`connect spotify`, `disconnect spotify`, and `refresh catalog|releases|all` report a dedicated
+`connect spotify`, `disconnect spotify`, and `refresh catalog|history|releases|all` report a dedicated
 message naming the missing provider and pointing at `music-friend doctor` for setup guidance
 ("Spotify is not configured. Run `music-friend doctor` for setup guidance.") instead of the generic
 failure sentence, and exit `1` -- the existing meaning of exit `1` for these commands is unchanged.
@@ -315,6 +317,7 @@ cannot be used for scheduled refreshes.
 ```bash
 music-friend schedule status --json
 music-friend schedule install
+music-friend schedule install --kind history
 music-friend schedule remove
 ```
 
@@ -323,7 +326,21 @@ with its platform and interval. The command uses the current supported platformâ
 scheduler: LaunchAgent on macOS or a systemd user timer on Linux. Repeated installation updates the
 same named schedule. Remove it when it is no longer wanted.
 
+Pass `--kind history` when the daily job should fetch only recent listening observations. That
+job uses the same refresh lock, 20-hour freshness check, deadline, pacing, and durable cooldown
+state as other refreshes, while making no catalog, release, event, repair, or provider-health
+request. Omitting `--kind` keeps the existing `refresh all` schedule.
+
 ## Optional skill
 
 `music-friend skill install` copies the packaged runtime skill into a client's skills directory.
 See the [install guide](install.md#optional-agent-skill) for destinations and replacement rules.
+`refresh history` checks only Spotify recently played history. `refresh catalog` and `refresh all`
+also check it before catalog work. The history component remains fresh for 20 hours after a
+terminal check and makes no request
+while fresh, disconnected from the required permission, cooling down, or quota exhausted. `--force`
+does not bypass history freshness. An eligible check accepts at most two 50-item pages and reports
+its own outcome, operation-attempt/page counts, observations, and coverage facts in JSON. An
+operation attempt counts a call to the recently-played operation; local preflight checks and any
+separate OAuth token activity are outside that count. Partial checks keep
+accepted observations and an incomplete interval without advancing the last successful check.

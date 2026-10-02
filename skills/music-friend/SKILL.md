@@ -24,7 +24,9 @@ signature, status footer, or advice to retry unless the local result specificall
   A non-zero `identity.conflicts` means some releases a source linked were kept as separate
   items; tell the person they can review them with `music-friend data inbox duplicates`.
 - To update local information, ask for confirmation and then call `refresh_music` with one of
-  `catalog`, `releases`, `events`, or `all`. A `kind: "events"` call with no event area configured
+  `catalog`, `history`, `releases`, `events`, or `all`. Use `kind: "history"` when only recent
+  listening observations are needed; it does not run catalog, release, or event work. A
+  `kind: "events"` call with no event area configured
   returns `{"status": "skipped", "reason": "event_area_not_configured"}` and makes no provider
   request; report that no event area is set rather than "no nearby events". A `kind: "all"` call
   with the same missing configuration still runs catalog and release discovery and adds
@@ -45,6 +47,10 @@ signature, status footer, or advice to retry unless the local result specificall
 - For historical listening questions, call `summarize_listening_history` with an explicit UTC
   range when the person names one. State the returned evidence boundary and do not reinterpret
   play counts as approved preferences.
+  Archive `play_count` and listening time retain their original meaning. API observations have
+  unknown duration, skip, and completion; describe combined counts as potentially duplicated or
+  undercounted even when exact candidate overlap is zero. Use `api_top_artists` and
+  `api_top_tracks` only as source-specific observation rankings.
 
 Summarize results as local information. Event links are for discovery; never purchase tickets or
 complete a transaction.
@@ -63,3 +69,8 @@ CLI, and `update_setup`'s response names the exact command to run for it.
 Spotify extended-history archives are imported only through the local CLI's `data import-spotify`
 command. Do not claim that a model runtime is an MCP client merely because it can use OpenAI-compatible tool
 calls. A host performs the tool-call bridge.
+
+`music_status.history` and `refresh_music.history` contain the allowlisted ongoing-sync outcome,
+freshness, and coverage facts. They never expose provider URIs or cursors. A missing recently
+played grant requires an explicit CLI reconnect; do not attempt connection or token repair through
+MCP. Disconnect retains local history evidence, while the documented purge/delete commands remove it.

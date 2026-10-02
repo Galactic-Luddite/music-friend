@@ -49,10 +49,26 @@ from music_friend.domain import (
     SourceLimitState,
     SourceReference,
     SyncCapabilityStatus,
+    history_request_after_ms,
 )
 from music_friend.domain.observations import ObservationOutcome, ReleaseObservation
-from music_friend.errors import QuotaExhaustedError, RateLimitedError
-from music_friend.providers import MusicSource, Page, ProviderCapabilities, ProviderHealth
+from music_friend.errors import (
+    AdditionalScopeRequiredError,
+    AuthenticationRequiredError,
+    InvalidSourceResponseError,
+    QuotaExhaustedError,
+    RateLimitedError,
+    SourceUnavailableError,
+)
+from music_friend.providers import (
+    Capability,
+    MusicSource,
+    Page,
+    ProviderCapabilities,
+    ProviderHealth,
+    RecentPlay,
+    RecentPlaySource,
+)
 from music_friend.providers.musicbrainz.source import MusicBrainzSource
 from music_friend.providers.ticketmaster import (
     TicketmasterAttraction,
@@ -185,6 +201,18 @@ class RefreshInvocation:
     reason: str | None = None
     retry_after: str | None = None
     remaining: int | None = None
+    history: HistoryRefreshResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryRefreshResult:
+    outcome: str
+    reason: str
+    attempts: int
+    pages: int
+    observations: int
+    fresh: bool
+    interval_completeness: str
 
 
 @dataclass(slots=True)
@@ -219,6 +247,148 @@ class _RefreshCounts:
     #: primary release source's partial state is still carried by ``partial``
     #: alone, matching every other component.
     partial_sources: list[str] = field(default_factory=list)
+
+
+def sync_recent_history(
+    application: MusicFriendApplication,
+    provider: str,
+    source: RecentPlaySource,
+    *,
+    checked_at: datetime,
+) -> HistoryRefreshResult:
+    """Run one bounded, offline-testable recent-play synchronization."""
+    store = application.recent_history_store()
+    state = store.get_state(provider)
+    capabilities = source.capabilities()
+    if Capability.RECENT_PLAYS not in capabilities.granted:
+        return HistoryRefreshResult(
+            "permission_required", "permission_required", 0, 0, 0, False, "unknown"
+        )
+    limit = application.get_source_limit(provider)
+    if limit is not None:
+        if limit.state is SourceLimitState.QUOTA_EXHAUSTED:
+            return HistoryRefreshResult(
+                "quota_exhausted",
+                "quota_exhausted",
+                0,
+                0,
+                0,
+                False,
+                state.interval_completeness if state else "unknown",
+            )
+        if (
+            limit.state is SourceLimitState.COOLING_DOWN
+            and limit.retry_at is not None
+            and limit.retry_at > checked_at
+        ):
+            return HistoryRefreshResult(
+                "cooling_down",
+                "cooling_down",
+                0,
+                0,
+                0,
+                False,
+                state.interval_completeness if state else "unknown",
+            )
+    if (
+        state is not None
+        and not state.needs_repair
+        and state.last_successful_check_at is not None
+        and checked_at - state.last_successful_check_at < timedelta(hours=20)
+    ):
+        return HistoryRefreshResult(
+            "skipped_fresh", "fresh", 0, 0, 0, True, state.interval_completeness
+        )
+    after_ms = (
+        history_request_after_ms(state.newest_observed_played_at)
+        if state and state.newest_observed_played_at
+        else None
+    )
+    store.begin_attempt(provider, checked_at, requested_after_ms=after_ms)
+    cursor: str | None = None
+    seen: set[str] = set()
+    attempts = pages = observations = 0
+    first = state is None or state.newest_observed_played_at is None
+    try:
+        while attempts < 2:
+            attempts += 1
+            page = source.recent_plays(after_ms=after_ms if attempts == 1 else None, cursor=cursor)
+            pages += 1
+            if len(page.items) > 50:
+                raise InvalidSourceResponseError()
+            reason = "first_check_retention_unknown" if first else "bounded_window"
+            observations += store.commit_page(
+                provider,
+                page.items,
+                attempted_at=checked_at,
+                requested_after_ms=after_ms,
+                reason=reason,
+            )
+            if page.next_cursor is None:
+                outcome = (
+                    "terminal_empty"
+                    if observations == 0
+                    else ("first_snapshot" if first else "terminal_nonempty")
+                )
+                store.finish_success(provider, checked_at, outcome=outcome, reason=reason)
+                return HistoryRefreshResult(
+                    outcome,
+                    reason,
+                    attempts,
+                    pages,
+                    observations,
+                    True,
+                    "unknown" if first else "incomplete",
+                )
+            if page.next_cursor in seen:
+                store.finish_partial(provider, outcome="bounded_partial", reason="stalled_cursor")
+                return HistoryRefreshResult(
+                    "bounded_partial",
+                    "stalled_cursor",
+                    attempts,
+                    pages,
+                    observations,
+                    False,
+                    "incomplete",
+                )
+            seen.add(page.next_cursor)
+            cursor = page.next_cursor
+        store.finish_partial(provider, outcome="bounded_partial", reason="budget_exhausted")
+        return HistoryRefreshResult(
+            "bounded_partial",
+            "budget_exhausted",
+            attempts,
+            pages,
+            observations,
+            False,
+            "incomplete",
+        )
+    except RateLimitedError:
+        store.finish_partial(provider, outcome="failed", reason="rate_limited")
+        return HistoryRefreshResult(
+            "failed", "rate_limited", attempts, pages, observations, False, "incomplete"
+        )
+    except (
+        AdditionalScopeRequiredError,
+        AuthenticationRequiredError,
+        QuotaExhaustedError,
+        InvalidSourceResponseError,
+        SourceUnavailableError,
+    ) as error:
+        if isinstance(error, QuotaExhaustedError):
+            reason = "quota_exhausted"
+        elif isinstance(error, AdditionalScopeRequiredError):
+            reason = "permission_required"
+        elif isinstance(error, AuthenticationRequiredError):
+            reason = "authentication_required"
+        elif isinstance(error, SourceUnavailableError):
+            reason = "source_unavailable"
+        else:
+            reason = "invalid_response"
+        store.finish_partial(provider, outcome="failed", reason=reason)
+        return HistoryRefreshResult(
+            "failed", reason, attempts, pages, observations, False, "incomplete"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +489,57 @@ class _PacedSource:
         cursor: str | None = None,
     ) -> Page[Release]:
         return self._request(lambda: self.source.recent_releases(artist_refs, since, cursor))
+
+    def recent_plays(
+        self, after_ms: int | None = None, cursor: str | None = None
+    ) -> Page[RecentPlay]:
+        if not isinstance(self.source, RecentPlaySource):
+            raise InvalidSourceResponseError()
+        self._pace()
+        self.requests += 1
+        try:
+            result = self.source.recent_plays(after_ms=after_ms, cursor=cursor)
+        except QuotaExhaustedError:
+            observed_at = self._wall_now()
+            self._consecutive_limits += 1
+            self._on_limited()
+            self.limit_observation = SourceLimitObservation(
+                self.source_name,
+                SourceLimitState.QUOTA_EXHAUSTED,
+                observed_at,
+                None,
+                False,
+                self._consecutive_limits,
+                self.window_calls,
+            )
+            self.stopped = True
+            self.stop_reason = "quota_exhausted"
+            raise
+        except RateLimitedError as error:
+            observed_at = self._wall_now()
+            self._consecutive_limits += 1
+            self._on_limited()
+            delay = (
+                float(error.retry_after_seconds)
+                if error.retry_after_is_exact
+                else float(self.profile.fallback_ladder[0])
+            )
+            self.limit_observation = SourceLimitObservation(
+                self.source_name,
+                SourceLimitState.COOLING_DOWN,
+                observed_at,
+                observed_at + timedelta(seconds=delay),
+                error.retry_after_is_exact,
+                self._consecutive_limits,
+                self.window_calls,
+            )
+            self.stopped = True
+            self.stop_reason = "rate_limited"
+            raise
+        self._consecutive_limits = 0
+        self._estimated_limits = 0
+        self._on_success()
+        return result
 
     def lookup_artists_by_spotify_urls(self, spotify_urls: Sequence[str]) -> dict[str, str | None]:
         """Pass through to a MusicBrainz-shaped source, paced identically to recent_releases.
@@ -551,7 +772,7 @@ def refresh_once(
         type(release_source_name) is not str or not release_source_name
     ):
         raise ValueError("release_source_name must be text")
-    if source is None and "catalog" in components:
+    if source is None and ("catalog" in components or selected_kind is RefreshKind.HISTORY):
         raise ValueError("source is required for catalog refresh")
     if source is None and "releases" in components and release_source is None:
         raise ValueError("source or release_source is required for release refresh")
@@ -650,8 +871,21 @@ def refresh_once(
             else _DeadlineEventClient(event_client, started_monotonic, clock)
         )
         counts = _RefreshCounts()
-        _repair_missing_signals(application, counts, config.release_sources)
-        _repair_inbox_entries(application, checked_at, counts)
+        history_result: HistoryRefreshResult | None = None
+        if (
+            selected_kind in {RefreshKind.CATALOG, RefreshKind.ALL, RefreshKind.HISTORY}
+            and limited_source is not None
+            and isinstance(source, RecentPlaySource)
+        ):
+            history_result = sync_recent_history(
+                application,
+                source_name,
+                limited_source,
+                checked_at=checked_at,
+            )
+        if selected_kind is not RefreshKind.HISTORY:
+            _repair_missing_signals(application, counts, config.release_sources)
+            _repair_inbox_entries(application, checked_at, counts)
         run_id = _run_id()
         deadline_exceeded = False
         extra_sources: list[_PacedSource] = []
@@ -701,7 +935,9 @@ def refresh_once(
         )
         counts.limit_pauses = sum(paced.pauses for paced in paced_sources)
         if limited_source is not None and (
-            "catalog" in components or limited_source is limited_release_source
+            "catalog" in components
+            or selected_kind is RefreshKind.HISTORY
+            or limited_source is limited_release_source
         ):
             # Persist the learned pacing rate (and any cooldown) so the next invocation
             # starts from where this one left off, whether it hit a limit or recovered.
@@ -753,6 +989,7 @@ def refresh_once(
             reason=reason,
             retry_after=retry_after,
             remaining=remaining,
+            history=history_result,
         )
     finally:
         _release_lock(lease)
@@ -846,6 +1083,8 @@ def _refresh_kind(value: RefreshKind | str) -> RefreshKind:
 
 
 def _components(kind: RefreshKind) -> tuple[str, ...]:
+    if kind is RefreshKind.HISTORY:
+        return ()
     if kind is RefreshKind.CATALOG:
         return ("catalog",)
     if kind is RefreshKind.RELEASES:
@@ -1631,4 +1870,11 @@ def _read_lock(path: Path) -> _LockLease | None:
         return None
 
 
-__all__ = ["RefreshInvocation", "refresh_is_running", "refresh_once", "update_inbox_state"]
+__all__ = [
+    "HistoryRefreshResult",
+    "RefreshInvocation",
+    "refresh_is_running",
+    "refresh_once",
+    "sync_recent_history",
+    "update_inbox_state",
+]

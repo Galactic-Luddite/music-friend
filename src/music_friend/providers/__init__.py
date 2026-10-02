@@ -7,6 +7,8 @@ from music_friend.providers.base import (
     Page,
     ProviderCapabilities,
     ProviderHealth,
+    RecentPlay,
+    RecentPlaySource,
     require_capability,
 )
 
@@ -15,6 +17,8 @@ __all__ = [
     "HealthStatus",
     "MusicSource",
     "Page",
+    "RecentPlay",
+    "RecentPlaySource",
     "ProviderCapabilities",
     "ProviderHealth",
     "require_capability",

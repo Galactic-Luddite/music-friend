@@ -54,8 +54,8 @@ from music_friend.store.catalog import Catalog
 from music_friend.store.spotify_history import _text as _history_text
 
 _FORMAT = "music-friend-catalog"
-_VERSION = 5
-_SUPPORTED_VERSIONS = frozenset({1, 2, 3, 4, 5})
+_VERSION = 6
+_SUPPORTED_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_MAX_RECORDS = 2_000_000
 _PortableCanonical = Artist | Release | Event
@@ -70,6 +70,32 @@ _PORTABLE_DENYLIST = (
     "raw_provider",
     "email_body",
     "calendar_body",
+)
+_HISTORY_ATTEMPT_OUTCOMES = frozenset(
+    {
+        "running",
+        "first_snapshot",
+        "terminal_empty",
+        "terminal_nonempty",
+        "bounded_partial",
+        "failed",
+    }
+)
+_HISTORY_COMPLETENESS = frozenset({"unknown", "incomplete"})
+_HISTORY_COVERAGE_REASONS = frozenset(
+    {
+        "running",
+        "first_check_retention_unknown",
+        "bounded_window",
+        "stalled_cursor",
+        "budget_exhausted",
+        "rate_limited",
+        "quota_exhausted",
+        "permission_required",
+        "authentication_required",
+        "source_unavailable",
+        "invalid_response",
+    }
 )
 
 
@@ -278,6 +304,60 @@ def _export_records(catalog: Catalog) -> list[dict[str, object]]:
                 "time_precision": row[5],
                 "source_links": source_links,
                 "observed_at": _iso(row[6]),
+            }
+        )
+    for row in connection.execute(
+        "SELECT provider,observation_key,played_at_seconds,played_at_fraction,track_uri,track_name,primary_artist_name,album_name,context_uri,observed_at FROM recent_play_observations"
+    ):
+        records.append(
+            {
+                "kind": "recent_play_observation",
+                "local_id": f"{row[0]}:{row[1]}",
+                "provider": str(row[0]),
+                "observation_key": str(row[1]),
+                "played_at_seconds": int(row[2]),
+                "played_at_fraction": str(row[3]),
+                "track_uri": str(row[4]),
+                "track_name": str(row[5]),
+                "primary_artist_name": str(row[6]),
+                "album_name": str(row[7]),
+                "context_uri": row[8],
+                "observed_at": str(row[9]),
+            }
+        )
+    for row in connection.execute(
+        "SELECT provider,last_attempt_at,last_successful_check_at,needs_repair,newest_played_at_seconds,newest_played_at_fraction,requested_after_ms,attempt_outcome,interval_completeness,coverage_reason FROM history_sync_state"
+    ):
+        records.append(
+            {
+                "kind": "history_sync_state",
+                "local_id": str(row[0]),
+                "provider": str(row[0]),
+                "last_attempt_at": str(row[1]),
+                "last_successful_check_at": row[2],
+                "needs_repair": bool(row[3]),
+                "newest_played_at_seconds": row[4],
+                "newest_played_at_fraction": row[5],
+                "requested_after_ms": row[6],
+                "attempt_outcome": str(row[7]),
+                "interval_completeness": str(row[8]),
+                "coverage_reason": str(row[9]),
+            }
+        )
+    for row in connection.execute(
+        "SELECT id,provider,lower_seconds,lower_fraction,upper_seconds,upper_fraction,reason,recorded_at FROM history_incomplete_intervals"
+    ):
+        records.append(
+            {
+                "kind": "history_incomplete_interval",
+                "local_id": f"{row[1]}:{row[0]}",
+                "provider": str(row[1]),
+                "lower_seconds": row[2],
+                "lower_fraction": row[3],
+                "upper_seconds": row[4],
+                "upper_fraction": row[5],
+                "reason": str(row[6]),
+                "recorded_at": str(row[7]),
             }
         )
     for row in connection.execute(
@@ -791,6 +871,64 @@ def _integer(value: object, name: str) -> int:
     return value
 
 
+def _history_second(value: object, name: str, *, nullable: bool = False) -> int | None:
+    if value is None and nullable:
+        return None
+    if type(value) is not int:
+        raise ValueError(f"{name} is invalid")
+    try:
+        datetime.fromtimestamp(value, timezone.utc)
+    except (OverflowError, OSError, ValueError) as error:
+        raise ValueError(f"{name} is invalid") from error
+    return value
+
+
+def _history_fraction(value: object, name: str, *, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if (
+        type(value) is not str
+        or len(value) > _TEXT_LIMIT
+        or (value != "" and (not value.isascii() or not value.isdigit() or value.endswith("0")))
+    ):
+        raise ValueError(f"{name} is invalid")
+    return value
+
+
+def _history_timestamp_pair(
+    seconds_value: object,
+    fraction_value: object,
+    name: str,
+    *,
+    nullable: bool,
+) -> tuple[int | None, str | None]:
+    seconds = _history_second(seconds_value, f"{name} seconds", nullable=nullable)
+    fraction = _history_fraction(fraction_value, f"{name} fraction", nullable=nullable)
+    if (seconds is None) != (fraction is None):
+        raise ValueError(f"{name} is invalid")
+    return seconds, fraction
+
+
+def _history_pair_after(
+    lower: tuple[int | None, str | None], upper: tuple[int | None, str | None]
+) -> bool:
+    if lower[0] is None or upper[0] is None:
+        return False
+    if lower[0] != upper[0]:
+        return lower[0] > upper[0]
+    lower_fraction = lower[1] or ""
+    upper_fraction = upper[1] or ""
+    width = max(len(lower_fraction), len(upper_fraction))
+    return lower_fraction.ljust(width, "0") > upper_fraction.ljust(width, "0")
+
+
+def _history_enum(value: object, name: str, allowed: frozenset[str]) -> str:
+    text = _text(value, name, maximum=64)
+    if text not in allowed:
+        raise ValueError(f"{name} is invalid")
+    return text
+
+
 def _refresh_summary(value: object) -> RefreshSummary:
     if type(value) is not dict or set(value) != {"version", "metrics"}:
         raise ValueError("refresh summary is invalid")
@@ -931,6 +1069,10 @@ def _validate_document(
             deferred_kinds.add("source_limit")
         if version >= 4:
             deferred_kinds.add("listening_history")
+        if version >= 6:
+            deferred_kinds.update(
+                {"recent_play_observation", "history_sync_state", "history_incomplete_interval"}
+            )
         if kind in deferred_kinds:
             if kind != "source_mapping":
                 deferred.append(record)
@@ -1192,6 +1334,9 @@ def _replay(
         "signal": 9,
         "inbox_entry": 10,
         "listening_history": 11,
+        "recent_play_observation": 12,
+        "history_sync_state": 13,
+        "history_incomplete_interval": 14,
     }
     ordered_deferred = sorted(
         deferred,
@@ -1503,6 +1648,160 @@ def _replay(
                     _datetime(record["imported_at"], "imported_at").isoformat(),
                 ),
             )
+        elif kind == "recent_play_observation":
+            _require_keys(
+                record,
+                frozenset(
+                    {
+                        "kind",
+                        "local_id",
+                        "provider",
+                        "observation_key",
+                        "played_at_seconds",
+                        "played_at_fraction",
+                        "track_uri",
+                        "track_name",
+                        "primary_artist_name",
+                        "album_name",
+                        "context_uri",
+                        "observed_at",
+                    }
+                ),
+            )
+            provider = _source_text(record["provider"])
+            observation_key = _source_text(record["observation_key"], maximum=128)
+            if record["local_id"] != f"{provider}:{observation_key}":
+                raise ValueError("recent play observation identity does not match fields")
+            played_at_seconds, played_at_fraction = _history_timestamp_pair(
+                record["played_at_seconds"],
+                record["played_at_fraction"],
+                "played_at",
+                nullable=False,
+            )
+            _connection(catalog).execute(
+                "INSERT OR IGNORE INTO recent_play_observations(provider,observation_key,played_at_seconds,played_at_fraction,track_uri,track_name,primary_artist_name,album_name,context_uri,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    observation_key,
+                    played_at_seconds,
+                    played_at_fraction,
+                    _source_text(record["track_uri"]),
+                    _source_text(record["track_name"]),
+                    _source_text(record["primary_artist_name"]),
+                    _source_text(record["album_name"]),
+                    None if record["context_uri"] is None else _source_text(record["context_uri"]),
+                    _datetime(record["observed_at"], "observed_at").isoformat(),
+                ),
+            )
+        elif kind == "history_sync_state":
+            _require_keys(
+                record,
+                frozenset(
+                    {
+                        "kind",
+                        "local_id",
+                        "provider",
+                        "last_attempt_at",
+                        "last_successful_check_at",
+                        "needs_repair",
+                        "newest_played_at_seconds",
+                        "newest_played_at_fraction",
+                        "requested_after_ms",
+                        "attempt_outcome",
+                        "interval_completeness",
+                        "coverage_reason",
+                    }
+                ),
+            )
+            if type(record["needs_repair"]) is not bool:
+                raise ValueError("history sync repair flag is invalid")
+            provider = _source_text(record["provider"])
+            if record["local_id"] != provider:
+                raise ValueError("history sync state identity does not match provider")
+            newest_seconds, newest_fraction = _history_timestamp_pair(
+                record["newest_played_at_seconds"],
+                record["newest_played_at_fraction"],
+                "newest played_at",
+                nullable=True,
+            )
+            requested_after_ms = (
+                None
+                if record["requested_after_ms"] is None
+                else _integer(record["requested_after_ms"], "requested_after_ms")
+            )
+            _connection(catalog).execute(
+                "INSERT OR REPLACE INTO history_sync_state(provider,last_attempt_at,last_successful_check_at,needs_repair,newest_played_at_seconds,newest_played_at_fraction,requested_after_ms,attempt_outcome,interval_completeness,coverage_reason) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    _datetime(record["last_attempt_at"], "last_attempt_at").isoformat(),
+                    None
+                    if record["last_successful_check_at"] is None
+                    else _datetime(
+                        record["last_successful_check_at"], "last_successful_check_at"
+                    ).isoformat(),
+                    int(record["needs_repair"]),
+                    newest_seconds,
+                    newest_fraction,
+                    requested_after_ms,
+                    _history_enum(
+                        record["attempt_outcome"], "attempt_outcome", _HISTORY_ATTEMPT_OUTCOMES
+                    ),
+                    _history_enum(
+                        record["interval_completeness"],
+                        "interval_completeness",
+                        _HISTORY_COMPLETENESS,
+                    ),
+                    _history_enum(
+                        record["coverage_reason"],
+                        "coverage_reason",
+                        _HISTORY_COVERAGE_REASONS,
+                    ),
+                ),
+            )
+        elif kind == "history_incomplete_interval":
+            _require_keys(
+                record,
+                frozenset(
+                    {
+                        "kind",
+                        "local_id",
+                        "provider",
+                        "lower_seconds",
+                        "lower_fraction",
+                        "upper_seconds",
+                        "upper_fraction",
+                        "reason",
+                        "recorded_at",
+                    }
+                ),
+            )
+            provider = _source_text(record["provider"])
+            lower = _history_timestamp_pair(
+                record["lower_seconds"],
+                record["lower_fraction"],
+                "interval lower bound",
+                nullable=True,
+            )
+            upper = _history_timestamp_pair(
+                record["upper_seconds"],
+                record["upper_fraction"],
+                "interval upper bound",
+                nullable=True,
+            )
+            if _history_pair_after(lower, upper):
+                raise ValueError("history interval bounds are invalid")
+            _connection(catalog).execute(
+                "INSERT INTO history_incomplete_intervals(provider,lower_seconds,lower_fraction,upper_seconds,upper_fraction,reason,recorded_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    lower[0],
+                    lower[1],
+                    upper[0],
+                    upper[1],
+                    _history_enum(record["reason"], "reason", _HISTORY_COVERAGE_REASONS),
+                    _datetime(record["recorded_at"], "recorded_at").isoformat(),
+                ),
+            )
         else:
             raise ValueError("unknown portable record kind")
 
@@ -1543,6 +1842,12 @@ def purge_source(catalog: Catalog, source_name: str) -> PurgeResult:
     connection = _connection(catalog)
     with catalog.transaction():
         connection.execute("DELETE FROM listening_history WHERE source = ?", (source,))
+        if source == "spotify":
+            connection.execute("DELETE FROM recent_play_observations WHERE provider = ?", (source,))
+            connection.execute("DELETE FROM history_sync_state WHERE provider = ?", (source,))
+            connection.execute(
+                "DELETE FROM history_incomplete_intervals WHERE provider = ?", (source,)
+            )
         affected_targets = {
             (str(row[0]), str(row[1]))
             for row in connection.execute(

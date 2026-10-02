@@ -93,12 +93,13 @@ _TOOL_SCHEMAS: dict[str, dict[str, object]] = {
             "kind": {
                 "description": (
                     "Which local record kinds to refresh from the provider: "
-                    "'catalog' (watched artists' tracks/releases), 'releases' "
+                    "'catalog' (watched artists' tracks/releases), 'history' "
+                    "(recent listening observations only), 'releases' "
                     "(new release discovery for watched artists), 'events' "
                     "(new Ticketmaster event discovery for watched artists), "
                     "or 'all' for every kind in one bounded run."
                 ),
-                "enum": ["catalog", "releases", "events", "all"],
+                "enum": ["catalog", "history", "releases", "events", "all"],
                 "type": "string",
             },
             "force": {
@@ -327,7 +328,10 @@ class RefreshCallback(Protocol):
     """
 
     def __call__(
-        self, kind: Literal["catalog", "releases", "events", "all"], *, force: bool = False
+        self,
+        kind: Literal["catalog", "history", "releases", "events", "all"],
+        *,
+        force: bool = False,
     ) -> object: ...
 
 
@@ -581,7 +585,8 @@ def create_music_server(
         name="refresh_music",
         description=(
             "Run one bounded refresh of local music data for watched artists: "
-            "'catalog' pulls tracks/releases, 'releases' discovers new "
+            "'catalog' pulls tracks/releases, 'history' pulls only recent "
+            "listening observations, 'releases' discovers new "
             "releases, 'events' discovers new Ticketmaster events, and 'all' "
             "runs every kind in one call. Purpose: pull fresh provider data "
             "into the local catalog and inbox. When to use: when data looks "
@@ -597,7 +602,7 @@ def create_music_server(
         annotations=_OPEN_WORLD_MUTATING,
     )
     async def refresh_music(
-        kind: Literal["catalog", "releases", "events", "all"],
+        kind: Literal["catalog", "history", "releases", "events", "all"],
         force: bool = False,
     ) -> CallToolResult:
         async def action() -> dict[str, object]:
@@ -801,16 +806,15 @@ def create_music_server(
     @server.tool(
         name="summarize_listening_history",
         description=(
-            "Summarize imported Spotify listening history (play counts, "
-            "milliseconds played, top artists/tracks) over an optional UTC "
+            "Summarize local Spotify archive and recently played observation evidence "
+            "(archive play counts/time and source-specific rankings) over an optional UTC "
             "date range. Purpose: answer questions about past listening. "
             "This is evidence, not preference, and never feeds watchlist "
             "affinity or update_watchlist decisions automatically -- the "
             "user decides what it implies. When to use: when the user asks "
             "about their listening history or wants a period summarized. "
-            "Call before: nothing required; the history must already be "
-            "imported via the CLI (`music-friend data import-spotify`), "
-            "which MCP cannot do. Call after: nothing required. Local-only; "
+            "Call before: nothing required. Archive history is imported via the CLI; "
+            "recent observations arrive through refresh. Call after: nothing required. Local-only; "
             "does not contact a provider."
         ),
         annotations=_READ_ONLY,
@@ -827,7 +831,7 @@ def create_music_server(
             except HistoryArgumentError as error:
                 raise _InvalidArguments(str(error)) from error
             return {
-                "evidence_boundary": "imported Spotify music history",
+                "evidence_boundary": "local Spotify archive and recently played observations",
                 "since": summary.since,
                 "until": summary.until,
                 "first_played_at": summary.first_played_at,
@@ -838,6 +842,26 @@ def create_music_server(
                 "brief_count": summary.brief_count,
                 "top_artists": [_history_ranking(item) for item in summary.top_artists],
                 "top_tracks": [_history_ranking(item) for item in summary.top_tracks],
+                "api_observation_count": summary.api_observation_count,
+                "combined_observation_count": summary.combined_observation_count,
+                "api_top_artists": [
+                    {"name": item.name, "observation_count": item.observation_count}
+                    for item in summary.api_top_artists
+                ],
+                "api_top_tracks": [
+                    {"name": item.name, "observation_count": item.observation_count}
+                    for item in summary.api_top_tracks
+                ],
+                "candidate_overlap_count": summary.candidate_overlap_count,
+                "ambiguous_overlap_count": summary.ambiguous_overlap_count,
+                "duration_observation_count": summary.duration_observation_count,
+                "duration_unknown_count": summary.duration_unknown_count,
+                "combined_observations_potentially_duplicated": True,
+                "incomplete_intervals": [
+                    {"lower": item.lower, "upper": item.upper, "reason": item.reason}
+                    for item in summary.incomplete_intervals
+                ],
+                "coverage": _history_status(application),
             }
 
         return _safe_call(action)
@@ -989,16 +1013,20 @@ def _tool_result(result: dict[str, object]) -> CallToolResult:
     )
 
 
-def _refresh_kind(value: object) -> Literal["catalog", "releases", "events", "all"]:
+def _refresh_kind(
+    value: object,
+) -> Literal["catalog", "history", "releases", "events", "all"]:
     if value == "catalog":
         return "catalog"
+    if value == "history":
+        return "history"
     if value == "releases":
         return "releases"
     if value == "events":
         return "events"
     if value == "all":
         return "all"
-    raise _InvalidArguments("kind must be one of: catalog, releases, events, all")
+    raise _InvalidArguments("kind must be one of: catalog, history, releases, events, all")
 
 
 def _refresh_force(value: object) -> bool:
@@ -1107,6 +1135,7 @@ def _status(
         "latest_refresh": None if not latest else _refresh_run(latest[0]),
         "refresh": {"running": bool(refresh_running)},
         "source_limits": {"spotify": _source_limit_status(application, "spotify", checked_at)},
+        "history": _history_status(application),
         "identity": {"conflicts": application.count_open_identity_conflicts()},
     }
 
@@ -1136,6 +1165,10 @@ def _status(
         }
 
     return status_dict
+
+
+def _history_status(application: MusicFriendApplication) -> dict[str, object]:
+    return application.recent_history_status("spotify")
 
 
 def _source_limit_status(
@@ -1186,6 +1219,17 @@ def _refresh_result(value: object) -> dict[str, object]:
                 payload["retry_after"] = retry_after
             if remaining is not None:
                 payload["remaining"] = remaining
+            history = getattr(value, "history", None)
+            if history is not None:
+                payload["history"] = {
+                    "outcome": history.outcome,
+                    "reason": history.reason,
+                    "attempts": history.attempts,
+                    "pages": history.pages,
+                    "observations": history.observations,
+                    "fresh": history.fresh,
+                    "interval_completeness": history.interval_completeness,
+                }
             return payload
     raise ValueError("refresh callback returned an invalid result")
 

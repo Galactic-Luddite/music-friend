@@ -19,7 +19,7 @@ from music_friend.domain import (
     RefreshSummary,
 )
 from music_friend.runtimes import cli
-from music_friend.tools.refresh import RefreshInvocation
+from music_friend.tools.refresh import HistoryRefreshResult, RefreshInvocation
 
 NOW = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
 
@@ -360,6 +360,90 @@ def test_refresh_invocations_report_running_completed_and_invalid_results() -> N
         cli._refresh_payload({"status": "succeeded", "unexpected": True})
 
 
+def test_history_only_refresh_payload_reports_business_attempts_and_observations() -> None:
+    run = RefreshRun(
+        "run-history",
+        "spotify",
+        RefreshKind.HISTORY,
+        RefreshStatus.SUCCEEDED,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+
+    payload = cli._refresh_payload(
+        RefreshInvocation(
+            run,
+            already_running=False,
+            history=HistoryRefreshResult(
+                "terminal_nonempty", "recent_plays", 1, 1, 7, True, "incomplete"
+            ),
+        )
+    )
+
+    assert payload["kind"] == "history"
+    assert payload["history"] == {
+        "outcome": "terminal_nonempty",
+        "reason": "recent_plays",
+        "attempts": 1,
+        "pages": 1,
+        "observations": 7,
+        "fresh": True,
+        "interval_completeness": "incomplete",
+    }
+
+
+def test_cli_history_refresh_opens_only_spotify_and_emits_history_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = object()
+    captured: dict[str, object] = {}
+    run = RefreshRun(
+        "run-history",
+        "spotify",
+        RefreshKind.HISTORY,
+        RefreshStatus.SUCCEEDED,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+
+    @contextmanager
+    def spotify_source(*_args: object, **_kwargs: object) -> object:
+        yield source
+
+    def refresh_once(*_args: object, **kwargs: object) -> RefreshInvocation:
+        captured.update(kwargs)
+        return RefreshInvocation(
+            run,
+            already_running=False,
+            history=HistoryRefreshResult(
+                "terminal_nonempty", "recent_plays", 1, 1, 4, True, "incomplete"
+            ),
+        )
+
+    monkeypatch.setattr(cli, "_spotify_source", spotify_source)
+    monkeypatch.setattr(
+        cli,
+        "_ticketmaster_client",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("history-only refresh must not open Ticketmaster")
+        ),
+    )
+    monkeypatch.setattr(cli, "refresh_once", refresh_once)
+
+    result, stdout, stderr = _run(["refresh", "history", "--json"], object())
+
+    assert (result, stderr) == (0, "")
+    payload = json.loads(stdout)
+    assert payload["kind"] == "history"
+    assert payload["history"]["attempts"] == 1
+    assert payload["history"]["observations"] == 4
+    assert captured["kind"] == "history"
+    assert captured["source"] is source
+    assert captured["event_client"] is None
+
+
 def test_events_only_skip_reports_a_distinct_status_and_exits_zero() -> None:
     """Catches an unconfigured event refresh being reported as a misleading success."""
     payload = cli._refresh_payload(
@@ -519,6 +603,28 @@ def test_schedule_commands_use_daily_absolute_python_without_opening_catalog_or_
         ),
         "interval_minutes": 1440,
     }
+
+
+def test_schedule_install_history_uses_daily_history_only_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_schedule_platform", lambda: cli.SchedulePlatform.LINUX)
+    monkeypatch.setattr(
+        cli,
+        "install_schedule",
+        lambda platform, **kwargs: captured.update(platform=platform, **kwargs),
+    )
+
+    result, _stdout, stderr = _run(["schedule", "install", "--kind", "history"], object())
+
+    assert result == 0
+    assert stderr == ""
+    assert captured["interval_minutes"] == 1440
+    command = captured["command"]
+    assert isinstance(command, tuple)
+    assert command[-3:] == ("refresh", "history", "--json")
 
 
 def test_schedule_status_json_reports_installation_activation_platform_and_interval(

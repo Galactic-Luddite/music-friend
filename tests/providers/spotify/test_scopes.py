@@ -45,6 +45,7 @@ def test_exact_closed_capability_scope_mapping_and_minimal_union() -> None:
         Capability.TOP_ITEMS: frozenset({"user-top-read"}),
         Capability.TOP_ARTISTS: frozenset({"user-top-read"}),
         Capability.RECENT_RELEASES: frozenset(),
+        Capability.RECENT_PLAYS: frozenset({"user-read-recently-played"}),
     }
 
     assert _SUPPORTED_CAPABILITIES == frozenset(expected)

@@ -39,6 +39,12 @@ music-friend diagnostics --json
 
 See [provider limits](limits.md) for how refreshes record cooldowns and resume later.
 
+If `history.outcome` is `permission_required`, reconnect Spotify explicitly to grant the recently
+played permission. `cooling_down`, `quota_exhausted`, `bounded_partial`, and `failed` remain visible
+independently of the overall refresh result. Local status and summaries never test the connection
+or refresh a token. Backup and restore preserve API observations, sync state, and incomplete
+intervals; `data purge spotify` removes them, while disconnecting Spotify retains local evidence.
+
 ## Event discovery is unavailable
 
 Run `music-friend setup` to review the Ticketmaster key and complete home search area. A country

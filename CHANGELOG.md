@@ -1,5 +1,13 @@
 # Changelog
 
+- Added bounded Spotify recently played synchronization to catalog/all refreshes. It preserves
+  archive and API evidence separately, reports incomplete coverage and unknown duration honestly,
+  exports the new local state in portable format 6, and keeps all status and summary reads local
+  (Refs #73). A new `refresh history` kind and `schedule install --kind history` run only this
+  bounded history component, so a daily history update does not spend requests on catalog,
+  release, or event work. Refresh results count recently-played operation attempts separately
+  from local preflight checks and OAuth token activity.
+
 ## [Unreleased]
 
 - Fixed a refresh that stops between saving a changed release and updating its inbox item

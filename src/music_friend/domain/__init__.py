@@ -1,5 +1,10 @@
 """Provider-neutral Music Friend domain records."""
 
+from music_friend.domain.history import (
+    RecentPlay,
+    canonical_history_timestamp,
+    history_request_after_ms,
+)
 from music_friend.domain.models import (
     DAILY_REFRESH_MINUTES,
     MAX_SOURCE_WINDOW_CALLS,
@@ -94,6 +99,7 @@ __all__ = [
     "LocalPreferenceKey",
     "Observation",
     "RecordId",
+    "RecentPlay",
     "ReleaseCandidate",
     "ReleaseCandidateKind",
     "ReleaseCheckContinuation",
@@ -124,4 +130,6 @@ __all__ = [
     "WatchlistEntry",
     "WatchlistInclusionReason",
     "WatchlistOverride",
+    "canonical_history_timestamp",
+    "history_request_after_ms",
 ]

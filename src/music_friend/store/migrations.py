@@ -83,6 +83,14 @@ def bundled_migrations() -> tuple[Migration, ...]:
             16,
             schema.joinpath("016_release_observation_pending.sql").read_text(encoding="utf-8"),
         ),
+        Migration(
+            17,
+            schema.joinpath("017_recent_play_history.sql").read_text(encoding="utf-8"),
+        ),
+        Migration(
+            18,
+            schema.joinpath("018_history_refresh_kind.sql").read_text(encoding="utf-8"),
+        ),
     )
 
 

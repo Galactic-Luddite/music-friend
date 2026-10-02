@@ -35,7 +35,7 @@ from music_friend.domain import (
 from music_friend.mcp import catalog_server, create_music_server
 from music_friend.store import Catalog
 from music_friend.tools import MusicFriendApplication
-from music_friend.tools.refresh import RefreshInvocation
+from music_friend.tools.refresh import HistoryRefreshResult, RefreshInvocation
 
 NOW = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 
@@ -277,7 +277,7 @@ def test_listening_history_summary_names_its_evidence_boundary(tmp_path: Path) -
         {"since": "2026-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z", "limit": 5},
     )
 
-    assert result["evidence_boundary"] == "imported Spotify music history"
+    assert result["evidence_boundary"] == "local Spotify archive and recently played observations"
     assert result["play_count"] == 1
     assert result["top_artists"] == [
         {"name": "Artist One", "play_count": 1, "milliseconds_played": 123000}
@@ -605,6 +605,19 @@ def test_catalog_server_reads_updates_and_explains_local_records_without_provide
         "status": "ready",
         "source_limits": {"spotify": {"ready": True, "state": "available", "retry_at": None}},
         "identity": {"source": "musicbrainz", "mapped": 0, "unmapped": 1, "conflicts": 0},
+        "history": {
+            "attempt_outcome": None,
+            "last_attempt_at": None,
+            "last_successful_check_at": None,
+            "newest_observed_played_at": None,
+            "archive_first_played_at": None,
+            "archive_cutoff": None,
+            "interval_completeness": "unknown",
+            "coverage_reason": "not_checked",
+            "needs_repair": False,
+            "retry_at": None,
+            "incomplete_intervals": [],
+        },
     }
     assert _call(server, "search_catalog", {"query": "Artist", "limit": 1}) == {
         "items": [
@@ -841,7 +854,7 @@ def test_list_inbox_returns_a_compact_summary_without_a_follow_up_call(tmp_path:
     application.close()
 
 
-@pytest.mark.parametrize("kind", ("catalog", "releases", "events", "all"))
+@pytest.mark.parametrize("kind", ("catalog", "history", "releases", "events", "all"))
 def test_catalog_server_accepts_each_bounded_refresh_kind(tmp_path: Path, kind: str) -> None:
     application = _application(tmp_path)
     calls: list[str] = []
@@ -1094,6 +1107,39 @@ def test_refresh_result_carries_reason_retry_after_and_remaining() -> None:
     assert payload["reason"] == "quota_exhausted"
     assert payload["remaining"] == 2
     assert "retry_after" not in payload
+
+
+def test_mcp_history_only_refresh_reports_business_attempts_and_observations() -> None:
+    run = RefreshRun(
+        "run-history",
+        "spotify",
+        RefreshKind.HISTORY,
+        RefreshStatus.SUCCEEDED,
+        NOW,
+        NOW,
+        RefreshSummary(()),
+    )
+
+    payload = catalog_server._refresh_result(
+        RefreshInvocation(
+            run,
+            already_running=False,
+            history=HistoryRefreshResult(
+                "terminal_nonempty", "recent_plays", 1, 1, 7, True, "incomplete"
+            ),
+        )
+    )
+
+    assert payload["kind"] == "history"
+    assert payload["history"] == {
+        "outcome": "terminal_nonempty",
+        "reason": "recent_plays",
+        "attempts": 1,
+        "pages": 1,
+        "observations": 7,
+        "fresh": True,
+        "interval_completeness": "incomplete",
+    }
 
 
 def _blocking_refresh(artist_count: int, delay_seconds: float) -> tuple[object, threading.Event]:

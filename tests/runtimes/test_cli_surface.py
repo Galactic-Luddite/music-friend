@@ -213,12 +213,12 @@ def test_cli_help_lists_the_complete_operational_command_surface(tmp_path: Path)
         "connect spotify",
         "disconnect spotify",
         "status",
-        "refresh catalog|releases|events|all",
+        "refresh catalog|history|releases|events|all",
         "watchlist list",
         "inbox list|show",
         "data export|import|import-spotify|backup|restore|delete",
         "diagnostics",
-        "schedule install|status|remove",
+        "schedule install [--kind catalog|history|releases|events|all]|status|remove",
         "version",
     ):
         assert command in stdout
@@ -269,6 +269,19 @@ def test_cli_delegates_status_refresh_watchlist_and_inbox_as_deterministic_json(
                 "last_refresh_requests": 0,
                 "last_refresh_pauses": 0,
             }
+        },
+        "history": {
+            "attempt_outcome": None,
+            "last_attempt_at": None,
+            "last_successful_check_at": None,
+            "newest_observed_played_at": None,
+            "archive_first_played_at": None,
+            "archive_cutoff": None,
+            "interval_completeness": "unknown",
+            "coverage_reason": "not_checked",
+            "needs_repair": False,
+            "retry_at": None,
+            "incomplete_intervals": [],
         },
     }
     assert status_stderr == ""

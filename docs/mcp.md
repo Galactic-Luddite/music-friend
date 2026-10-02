@@ -38,15 +38,15 @@ Deezer, or Ticketmaster.
 
 | Tool | What it does | Important inputs | Result or effect | Behavior |
 |------|--------------|------------------|------------------|----------|
-| `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is a refresh running now, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `refresh.running` (whether a refresh is in progress right now), `source_limits.spotify` (`ready`, `state`, `retry_at`), `identity.conflicts` (open links between releases kept as separate items, for review with `music-friend data inbox duplicates`), and MusicBrainz `identity` mapping counts when configured | read-only, local |
-| `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `releases`, `events`, or `all`; `force` (boolean, default `false`) | a refresh run summary, `partial` when interrupted or already running, or `skipped` with `reason: "event_area_not_configured"` when `kind: "events"` runs with no event area set | local write, provider contact |
+| `music_status` | Quick overview: is the catalog ready, is there unread inbox, when was the last refresh, is a refresh running now, is the source ready or cooling down | none | `status`, `inbox.has_unread`, `latest_refresh`, `refresh.running`, `source_limits.spotify`, allowlisted `history` freshness/coverage facts, `identity.conflicts`, and MusicBrainz identity mapping counts when configured | read-only, local |
+| `refresh_music` | Run one bounded refresh and write results to the local catalog | `kind`: `catalog`, `history`, `releases`, `events`, or `all`; `force` (boolean, default `false`) | a refresh run summary, including independent history outcome and observation counts when applicable; `partial` when interrupted or already running; or `skipped` with a reason | local write, provider contact |
 | `search_catalog` | Find local artists by name, usually before a watchlist change | `query` (1-256 chars), `limit` (1-50) | `items`: matching artists with local identifiers | read-only, local |
 | `list_watchlist` | Show monitored artists and why each is included | `limit` (1-100) | `items`: watchlist entries; entries include `release_source_status` (`mapped` or `unmapped`) for the first configured identity-mapped source (MusicBrainz or Deezer) | read-only, local |
 | `update_watchlist` | Record an explicit watchlist decision for one artist | `artist_id` (local), `action`: `add`, `pin`, `mute`, or `remove`; optional `source_ids` mapping source names to user-confirmed identifiers | the applied decision, or `not_found` | local write |
 | `list_inbox` | Show release and event items, optionally filtered by state | `state`: `unread`, `saved`, `dismissed`, or null; `limit` (1-100) | `items`: inbox entries, each with a `summary` (`kind`, `title`, `artist_names`, `date`) so most requests need no follow-up call | read-only, local |
 | `update_inbox_item` | Set one inbox item to `unread`, `saved`, or `dismissed` | `inbox_id` (local), `state` | the updated entry (including its `summary`), or `not_found` | local write |
 | `explain_inbox_item` | Show why an item appeared, with its release or event record | `inbox_id` (local) | `entry` (with `summary`), `record` (with `artist_names` alongside `artist_ids`), `sources` (how many sources report the record), and `reasons` (why it was included) | read-only, local |
-| `summarize_listening_history` | Summarize imported plays for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | evidence boundary, covered dates, play time, brief and skipped counts, top artists and tracks | read-only, local |
+| `summarize_listening_history` | Summarize local listening evidence for a UTC date range | `since`, `until` (RFC 3339 with an offset or `Z`, or null), `limit` (1-50) | archive totals and rankings plus API observation counts/rankings, candidate overlaps, duration-known denominators, and coverage facts | read-only, local |
 | `get_setup` | Query Music Friend configuration state and completion status | none | configured fields (Spotify ID, event area fields, `release_sources`), which fields are missing, whether setup is complete for MCP readiness | read-only, local |
 | `update_setup` | Update Music Friend configuration fields (non-secrets only) | `client_id`, `event_country_code`, `event_postal_code`, `event_radius`, `event_radius_unit`, `release_sources` (an ordered array chosen from `spotify`, `musicbrainz`, `deezer`; all optional, pass null to leave unchanged) | updated configuration state, or instructions to use CLI for secrets | local write |
 
@@ -132,7 +132,7 @@ The server uses stdio only. It has no network listener.
 
 ## Codex
 
-Add this local server configuration to `~/.codex/config.toml`:
+Add this server configuration to your Codex configuration file:
 
 ```toml
 [mcp_servers.music-friend]
@@ -198,8 +198,8 @@ a runtime discovery mechanism.
 
 ## Listening-history evidence
 
-`summarize_listening_history` answers bounded historical questions from locally imported Spotify
-music plays. Import the archive first with the CLI (see
+`summarize_listening_history` answers bounded historical questions from local Spotify archive plays
+and recently played API observations. Archive import is optional and remains a CLI operation (see
 [CLI and data operations](operations.md#import-spotify-listening-history)); MCP cannot import.
 
 Supply nullable `since` and `until` timestamps and a ranking limit from 1 through 50. `since` and
@@ -216,10 +216,18 @@ range/timestamp/limit problem is reported as `invalid_arguments`; an internal fa
 the caller's arguments (for example, a corrupt stored row) is reported as `internal_error` instead
 of being misreported as the caller's mistake. The result identifies its evidence boundary, covered dates,
 play time, brief/skipped counts, and top artists and tracks. Imported plays remain separate from
-preferences and watchlist affinity.
+preferences and watchlist affinity. Listening duration, brief counts, and skip counts come only
+from imported archive evidence because API observations do not carry those facts.
 
 A synthetic example: "What did I listen to most in March 2024?" becomes
 `summarize_listening_history` with `since: "2024-03-01T00:00:00Z"`,
 `until: "2024-04-01T00:00:00Z"`, `limit: 10`. The answer reports the plays covered by that range,
-names the evidence boundary (`imported Spotify music history`), and does not treat play counts as
-approved preferences.
+names the evidence boundary (`local Spotify archive and recently played observations`), and does
+not treat archive plays or API observation counts as approved preferences.
+Recent API rows are observations with track, primary artist, album, and precise play time. They do
+not contain observed listening duration, skip state, or completion. `play_count` and
+`milliseconds_played` retain their archive meaning; `api_observation_count` and
+`combined_observation_count` are separate. Combined observations may duplicate or undercount real
+plays, including when `candidate_overlap_count` is zero. Exact timestamp/track matches are only
+candidate correspondences, and ambiguous archive multiplicity is reported separately. API-only
+artist and track rankings count observations and never feed affinity or preference.

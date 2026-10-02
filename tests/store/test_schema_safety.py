@@ -104,6 +104,7 @@ def test_built_artifacts_contain_and_execute_initial_migration(tmp_path: Path) -
         assert "music_friend/store/schema/006_event_discovery.sql" in names
         assert "music_friend/store/schema/007_source_limits.sql" in names
         assert "music_friend/store/schema/008_listening_history.sql" in names
+        assert "music_friend/store/schema/018_history_refresh_kind.sql" in names
     with tarfile.open(source_distribution, "r:gz") as archive:
         names = archive.getnames()
         assert any(
@@ -134,6 +135,10 @@ def test_built_artifacts_contain_and_execute_initial_migration(tmp_path: Path) -
         )
         assert any(
             name.endswith("/src/music_friend/store/schema/008_listening_history.sql")
+            for name in names
+        )
+        assert any(
+            name.endswith("/src/music_friend/store/schema/018_history_refresh_kind.sql")
             for name in names
         )
 

@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Generic, Protocol, Sequence, TypeVar, runtime_checkable
 
-from music_friend.domain import Artist, CatalogItemBatch, Release, SourceReference
+from music_friend.domain import Artist, CatalogItemBatch, RecentPlay, Release, SourceReference
 from music_friend.errors import (
     AdditionalScopeRequiredError,
     CapabilityUnsupportedError,
@@ -26,6 +26,7 @@ class Capability(str, Enum):
     TOP_ITEMS = "top_items"
     TOP_ARTISTS = "top_artists"
     RECENT_RELEASES = "recent_releases"
+    RECENT_PLAYS = "recent_plays"
 
 
 class HealthStatus(str, Enum):
@@ -110,6 +111,17 @@ class Page(Generic[T]):
 
 
 @runtime_checkable
+class RecentPlaySource(Protocol):
+    """Optional provider contract for bounded recently-played observations."""
+
+    def capabilities(self) -> ProviderCapabilities: ...
+
+    def recent_plays(
+        self, after_ms: int | None = None, cursor: str | None = None
+    ) -> Page[RecentPlay]: ...
+
+
+@runtime_checkable
 class MusicSource(Protocol):
     """A read-only, provider-neutral source of normalized music records."""
 
@@ -154,6 +166,8 @@ __all__ = [
     "HealthStatus",
     "MusicSource",
     "Page",
+    "RecentPlay",
+    "RecentPlaySource",
     "ProviderCapabilities",
     "ProviderHealth",
     "require_capability",

@@ -131,7 +131,7 @@ def test_portable_v3_round_trips_all_application_state_without_credentials(
     exported = export_catalog(catalog, destination, exported_at=NOW)
 
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    assert payload["version"] == 5
+    assert payload["version"] == 6
     kinds = {record["kind"] for record in payload["records"]}
     assert {
         "affinity_evidence",
