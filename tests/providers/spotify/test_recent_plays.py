@@ -72,7 +72,7 @@ def test_recent_plays_normalizes_precision_and_reconstructs_cursor() -> None:
         ),
     )
     assert page.next_cursor is not None
-    tokens.response = {"items": [], "next": None, "cursors": {}}
+    tokens.response = {"items": [], "next": None, "cursors": None}
     spotify.recent_plays(cursor=page.next_cursor)
     assert tokens.calls[1] == (
         SpotifyOperation.RECENTLY_PLAYED,
@@ -151,7 +151,9 @@ def test_recent_plays_rejects_a_nonadvancing_before_continuation() -> None:
         {"items": [item("not-a-date")], "next": None, "cursors": {}},
         {"items": [item("2030-02-30T00:00:00Z")], "next": None, "cursors": {}},
         {"items": [item("2030-01-01T00:00:00+99:00")], "next": None, "cursors": {}},
+        {"items": [item()], "next": None, "cursors": None},
         {"items": [], "next": "https://example.invalid", "cursors": {"after": "2"}},
+        {"items": [], "next": "https://example.invalid", "cursors": None},
     ],
 )
 def test_recent_plays_rejects_invalid_pages(response: dict[str, object]) -> None:

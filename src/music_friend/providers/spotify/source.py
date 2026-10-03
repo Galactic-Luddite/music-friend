@@ -295,7 +295,12 @@ class SpotifySource:
         try:
             raw_items = _items(data, maximum=50)
             next_value = _nullable_text(data.get("next"), "recent plays next")
-            cursors = _object(data.get("cursors"), "recent plays cursors")
+            raw_cursors = data.get("cursors")
+            cursors = (
+                {}
+                if raw_cursors is None and not raw_items and next_value is None
+                else _object(raw_cursors, "recent plays cursors")
+            )
             for field in ("after", "before"):
                 value = cursors.get(field)
                 if value is not None and (type(value) is not str or not value.isdigit()):

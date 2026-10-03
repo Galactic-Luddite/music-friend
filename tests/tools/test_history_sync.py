@@ -306,7 +306,16 @@ def test_spotify_before_continuation_reaches_terminal_success(catalog: Catalog) 
                                     "artists": [{"name": "Synthetic artist"}],
                                     "album": {"name": "Synthetic album"},
                                 },
-                            }
+                            },
+                            {
+                                "played_at": "2030-01-01T00:00:00.123456789Z",
+                                "track": {
+                                    "uri": "spotify:track:synthetic",
+                                    "name": "Synthetic",
+                                    "artists": [{"name": "Synthetic artist"}],
+                                    "album": {"name": "Synthetic album"},
+                                },
+                            },
                         ],
                         "next": (
                             "https://api.spotify.com/v1/me/player/recently-played"
@@ -314,7 +323,7 @@ def test_spotify_before_continuation_reaches_terminal_success(catalog: Catalog) 
                         ),
                         "cursors": {"after": "1893456000123", "before": "1893455999000"},
                     },
-                    {"items": [], "next": None, "cursors": {}},
+                    {"items": [], "next": None, "cursors": None},
                 )
             )
 
@@ -356,6 +365,16 @@ def test_spotify_before_continuation_reaches_terminal_success(catalog: Catalog) 
     ]
     state = app.get_recent_history_state("spotify")
     assert state is not None and not state.needs_repair
+    assert len(app.recent_history_store().list_observations("spotify")) == 1
+
+    fresh = sync_recent_history(
+        app,
+        "spotify",
+        source,
+        checked_at=datetime(2030, 1, 2, 1, tzinfo=timezone.utc),
+    )
+    assert fresh.outcome == "skipped_fresh"
+    assert len(tokens.queries) == 2
 
 
 def test_invalid_later_page_retains_earlier_committed_observations(catalog: Catalog) -> None:
