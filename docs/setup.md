@@ -58,9 +58,9 @@ the CLI or MCP conversation.
 The app prefers an approved operating-system credential store. If one is unavailable, interactive
 use can fall back to a passphrase-protected local vault. This fallback is interactive CLI only; the
 current stdio MCP server and schedule commands require an approved native credential store.
-Setup does not install a refresh schedule. To update listening history daily without catalog,
+Setup does not install a refresh schedule. To update listening history every six hours without catalog,
 release, or event work, run `music-friend schedule install --kind history` on a computer intended
-to run scheduled jobs. Daily polling reduces gaps but cannot guarantee none because Spotify's
+to run scheduled jobs. Six-hour polling reduces gaps but cannot guarantee none because Spotify's
 recent-play retention is undocumented and each check is bounded.
 Disconnecting removes the locally stored Spotify credential:
 

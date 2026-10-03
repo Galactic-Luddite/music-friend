@@ -7,6 +7,8 @@ from music_friend.domain.history import (
 )
 from music_friend.domain.models import (
     DAILY_REFRESH_MINUTES,
+    HISTORY_FRESHNESS_MINUTES,
+    HISTORY_REFRESH_MINUTES,
     MAX_SOURCE_WINDOW_CALLS,
     MIN_SOURCE_WINDOW_CALLS,
     AffinityEvidence,
@@ -74,6 +76,8 @@ __all__ = [
     "AffinityScore",
     "Artist",
     "DAILY_REFRESH_MINUTES",
+    "HISTORY_FRESHNESS_MINUTES",
+    "HISTORY_REFRESH_MINUTES",
     "ArtistEventDiscoveryResult",
     "ArtistReleaseDiscoveryResult",
     "CatalogSyncCursor",

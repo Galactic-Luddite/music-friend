@@ -12,7 +12,7 @@ and listening-history summaries.
 | Inspect | `status`, `diagnostics`, `watchlist list`, `inbox list`, `inbox show ITEM_ID` | Read local state without contacting a provider |
 | Refresh | `refresh catalog`, `refresh history`, `refresh releases`, `refresh events`, `refresh all` | Read a provider and write results to the local catalog |
 | Data lifecycle | `data export`, `data backup`, `data import`, `data import-spotify`, `data restore`, `data delete`, `data inbox duplicates`, `data inbox unmerge` | Move, protect, or erase local data |
-| Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage the optional daily refresh |
+| Schedule | `schedule status`, `schedule install`, `schedule remove` | Manage optional six-hour history or daily broader refreshes |
 | Skill | `skill install` | Install the optional runtime skill for an AI client |
 
 ## Agent-driven setup
@@ -325,14 +325,15 @@ music-friend schedule remove
 ```
 
 Status reports whether the definition is installed and whether the native job is active, together
-with its platform and interval. The command uses the current supported platform’s per-user
+with its platform and actual installed interval. The command uses the current supported platform’s per-user
 scheduler: LaunchAgent on macOS or a systemd user timer on Linux. Repeated installation updates the
 same named schedule. Remove it when it is no longer wanted.
 
-Pass `--kind history` when the daily job should fetch only recent listening observations. That
-job uses the same refresh lock, 20-hour freshness check, deadline, pacing, and durable cooldown
+Pass `--kind history` to fetch only recent listening observations every six hours. That
+job uses the same refresh lock, 5-hour-45-minute freshness check, ten-minute deadline, pacing, and durable cooldown
 state as other refreshes, while making no catalog, release, event, repair, or provider-health
-request. The schedule runs every 1,440 minutes. That cadence reduces gaps but cannot guarantee
+request. The history-only schedule runs every 360 minutes; every other schedule kind remains at
+1,440 minutes. That cadence reduces gaps but cannot guarantee
 none between polls because Spotify's retention window is undocumented and each check is bounded.
 Omitting `--kind` keeps the existing `refresh all` schedule.
 
@@ -341,9 +342,9 @@ Omitting `--kind` keeps the existing `refresh all` schedule.
 `music-friend skill install` copies the packaged runtime skill into a client's skills directory.
 See the [install guide](install.md#optional-agent-skill) for destinations and replacement rules.
 `refresh history` checks only Spotify recently played history. `refresh catalog` and `refresh all`
-also check it before catalog work. The history component remains fresh for 20 hours after a
+also check it before catalog work. The history component remains fresh for 5 hours 45 minutes after a
 terminal check and makes no request while fresh, disconnected from the required permission,
-cooling down, or quota exhausted. `--force` still honors this 20-hour history freshness window.
+cooling down, or quota exhausted. `--force` still honors this history freshness window.
 An eligible check accepts at most two 50-item pages and reports
 its own outcome, operation-attempt/page counts, observations, and coverage facts in JSON. An
 operation attempt counts a call to the recently-played operation; local preflight checks and any

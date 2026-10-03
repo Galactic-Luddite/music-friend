@@ -49,7 +49,7 @@ intervals; `data purge spotify` removes them, while disconnecting Spotify retain
 ## Recent history has gaps
 
 A successful refresh means Music Friend completed its bounded check; it does not mean Spotify
-returned a complete listening history. Keep the daily history-only schedule installed to reduce
+returned a complete listening history. Keep the six-hour history-only schedule installed to reduce
 future gaps. For older or missing periods, request a new Spotify extended streaming-history archive
 and use the validate-then-import flow in [CLI and data operations](operations.md#import-spotify-listening-history).
 

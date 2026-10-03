@@ -55,13 +55,14 @@ vault.
 
 ## 5. Optionally keep it current
 
-Install a daily history-only job on a computer that will be running at the scheduled time:
+Install a history-only job that runs every six hours on a computer that will be running at the
+scheduled time:
 
 ```bash
 music-friend schedule install --kind history
 ```
 
-The job avoids catalog, release, and event work. Daily polling reduces gaps but cannot guarantee
+The job avoids catalog, release, and event work. Six-hour polling reduces gaps but cannot guarantee
 none: Spotify's recent-play retention is undocumented and listening between polls can exceed what
 the bounded request retrieves.
 

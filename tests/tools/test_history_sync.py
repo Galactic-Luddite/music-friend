@@ -61,6 +61,55 @@ def test_sync_is_bounded_and_freshness_skips_without_calls(catalog: Catalog) -> 
     assert len(source.calls) == 2
 
 
+@pytest.mark.parametrize(
+    ("elapsed", "expected_outcome", "expected_calls"),
+    (
+        (timedelta(minutes=344, seconds=59), "skipped_fresh", 0),
+        (timedelta(minutes=345), "terminal_empty", 1),
+    ),
+)
+def test_history_freshness_boundary_allows_six_hour_schedule_with_startup_jitter(
+    catalog: Catalog,
+    elapsed: timedelta,
+    expected_outcome: str,
+    expected_calls: int,
+) -> None:
+    app = MusicFriendApplication(catalog)
+    first_check = datetime(2030, 1, 2, tzinfo=timezone.utc)
+    sync_recent_history(app, "spotify", Source([Page(())]), checked_at=first_check)
+    source = Source([Page(())])
+
+    result = sync_recent_history(
+        app,
+        "spotify",
+        source,
+        checked_at=first_check + elapsed,
+    )
+
+    assert result.outcome == expected_outcome
+    assert len(source.calls) == expected_calls
+
+
+def test_history_check_finishing_ten_minutes_after_launch_is_due_at_next_launch(
+    catalog: Catalog,
+) -> None:
+    app = MusicFriendApplication(catalog)
+    launch = datetime(2030, 1, 2, tzinfo=timezone.utc)
+    first_success = launch + timedelta(minutes=10)
+    sync_recent_history(app, "spotify", Source([Page(())]), checked_at=first_success)
+    source = Source([Page(())])
+
+    result = sync_recent_history(
+        app,
+        "spotify",
+        source,
+        checked_at=launch + timedelta(minutes=360),
+    )
+
+    assert result.outcome == "terminal_empty"
+    assert len(source.calls) == 1
+
+
 def test_sync_missing_permission_makes_zero_calls(catalog: Catalog) -> None:
     source = Source([], granted=False)
     result = sync_recent_history(
