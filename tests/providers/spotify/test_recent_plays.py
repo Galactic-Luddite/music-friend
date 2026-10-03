@@ -52,8 +52,10 @@ def test_recent_plays_normalizes_precision_and_reconstructs_cursor() -> None:
     spotify, tokens = source(
         {
             "items": [item()],
-            "next": "https://evil.invalid/ignored",
-            "cursors": {"after": "1893456000123", "before": "1"},
+            "next": (
+                "https://api.spotify.com/v1/me/player/recently-played?before=1893455999000&limit=50"
+            ),
+            "cursors": {"after": "1893456000123", "before": "1893455999000"},
             "total": 1,
         }
     )
@@ -74,8 +76,73 @@ def test_recent_plays_normalizes_precision_and_reconstructs_cursor() -> None:
     spotify.recent_plays(cursor=page.next_cursor)
     assert tokens.calls[1] == (
         SpotifyOperation.RECENTLY_PLAYED,
+        (("limit", "50"), ("before", "1893455999000")),
+    )
+
+
+@pytest.mark.parametrize(
+    "next_value",
+    (
+        "https://evil.invalid/v1/me/player/recently-played?before=1&limit=50",
+        "https://api.spotify.com/v1/me/player/recently-played?after=2&before=1&limit=50",
+        "https://api.spotify.com/v1/me/player/recently-played?before=1&limit=49",
+        "https://api.spotify.com/v1/me/player/recently-played?offset=1&limit=50",
+        "https://api.spotify.com/v1/me/player/recently-played?before=2&limit=50",
+    ),
+)
+def test_recent_plays_rejects_untrusted_continuation_destinations(next_value: str) -> None:
+    spotify, _ = source(
+        {
+            "items": [item()],
+            "next": next_value,
+            "cursors": {"after": "2", "before": "1"},
+        }
+    )
+
+    with pytest.raises(InvalidSourceResponseError):
+        spotify.recent_plays()
+
+
+def test_recent_plays_preserves_a_valid_after_continuation_direction() -> None:
+    spotify, tokens = source(
+        {
+            "items": [item()],
+            "next": (
+                "https://api.spotify.com/v1/me/player/recently-played?limit=50&after=1893456000123"
+            ),
+            "cursors": {"after": "1893456000123", "before": "1893455999000"},
+        }
+    )
+
+    page = spotify.recent_plays(after_ms=100)
+    assert page.next_cursor is not None
+    tokens.response = {"items": [], "next": None, "cursors": {}}
+    spotify.recent_plays(cursor=page.next_cursor)
+
+    assert tokens.calls[1] == (
+        SpotifyOperation.RECENTLY_PLAYED,
         (("limit", "50"), ("after", "1893456000123")),
     )
+
+
+def test_recent_plays_rejects_a_nonadvancing_before_continuation() -> None:
+    spotify, tokens = source(
+        {
+            "items": [item()],
+            "next": ("https://api.spotify.com/v1/me/player/recently-played?before=100&limit=50"),
+            "cursors": {"before": "100"},
+        }
+    )
+    first = spotify.recent_plays()
+    assert first.next_cursor is not None
+    tokens.response = {
+        "items": [item("2029-12-31T23:59:59Z")],
+        "next": "https://api.spotify.com/v1/me/player/recently-played?before=100&limit=50",
+        "cursors": {"before": "100"},
+    }
+
+    with pytest.raises(InvalidSourceResponseError):
+        spotify.recent_plays(cursor=first.next_cursor)
 
 
 @pytest.mark.parametrize(

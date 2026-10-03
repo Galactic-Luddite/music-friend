@@ -115,6 +115,7 @@ EXPECTED_IMPORTS = {
         ),
         "from music_friend.providers.spotify.transport import SpotifyOperation",
         "from typing import Protocol",
+        "from urllib.parse import parse_qsl, urlsplit",
         "import base64",
         "import calendar",
         "import json",

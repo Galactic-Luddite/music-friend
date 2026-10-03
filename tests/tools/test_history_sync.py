@@ -290,6 +290,74 @@ def test_invalid_provider_timestamp_records_failed_repair_outcome(catalog: Catal
     assert state is not None and state.needs_repair
 
 
+def test_spotify_before_continuation_reaches_terminal_success(catalog: Catalog) -> None:
+    class Tokens:
+        def __init__(self) -> None:
+            self.queries: list[tuple[tuple[str, str], ...]] = []
+            self.responses = iter(
+                (
+                    {
+                        "items": [
+                            {
+                                "played_at": "2030-01-01T00:00:00.123456789Z",
+                                "track": {
+                                    "uri": "spotify:track:synthetic",
+                                    "name": "Synthetic",
+                                    "artists": [{"name": "Synthetic artist"}],
+                                    "album": {"name": "Synthetic album"},
+                                },
+                            }
+                        ],
+                        "next": (
+                            "https://api.spotify.com/v1/me/player/recently-played"
+                            "?before=1893455999000&limit=50"
+                        ),
+                        "cursors": {"after": "1893456000123", "before": "1893455999000"},
+                    },
+                    {"items": [], "next": None, "cursors": {}},
+                )
+            )
+
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                frozenset({Capability.RECENT_PLAYS}), frozenset({Capability.RECENT_PLAYS})
+            )
+
+        def _call_deadline(self) -> float:
+            return 10.0
+
+        def _execute(self, _operation, *, query, deadline):
+            self.queries.append(query)
+            return next(self.responses)
+
+    tokens = Tokens()
+    source = SpotifySource(
+        settings=SpotifySettings(
+            client_id="synthetic", redirect_uri="http://127.0.0.1:8888/callback"
+        ),
+        tokens=tokens,
+        clock=lambda: datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+    app = MusicFriendApplication(catalog)
+
+    result = sync_recent_history(
+        app, "spotify", source, checked_at=datetime(2030, 1, 2, tzinfo=timezone.utc)
+    )
+
+    assert (result.outcome, result.attempts, result.pages, result.observations) == (
+        "first_snapshot",
+        2,
+        2,
+        1,
+    )
+    assert tokens.queries == [
+        (("limit", "50"),),
+        (("limit", "50"), ("before", "1893455999000")),
+    ]
+    state = app.get_recent_history_state("spotify")
+    assert state is not None and not state.needs_repair
+
+
 def test_invalid_later_page_retains_earlier_committed_observations(catalog: Catalog) -> None:
     class InvalidSecondPage(Source):
         def recent_plays(
