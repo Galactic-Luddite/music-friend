@@ -1,4 +1,7 @@
-# Spotify, release sources, and optional event setup
+# Spotify and optional discovery setup
+
+Only the Spotify section is required for listening-history sync. Release-source and event setup
+can wait until later.
 
 ## Release sources
 
@@ -55,10 +58,10 @@ the CLI or MCP conversation.
 The app prefers an approved operating-system credential store. If one is unavailable, interactive
 use can fall back to a passphrase-protected local vault. This fallback is interactive CLI only; the
 current stdio MCP server and schedule commands require an approved native credential store.
-Setup does not install a refresh schedule. To enable a daily per-user schedule explicitly, use
-`music-friend schedule install` on a computer intended to run scheduled jobs. To update listening
-history daily without catalog, release, or event work, install
-`music-friend schedule install --kind history`.
+Setup does not install a refresh schedule. To update listening history daily without catalog,
+release, or event work, run `music-friend schedule install --kind history` on a computer intended
+to run scheduled jobs. Daily polling reduces gaps but cannot guarantee none because Spotify's
+recent-play retention is undocumented and each check is bounded.
 Disconnecting removes the locally stored Spotify credential:
 
 ```bash

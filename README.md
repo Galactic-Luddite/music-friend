@@ -10,8 +10,9 @@ the terminal or the desktop apps) and it uses Music Friend's tools to answer wit
 > "What did I listen to most in March, and who fell off my rotation?"
 
 Behind those answers, Music Friend keeps a local catalog, a watchlist of artists you care about,
-an inbox of new releases and nearby shows (each with the reason it appeared), and your imported
-Spotify listening history. They are stored together in one SQLite file on your machine; provider
+an inbox of new releases and nearby shows (each with the reason it appeared), and your local
+Spotify listening history from recent API observations and optional archive imports. They are
+stored together in one SQLite file on your machine; provider
 credentials live in your operating-system credential store.
 
 ## Is this for you?
@@ -30,8 +31,10 @@ Music Friend is a power-user tool. Before it is useful you need:
   `music-friend connect spotify`, and `music-friend doctor` to confirm everything is ready.
   Setup can be **fully automated** with command-line flags (see [agent-driven setup](docs/operations.md#agent-driven-setup)).
 
-After that, your assistant does the work. Refreshes run when the assistant (or you) asks, or once a
-day if you install the optional per-user schedule with `music-friend schedule install`.
+After that, your assistant does the work. Refreshes run when the assistant (or you) asks. For recent
+listening, optionally install a daily per-user job with
+`music-friend schedule install --kind history`; the [operations guide](docs/operations.md#daily-schedule)
+covers broader refresh schedules.
 
 What your assistant can do with it:
 
@@ -39,8 +42,8 @@ What your assistant can do with it:
 - **Watch artists** by adding, pinning, or muting them so that discovery follows your choices.
 - **Triage new releases and nearby events** in a local inbox, with a stored explanation for why
   each item appeared. Event discovery through Ticketmaster is optional.
-- **Answer questions about your listening history** after you import your Spotify extended
-  streaming-history archive, such as "what did I play most in March?"
+- **Answer questions about your listening history** from ongoing recent-play observations, with an
+  optional Spotify extended streaming-history archive for older coverage.
 
 It has no Music Friend account, hosted catalog, resident daemon, telemetry, or ticket purchasing.
 The MCP server runs only while your AI client is using it, and a scheduled refresh runs once and
@@ -52,43 +55,40 @@ You talk to your AI client; it starts `music-friend-mcp` on your computer over s
 its tools. Those tools read and update the local data below.
 
 ```text
-Spotify account ----(read-only refresh)----+
+Spotify account ----(read-only catalog/history refresh)----+
 Ticketmaster (optional) --(read-only)------+--> local catalog (SQLite) --> watchlist --> inbox
-Spotify history ZIP -----(local import)----+                          \--> history answers
+Spotify history ZIP (optional backfill) ---+                          \--> history answers
 ```
 
-1. **Input.** A refresh reads your followed artists, saved music, and top artists from Spotify,
-   and optionally upcoming events from Ticketmaster. A history import reads a Spotify extended
-   streaming-history ZIP that you downloaded yourself.
+1. **Input.** A history refresh reads recent plays from Spotify. Other refresh kinds can read your
+   followed artists, saved music, releases, or optional Ticketmaster events. An optional history
+   import reads a Spotify extended streaming-history ZIP that you downloaded yourself.
 2. **Local catalog.** Results are normalized and written to your local catalog. Music Friend
    never writes to your Spotify or Ticketmaster account.
 3. **Watchlist.** The catalog decides which artists to monitor; your explicit add, pin, mute, and
    remove decisions override it and persist across refreshes.
 4. **Inbox.** New releases and matching events become inbox items that you can read, save, or
    dismiss. Each item keeps the reason it was included.
-5. **History answers.** Imported plays stay separate from preferences and are summarized only for
-   the date range you ask about.
+5. **History answers.** Recent observations and imported plays stay separate from preferences and
+   are summarized only for the date range you ask about.
 
 Music Friend contacts a provider only when you run a refresh or connect an account. Reading the
 catalog, watchlist, inbox, or history never leaves your computer.
 
-## First success in six commands
+## First recent-listening result
 
 After [installing](docs/install.md) and creating a Spotify developer application
-([setup guide](docs/setup.md)):
+([setup guide](docs/setup.md)), replace `YOUR_CLIENT_ID` with the app's public client ID:
 
 ```bash
-music-friend doctor
-music-friend setup
+music-friend setup --spotify-client-id YOUR_CLIENT_ID --json
 music-friend connect spotify
-music-friend refresh catalog --json
-music-friend watchlist list --json
-music-friend inbox list --json
+music-friend refresh history --json
 ```
 
-`doctor` lists anything still missing, with its fix, before you start. The
-[quickstart](docs/quickstart.md) walks through each step. Refreshes can report a partial
-result when a provider limit interrupts them; see [provider limits](docs/limits.md).
+The [quickstart](docs/quickstart.md) covers installation, the required Spotify callback and
+permission, optional daily sync, and how to check freshness. Catalog, releases, events, archive
+backfill, and MCP client setup are optional follow-on paths.
 
 ## Follow an artist through the inbox
 
@@ -100,12 +100,13 @@ Connect an [MCP client](docs/mcp.md) with the `music-friend-mcp` command, then a
 4. `list_inbox` filtered to `unread`, then `explain_inbox_item` to see why an item appeared.
 5. `update_inbox_item` to mark it `saved` or `dismissed`.
 
-The [MCP guide](docs/mcp.md#tool-surface) explains each of the nine tools, what it reads or
+The [MCP guide](docs/mcp.md#tool-surface) explains each of the eleven tools, what it reads or
 changes, and when it contacts a provider.
 
-## Import and query listening history
+## Backfill older listening history
 
-Request your extended streaming history from Spotify, then validate and import the ZIP locally:
+Ongoing sync starts with the recent plays Spotify currently returns. To add older evidence, request
+your extended streaming history from Spotify, then validate and import the ZIP locally:
 
 ```bash
 music-friend data import-spotify my_spotify_data.zip --dry-run --json

@@ -5,19 +5,20 @@ Pick the goal that matches what you want to do.
 ## Get started
 
 - [Install](install.md) — installation choices, Intel macOS build notes, and the optional skill
-- [Quickstart](quickstart.md) — install, connect Spotify, and make a first refresh
+- [Quickstart](quickstart.md) — install, connect Spotify, and fetch recent listening observations
 - [Spotify and optional event setup](setup.md) — developer application, redirect URI, credential
   storage, and the Ticketmaster event area
 
 ## Use an AI client
 
 - [MCP clients](mcp.md) — start the local stdio server, copy a client entry, and learn what each of
-  the nine tools reads, changes, or fetches
+  the eleven tools read, change, or fetch
 
-## Import my history
+## Use my listening history
 
-- [CLI and data operations](operations.md#import-spotify-listening-history) — validate and import
-  a Spotify extended streaming-history ZIP
+- [Quickstart](quickstart.md) — start ongoing recent-listening sync
+- [CLI and data operations](operations.md#import-spotify-listening-history) — optionally backfill
+  older listening from a Spotify extended streaming-history ZIP
 - [MCP clients](mcp.md#listening-history-evidence) — ask a bounded history question
 
 ## Manage or erase data
@@ -25,7 +26,7 @@ Pick the goal that matches what you want to do.
 - [CLI and data operations](operations.md#export-backup-restore-and-deletion) — export, back up,
   restore, and delete local data; remove provider credentials
 - [CLI and data operations](operations.md#daily-schedule) — install or remove the optional
-  six-hour refresh schedule
+  daily refresh schedule
 
 ## Understand results
 

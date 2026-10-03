@@ -6,6 +6,9 @@ Use the CLI to complete setup before connecting an MCP client. The local stdio s
 music-friend-mcp
 ```
 
+After upgrading Music Friend, start a fresh client conversation or session so the client restarts
+this server and discovers its current tool schemas. See [install and updates](install.md).
+
 MCP handles local music, watchlist, inbox, and listening-history requests. It does not accept or
 manage credentials, schedules, imports, restores, backups, or full-data deletion. The
 encrypted-vault fallback is interactive CLI only; the current stdio MCP server requires an
@@ -231,3 +234,10 @@ not contain observed listening duration, skip state, or completion. `play_count`
 plays, including when `candidate_overlap_count` is zero. Exact timestamp/track matches are only
 candidate correspondences, and ambiguous archive multiplicity is reported separately. API-only
 artist and track rankings count observations and never feed affinity or preference.
+
+For a recent-listening question, ask the assistant to call `music_status`, refresh with
+`kind: "history"` when the last successful check is stale, and then call
+`summarize_listening_history` for the requested UTC range. The status coverage facts describe what
+was observed; they do not prove that Spotify returned every play. API observation counts are plays
+seen by the API, not minutes listened. Duration totals come only from imported archive rows where
+Spotify supplied a duration.
