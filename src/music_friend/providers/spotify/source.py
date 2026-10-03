@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
+from urllib.parse import parse_qsl, urlsplit
 
 from music_friend.domain import (
     Artist,
@@ -282,11 +283,12 @@ class SpotifySource:
             raise ValueError("after_ms must be a non-negative integer or None")
         if after_ms is not None and cursor is not None:
             raise ValueError("after_ms and cursor are mutually exclusive")
-        cursor_after = _decode_cursor(cursor, "recent_plays", "after")
+        cursor_field, cursor_value = _decode_recent_cursor(cursor)
         query: tuple[tuple[str, str], ...] = (("limit", "50"),)
-        after = str(after_ms) if after_ms is not None else cursor_after
-        if after is not None:
-            query += (("after", after),)
+        requested_field = "after" if after_ms is not None else cursor_field
+        requested_value = str(after_ms) if after_ms is not None else cursor_value
+        if requested_field is not None and requested_value is not None:
+            query += ((requested_field, requested_value),)
         deadline = self._call_deadline()
         self._authorize(Capability.RECENT_PLAYS)
         data = self._execute(SpotifyOperation.RECENTLY_PLAYED, query=query, deadline=deadline)
@@ -294,21 +296,24 @@ class SpotifySource:
             raw_items = _items(data, maximum=50)
             next_value = _nullable_text(data.get("next"), "recent plays next")
             cursors = _object(data.get("cursors"), "recent plays cursors")
-            after_value = cursors.get("after")
-            if after_value is not None and (
-                type(after_value) is not str or not after_value.isdigit()
-            ):
-                raise _SourceFailure("recent plays cursor must be numeric")
+            for field in ("after", "before"):
+                value = cursors.get(field)
+                if value is not None and (type(value) is not str or not value.isdigit()):
+                    raise _SourceFailure("recent plays cursor must be numeric")
             normalized = tuple(_recent_play(item) for item in raw_items)
             next_cursor = None
             if next_value is not None:
-                if (
-                    not normalized
-                    or after_value is None
-                    or (after is not None and int(after_value) <= int(after))
+                next_field, next_value = _recent_next(next_value, cursors)
+                if not normalized or (
+                    requested_field == next_field
+                    and requested_value is not None
+                    and (
+                        (next_field == "after" and int(next_value) <= int(requested_value))
+                        or (next_field == "before" and int(next_value) >= int(requested_value))
+                    )
                 ):
                     raise _SourceFailure("recent plays continuation cannot advance")
-                next_cursor = _encode_cursor("recent_plays", "after", after_value)
+                next_cursor = _encode_cursor("recent_plays", next_field, next_value)
             return Page(normalized, next_cursor)
         except _SourceFailure as error:
             raise InvalidSourceResponseError() from error
@@ -439,6 +444,43 @@ def _encode_cursor(operation: str, field: str, value: str | int) -> str:
     return encoded
 
 
+def _decode_recent_cursor(cursor: str | None) -> tuple[str | None, str | None]:
+    if cursor is None:
+        return None, None
+    for field in ("after", "before"):
+        try:
+            value = _decode_cursor(cursor, "recent_plays", field)
+        except InvalidSourceResponseError:
+            continue
+        return field, value
+    raise InvalidSourceResponseError()
+
+
+def _recent_next(next_url: str, cursors: Mapping[str, object]) -> tuple[str, str]:
+    parsed = urlsplit(next_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.spotify.com"
+        or parsed.path != "/v1/me/player/recently-played"
+        or parsed.fragment
+    ):
+        raise _SourceFailure("recent plays continuation destination is invalid")
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    if len(pairs) != 2 or ("limit", "50") not in pairs:
+        raise _SourceFailure("recent plays continuation query is invalid")
+    continuation = [(field, value) for field, value in pairs if field in {"after", "before"}]
+    if len(continuation) != 1 or set(field for field, _value in pairs) - {
+        "limit",
+        "after",
+        "before",
+    }:
+        raise _SourceFailure("recent plays continuation query is invalid")
+    field, value = continuation[0]
+    if not value.isdigit() or cursors.get(field) != value:
+        raise _SourceFailure("recent plays continuation cursor does not match")
+    return field, value
+
+
 def _decode_cursor(cursor: str | None, operation: str, field: str) -> str | None:
     if cursor is None:
         return None
@@ -454,7 +496,7 @@ def _decode_cursor(cursor: str | None, operation: str, field: str) -> str | None
         if value["v"] != 1 or value["op"] != operation:
             raise _SourceFailure("cursor binding is invalid")
         cursor_value = value[field]
-        if field == "after" and operation == "recent_plays":
+        if field in {"after", "before"} and operation == "recent_plays":
             if type(cursor_value) is not str or not cursor_value.isdigit():
                 raise _SourceFailure("cursor after must be numeric")
             result = cursor_value
