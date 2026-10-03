@@ -1,7 +1,9 @@
 # Install
 
 Music Friend requires Python 3.10 or newer. It runs on your computer and creates no account,
-schedule, or network listener during installation.
+schedule, or network listener during installation. The shortest current installation uses
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/) to keep Music Friend and its
+dependencies in an isolated tool environment.
 
 Music Friend supports macOS and Linux. Windows is not a supported runtime.
 
@@ -18,22 +20,43 @@ Gather these once so setup never stops halfway:
 - **Optional: a Ticketmaster Discovery API key** and an event area (country code, postal code, and
   radius) if you want concert discovery.
 
-After installing, `music-friend doctor` checks all of these in one local report and names the fix
-for anything missing. It never contacts a provider or prints a credential value.
+## Install the current version
+
+Music Friend is not published on PyPI. The v0.4.0 GitHub release predates ongoing listening-history
+sync, so install the current GitHub source to use that feature:
+
+```bash
+uv tool install --from git+https://github.com/Galactic-Luddite/music-friend.git music-friend
+music-friend version
+```
+
+To update an existing source installation:
+
+```bash
+uv tool upgrade --reinstall music-friend
+```
+
+After an upgrade, restart the Music Friend MCP server by starting a fresh client conversation or
+session so the client discovers the new binary and tool schemas. Existing Spotify connections must
+also reconnect once when a new release adds a required Spotify permission.
+
+After installing, `music-friend doctor` checks the local prerequisites in one report and names the
+fix for anything missing. Before setup it exits with status 5 because required configuration is
+still missing. It never contacts a provider or prints a credential value.
 
 ## Intel macOS
 
-No PyPI wheel is available for the Intel macOS build of the required `cryptography` 50
-dependency. Build it from source before installing the release file. This needs Xcode command-line
-tools, Rust 1.83 or newer, and a non-Apple OpenSSL; the OpenSSL supplied with macOS is unsupported
-by cryptography.
+No PyPI wheel is available for the Intel macOS build of the required `cryptography` 50 dependency. Install
+Xcode command-line tools, Rust 1.83 or newer, and a non-Apple OpenSSL before installing Music
+Friend; the OpenSSL supplied with macOS is unsupported by cryptography.
 
 ```bash
 xcode-select --install
 brew install openssl@3 rust
 rustc --version
 OPENSSL_DIR="$(brew --prefix openssl@3)" \
-  python -m pip install --no-binary cryptography music_friend-0.4.0-py3-none-any.whl
+  uv tool install --no-binary-package cryptography \
+  --from git+https://github.com/Galactic-Luddite/music-friend.git music-friend
 ```
 
 Confirm that `rustc --version` reports Rust 1.83 or newer. The command above dynamically links
@@ -41,10 +64,9 @@ the Homebrew OpenSSL. To build cryptography statically instead, use this install
 
 ```bash
 OPENSSL_STATIC=1 \
-  python -m pip install --no-binary cryptography music_friend-0.4.0-py3-none-any.whl
+  uv tool install --no-binary-package cryptography \
+  --from git+https://github.com/Galactic-Luddite/music-friend.git music-friend
 ```
-
-On platforms with a supported cryptography wheel, use the regular release-file installation below.
 
 ## Optional Agent Skill
 

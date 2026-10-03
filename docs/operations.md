@@ -227,6 +227,9 @@ operations for those records.
 ## Import Spotify listening history
 
 Request your extended streaming history from Spotify's privacy settings and wait for the ZIP.
+This is an optional one-time backfill path. It complements ongoing `refresh history` observations;
+it is not required to begin syncing recent listening. Import a newly requested archive later to
+fill older periods or gaps that Spotify's recent-play API no longer returns.
 Validate it first, then import:
 
 ```bash
@@ -329,7 +332,9 @@ same named schedule. Remove it when it is no longer wanted.
 Pass `--kind history` when the daily job should fetch only recent listening observations. That
 job uses the same refresh lock, 20-hour freshness check, deadline, pacing, and durable cooldown
 state as other refreshes, while making no catalog, release, event, repair, or provider-health
-request. Omitting `--kind` keeps the existing `refresh all` schedule.
+request. The schedule runs every 1,440 minutes. That cadence reduces gaps but cannot guarantee
+none between polls because Spotify's retention window is undocumented and each check is bounded.
+Omitting `--kind` keeps the existing `refresh all` schedule.
 
 ## Optional skill
 
@@ -337,10 +342,11 @@ request. Omitting `--kind` keeps the existing `refresh all` schedule.
 See the [install guide](install.md#optional-agent-skill) for destinations and replacement rules.
 `refresh history` checks only Spotify recently played history. `refresh catalog` and `refresh all`
 also check it before catalog work. The history component remains fresh for 20 hours after a
-terminal check and makes no request
-while fresh, disconnected from the required permission, cooling down, or quota exhausted. `--force`
-does not bypass history freshness. An eligible check accepts at most two 50-item pages and reports
+terminal check and makes no request while fresh, disconnected from the required permission,
+cooling down, or quota exhausted. `--force` still honors this 20-hour history freshness window.
+An eligible check accepts at most two 50-item pages and reports
 its own outcome, operation-attempt/page counts, observations, and coverage facts in JSON. An
 operation attempt counts a call to the recently-played operation; local preflight checks and any
 separate OAuth token activity are outside that count. Partial checks keep
 accepted observations and an incomplete interval without advancing the last successful check.
+The recently-played operation itself is never retried after an HTTP or transport failure.

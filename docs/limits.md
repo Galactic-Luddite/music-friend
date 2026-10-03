@@ -126,9 +126,15 @@ After creating a test provider application and using a non-sensitive test accoun
 
 Do not attach provider responses, authorization redirects, exports, databases, or diagnostics that
 contain personal data to an issue or support request.
+
+## Recently played history
+
 Recently played synchronization shares that deadline, Spotify pacing, and durable cooldown. It
 makes at most two actual endpoint attempts and accepts at most 100 observations per invocation;
 401, 403, 429, transport failures, and 5xx responses are not replayed for this operation. Provider
 retention and ordering are undocumented, so terminal success establishes freshness of the check,
-not complete historical coverage. Partial progress may abandon unseen older observations and is
-retained as an incomplete interval for later local reporting.
+not complete historical coverage. A first successful check is only a snapshot of what Spotify
+returns then. Daily history-only scheduling reduces gaps but cannot guarantee none. Partial
+progress may abandon unseen older observations and is retained as an incomplete interval for later
+local reporting. Importing a newly requested extended-history archive is the backfill path for
+older periods or known gaps.

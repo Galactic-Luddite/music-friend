@@ -40,10 +40,18 @@ music-friend diagnostics --json
 See [provider limits](limits.md) for how refreshes record cooldowns and resume later.
 
 If `history.outcome` is `permission_required`, reconnect Spotify explicitly to grant the recently
-played permission. `cooling_down`, `quota_exhausted`, `bounded_partial`, and `failed` remain visible
+played permission. This is required once for connections created before recent-history sync was
+added. `cooling_down`, `quota_exhausted`, `bounded_partial`, and `failed` remain visible
 independently of the overall refresh result. Local status and summaries never test the connection
 or refresh a token. Backup and restore preserve API observations, sync state, and incomplete
 intervals; `data purge spotify` removes them, while disconnecting Spotify retains local evidence.
+
+## Recent history has gaps
+
+A successful refresh means Music Friend completed its bounded check; it does not mean Spotify
+returned a complete listening history. Keep the daily history-only schedule installed to reduce
+future gaps. For older or missing periods, request a new Spotify extended streaming-history archive
+and use the validate-then-import flow in [CLI and data operations](operations.md#import-spotify-listening-history).
 
 ## Event discovery is unavailable
 

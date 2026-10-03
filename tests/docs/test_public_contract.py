@@ -98,13 +98,34 @@ def test_readme_leads_with_outcomes_flow_first_success_and_privacy() -> None:
         assert outcome.lower() in first_section.lower(), outcome
     for heading in (
         "## How it works",
-        "## First success in six commands",
+        "## First recent-listening result",
         "## Follow an artist through the inbox",
-        "## Import and query listening history",
+        "## Backfill older listening history",
         "## Privacy at a glance",
         "## Documentation",
     ):
         assert heading in readme, heading
+    first_result = readme.split("## First recent-listening result", 1)[1].split("\n## ", 1)[0]
+    for command in (
+        "music-friend setup --spotify-client-id YOUR_CLIENT_ID --json",
+        "music-friend connect spotify",
+        "music-friend refresh history --json",
+    ):
+        assert command in first_result
+    assert "optional daily sync" in first_result
+    quickstart = (ROOT / "docs" / "quickstart.md").read_text(encoding="utf-8")
+    normalized_quickstart = re.sub(r"\s+", " ", quickstart)
+    for first_success_fact in (
+        "uv tool install --from git+https://github.com/Galactic-Luddite/music-friend.git music-friend",
+        "music-friend setup --spotify-client-id YOUR_CLIENT_ID --json",
+        "http://127.0.0.1/callback",
+        "user-read-recently-played",
+        "starting snapshot rather than a guaranteed complete history",
+        "optionally import",
+        "music-friend schedule install --kind history",
+        "Daily polling reduces gaps but cannot guarantee none",
+    ):
+        assert first_success_fact in normalized_quickstart
     assert "never writes to your Spotify or Ticketmaster account" in readme
     assert "ticket" in readme.lower() and "purchasing" in readme.lower()
     for guide in (
@@ -135,8 +156,9 @@ def test_documentation_index_routes_by_goal() -> None:
     for goal in (
         "## Get started",
         "## Use an AI client",
-        "## Import my history",
+        "## Use my listening history",
         "## Manage or erase data",
+        "## Understand results",
         "## Troubleshoot",
         "## Contribute",
     ):
@@ -361,7 +383,7 @@ def test_intel_macos_install_guidance_covers_the_required_source_build_path() ->
     assert "brew install openssl@3 rust" in text
     assert 'OPENSSL_DIR="$(brew --prefix openssl@3)"' in text
     assert "OPENSSL_STATIC=1" in text
-    assert "--no-binary cryptography" in text
+    assert "--no-binary-package cryptography" in text
 
 
 def test_documented_music_friend_commands_match_the_local_command_surface() -> None:
@@ -382,6 +404,7 @@ def test_documented_music_friend_commands_match_the_local_command_surface() -> N
         "music-friend setup --release-sources musicbrainz",
         "music-friend setup --release-sources spotify",
         "music-friend setup --release-sources musicbrainz,deezer",
+        "music-friend setup --spotify-client-id YOUR_CLIENT_ID --json",
         "music-friend setup --spotify-client-id <id> --json",
         "music-friend setup --clear-spotify-client-id",
         "music-friend connect spotify",
