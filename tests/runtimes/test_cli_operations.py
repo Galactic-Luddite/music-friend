@@ -605,7 +605,7 @@ def test_schedule_commands_use_daily_absolute_python_without_opening_catalog_or_
     }
 
 
-def test_schedule_install_history_uses_daily_history_only_refresh(
+def test_schedule_install_history_uses_six_hour_history_only_refresh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: dict[str, object] = {}
@@ -621,7 +621,7 @@ def test_schedule_install_history_uses_daily_history_only_refresh(
 
     assert result == 0
     assert stderr == ""
-    assert captured["interval_minutes"] == 1440
+    assert captured["interval_minutes"] == 360
     command = captured["command"]
     assert isinstance(command, tuple)
     assert command[-3:] == ("refresh", "history", "--json")

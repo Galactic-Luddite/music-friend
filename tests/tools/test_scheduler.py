@@ -289,6 +289,125 @@ def test_schedule_status_queries_the_native_job_only_when_installed(
     assert queries[0][: len(expected)] == expected
 
 
+@pytest.mark.parametrize(
+    "platform",
+    (SchedulePlatform.MACOS, SchedulePlatform.WINDOWS, SchedulePlatform.LINUX),
+)
+def test_schedule_status_reports_the_installed_interval(
+    tmp_path: Path, platform: SchedulePlatform
+) -> None:
+    install_schedule(
+        platform,
+        user_root=tmp_path,
+        command=("python", "-m", "music_friend.runtimes.cli", "refresh", "history", "--json"),
+        interval_minutes=360,
+        runner=lambda _arguments: None,
+        native_store_factory=lambda: _EligibleStore(),
+    )
+
+    status = schedule_status(
+        platform,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda _arguments: True,
+    )
+
+    assert status == ScheduleStatus(True, True, platform, 360)
+
+
+@pytest.mark.parametrize(
+    ("platform", "invalid_content"),
+    (
+        (
+            SchedulePlatform.MACOS,
+            "<key>StartInterval</key><integer>0</integer>",
+        ),
+        (
+            SchedulePlatform.WINDOWS,
+            "<Interval>PT10081M</Interval>",
+        ),
+        (
+            SchedulePlatform.LINUX,
+            "OnUnitInactiveSec=unknown\n",
+        ),
+    ),
+)
+def test_schedule_status_falls_back_when_installed_interval_is_invalid(
+    tmp_path: Path, platform: SchedulePlatform, invalid_content: str
+) -> None:
+    rendered = render_schedule(
+        platform,
+        command=("python", "-m", "music_friend.runtimes.cli", "refresh", "history"),
+        interval_minutes=360,
+    )
+    primary = tmp_path / rendered.relative_path
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text(invalid_content, encoding="utf-8")
+    if rendered.companion_relative_path is not None:
+        companion = tmp_path / rendered.companion_relative_path
+        companion.write_text(rendered.companion_content or "", encoding="utf-8")
+
+    status = schedule_status(
+        platform,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda _arguments: True,
+    )
+
+    assert status == ScheduleStatus(True, True, platform, 1440)
+
+
+def test_schedule_status_falls_back_when_installed_definition_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    install_schedule(
+        SchedulePlatform.MACOS,
+        user_root=tmp_path,
+        command=("python", "-m", "music_friend.runtimes.cli", "refresh", "history"),
+        interval_minutes=360,
+        runner=lambda _arguments: None,
+        native_store_factory=lambda: _EligibleStore(),
+    )
+    original_read_text = Path.read_text
+
+    def unreadable(path: Path, *args: object, **kwargs: object) -> str:
+        if path.name == "com.musicfriend.refresh.plist":
+            raise OSError("synthetic unreadable definition")
+        return original_read_text(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+
+    status = schedule_status(
+        SchedulePlatform.MACOS,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda _arguments: True,
+    )
+
+    assert status == ScheduleStatus(True, True, SchedulePlatform.MACOS, 1440)
+
+
+def test_schedule_status_falls_back_when_installed_definition_is_not_utf8(
+    tmp_path: Path,
+) -> None:
+    rendered = render_schedule(
+        SchedulePlatform.WINDOWS,
+        command=("python", "-m", "music_friend.runtimes.cli", "refresh", "history"),
+        interval_minutes=360,
+    )
+    primary = tmp_path / rendered.relative_path
+    primary.write_bytes(b"\xff\xfe\x00")
+
+    status = schedule_status(
+        SchedulePlatform.WINDOWS,
+        user_root=tmp_path,
+        interval_minutes=1440,
+        runner=lambda _arguments: True,
+    )
+
+    assert status == ScheduleStatus(True, True, SchedulePlatform.WINDOWS, 1440)
+
+
 def test_schedule_status_requires_a_path_user_root() -> None:
     with pytest.raises(ValueError, match="user_root must be a Path"):
         schedule_status(  # type: ignore[arg-type]

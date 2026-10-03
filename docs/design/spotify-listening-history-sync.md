@@ -3,6 +3,18 @@
 Status: revised proposal for issue #73 after one adversarial design round. Implementation is not
 included.
 
+## Cadence amendment (2026-10-02)
+
+The approved implementation originally paired a daily history schedule with a 20-hour freshness
+window. The later user-approved operating contract supersedes that cadence: history-only schedules
+run every 360 minutes and terminal success stays fresh for 345 minutes. The 15-minute margin is
+larger than the ten-minute refresh deadline, so a check that finishes ten minutes after launch is
+eligible at the next scheduled launch. Other schedule kinds retain their 1,440-minute cadence.
+The request ceiling, no-retry behavior, lock, deadline, quota/cooldown handling, schema version,
+unknown-duration reporting, and incomplete-gap guarantees remain unchanged. Current-behavior
+sections below reflect this amendment; historical discussion of the earlier decision is labeled
+as superseded where it appears.
+
 ## 1. Problem
 
 The one-time Spotify extended-history archive import populates `listening_history`, but later
@@ -76,15 +88,16 @@ The sync is an overlap-first incremental poll:
    report source-specific counts, possible duplicate observations, and unknown or incomplete
    intervals rather than inventing a cross-source play identity.
 
-Use the existing 20-hour freshness convention within the 24-hour scheduled refresh. The cadence
-is defined by `DAILY_REFRESH_MINUTES = 1440` in
+Amend the original daily design to use a 5-hour-45-minute freshness window within a six-hour
+history-only schedule. The cadence and freshness are defined by `HISTORY_REFRESH_MINUTES = 360`
+and `HISTORY_FRESHNESS_MINUTES = 345` in
 [domain models](../../src/music_friend/domain/models.py) and passed by the
 [CLI schedule installer](../../src/music_friend/runtimes/cli.py); the freshness convention is
 documented in [operations](../operations.md). A terminal successful check makes the component
 fresh only while its timestamp is within that window and there is no unresolved later attempt.
 Failed, partial, or interrupted checks leave a durable repair-needed flag, so a repair run remains
 eligible subject to the same cooldown, request budget, and deadline. The schedule normally supplies
-one check per day; freshness also suppresses redundant manual checks. It is not a separate daily
+one check every six hours; freshness also suppresses redundant manual checks. It is not a separate
 quota guarantee.
 
 The history component may run during `refresh catalog` and `refresh all` because both already
@@ -95,7 +108,7 @@ reconnection is introduced.
 
 | Trigger/state | Request | Maximum | Boundary behavior | Cooldown and stopping behavior |
 | --- | --- | --- | --- | --- |
-| Scheduled/manual refresh; last terminal successful history check is under 20 hours old and no later attempt needs repair | None | 0 | Preserve polling boundary. | Stop locally as `skipped_fresh`. |
+| Scheduled/manual refresh; last terminal successful history check is under 5 hours 45 minutes old and no later attempt needs repair | None | 0 | Preserve polling boundary. | Stop locally as `skipped_fresh`. |
 | Permission absent | None | 0 | Preserve checkpoint. | Stop locally as `permission_required`; reconnect is an explicit CLI action. |
 | Persisted Spotify cooldown or quota exhaustion | None | 0 | Preserve checkpoint. | Stop locally as `cooling_down` or `quota_exhausted`; do not probe. |
 | First eligible check | `GET /v1/me/player/recently-played?limit=50` | 1 page normally; 2 endpoint attempts and 100 accepted items hard maximum | Commit accepted observations and their greatest timestamp. A continuation is invocation-local only; initial retention remains unknown. | Stop on empty page, missing next cursor, repeated/non-advancing cursor, attempt/item budget, 429, invalid response, or shared refresh deadline. |
@@ -197,7 +210,7 @@ observations, while `last_successful_check_at` controls freshness. Neither estab
 coverage. Empty terminal success advances check freshness but not the polling boundary. A partial
 or failed attempt does not advance successful-check time, even when earlier accepted pages have
 advanced the polling boundary. `needs_repair` makes a later failed/partial attempt invalidate
-freshness even if a previous successful check is still under 20 hours old. A process exit while
+freshness even if a previous successful check is still under 5 hours 45 minutes old. A process exit while
 `running` leaves that flag set; local skip states do not clear it.
 
 For each page, atomically insert idempotent observations, advance the boundary to the greater of
@@ -260,13 +273,13 @@ candidate still does not make a combined total a unique play count.
 - Update `docs/operations.md`, `docs/mcp.md`, `docs/limits.md`, `docs/setup.md`, and
   `docs/troubleshooting.md` with consent, status semantics, unknown-duration behavior, request
   budget, backup/restore/delete coverage, and safe diagnostics. Use synthetic values only.
-  During implementation, correct the stale six-hour refresh description in `docs/operations.md`
-  to match its documented freshness window and the CLI's daily cadence.
+  During implementation, keep the six-hour history refresh description aligned with its
+  5-hour-45-minute freshness window and the CLI installer.
 
 ## 4. Data Flow
 
 ```text
-daily/manual refresh
+six-hour/manual refresh
         |
         v
 local freshness + permission + source_limits checks
@@ -307,7 +320,7 @@ These criteria apply to the future implementation. Create
   `tests/providers/spotify/test_recent_plays.py` and `tests/providers/spotify/test_scopes.py`.
 - [ ] History sync makes zero provider calls when fresh, missing permission, cooling down, or quota
   exhausted; freshness uses a terminal successful check, no repair-needed attempt, and the existing
-  20-hour window. Otherwise it makes at most two actual 50-item endpoint attempts, shares the
+  5-hour-45-minute window. Otherwise it makes at most two actual 50-item endpoint attempts, shares the
   existing refresh deadline and pacing state, honors 429 cooldown across runs, and stops on empty, repeated cursor,
   non-advancing cursor, budget, or deadline — verified by:
   `tests/tools/test_history_sync.py` with a request-counting fake source.
@@ -371,7 +384,7 @@ needed to accept the implementation.
 | Repeated same track | Distinct timestamps remain distinct; exact same API key is idempotent; identical archive occurrences remain representable. |
 | Timestamp boundary | Identity preserves supplied precision; millisecond floor minus one includes the committed boundary observation under a fixture with the documented exclusive bound. This does not prove provider retention or ordering. |
 | Missing permission | Zero requests, checkpoint unchanged, explicit reconnect-required status. |
-| Freshness and cadence | A 24-hour schedule uses the 20-hour terminal-success freshness window; a fresh manual check makes zero calls. A later partial/failure/interruption invalidates freshness even if the older successful timestamp is still recent; repair remains subject to shared pacing. |
+| Freshness and cadence | A six-hour history schedule uses the 5-hour-45-minute terminal-success freshness window; a check that succeeds ten minutes after launch is eligible at the next launch. A fresh manual check makes zero calls. A later partial/failure/interruption invalidates freshness even if the older successful timestamp is still recent; repair remains subject to shared pacing. |
 | Empty response | Successful-check time advances, polling timestamp does not; `terminal_empty` does not distinguish no new plays from expired provider history. |
 | 429 across runs | Existing `Retry-After` state persists; the next run before retry time makes zero requests. |
 | Partial second page, invalid page, or deadline | Accepted observations, monotonic polling boundary, and incomplete interval commit together; successful-check time stays unchanged. Invalid pages contribute nothing; no cursor is persisted. |
@@ -421,14 +434,14 @@ decomposition is required by this design.
 ## 7. Risks
 
 1. **Irrecoverable gaps:** a missed polling interval may exceed undocumented provider retention.
-   Mitigation: bounded daily polling and explicit incomplete intervals. Budget exhaustion and
+   Mitigation: bounded six-hour polling and explicit incomplete intervals. Budget exhaustion and
    restart may also abandon older observations; a later archive is the only proposed historical
    repair source, and merely importing its first/last timestamps does not prove complete coverage.
 2. **False deduplication at provider timestamp precision:** identical API keys may hide distinct
    plays. Mitigation: retain distinct timestamps, preserve archive occurrence identities, and name
    the API-only ambiguity in coverage rather than inventing identity.
 3. **Rate-limit contention:** history calls share Spotify's app quota with catalog work.
-   Mitigation: 20-hour terminal-success freshness gating, two-attempt hard ceiling, existing
+   Mitigation: 5-hour-45-minute terminal-success freshness gating, two-attempt hard ceiling, existing
    adaptive pacing/cooldowns, and no probes or token/catalog calls from local reads.
 4. **Cross-source ambiguity:** archive and API timestamps may describe different instants or
    precision, hiding or creating apparent overlaps. Mitigation: separate stores, deterministic
@@ -467,7 +480,7 @@ One independent adversarial round reviewed the original proposal. Its verdict wa
 | Unverified `ts`/`played_at` equivalence | Accurate listening answers | Concede; equality is candidate evidence only. Combined observations can duplicate real plays even when exact candidate count is zero. |
 | Cross-run cursor stability and restart starvation | Useful bounded ongoing sync | Concede cursor risk; use an invocation-local cursor. Amend the restart counter-shape with atomic polling-boundary progress and durable incomplete intervals. |
 | Coverage wording | Honest local summaries | Concede; separate attempt facts from interval completeness. Neither empty success nor API timestamp advancement proves complete coverage. |
-| Daily cadence and 12-hour freshness | Verified scheduling and request minimization | Defend daily cadence using the domain constant and CLI installer; replace 12 hours with the existing 20-hour freshness convention. |
+| Daily cadence and 12-hour freshness | Verified scheduling and request minimization | Superseded by the approved six-hour history cadence and 5-hour-45-minute freshness constants; other schedule kinds remain daily. |
 | Single-request live validation | Source discipline | Concede; permission/envelope confirmation only. Remove timestamp-equivalence and lossless-resume dependencies rather than treating one request as proof. |
 | Test-file existence and fit | Executable implementation AC | Existing cited files are retained where relevant; use a dedicated proposed `tests/store/test_recent_play_observations.py` for new store and checkpoint assertions. |
 

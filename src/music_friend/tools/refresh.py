@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from music_friend.configuration import LocalConfig
 from music_friend.domain import (
+    HISTORY_FRESHNESS_MINUTES,
     MAX_SOURCE_WINDOW_CALLS,
     MIN_SOURCE_WINDOW_CALLS,
     Artist,
@@ -294,7 +295,8 @@ def sync_recent_history(
         state is not None
         and not state.needs_repair
         and state.last_successful_check_at is not None
-        and checked_at - state.last_successful_check_at < timedelta(hours=20)
+        and checked_at - state.last_successful_check_at
+        < timedelta(minutes=HISTORY_FRESHNESS_MINUTES)
     ):
         return HistoryRefreshResult(
             "skipped_fresh", "fresh", 0, 0, 0, True, state.interval_completeness

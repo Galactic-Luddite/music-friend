@@ -20,7 +20,7 @@ credentials live in your operating-system credential store.
 Music Friend is a power-user tool. Before it is useful you need:
 
 - **A computer that stays yours.** Everything runs locally: the `music-friend-mcp` server your AI
-  client launches, the local catalog, and (if you opt in) a once-a-day refresh job. Nothing is
+  client launches, the local catalog, and (if you opt in) a scheduled refresh job. Nothing is
   hosted; there is no Music Friend account or cloud service.
 - **An AI client that speaks MCP**, such as Claude Code, Claude Desktop, or Codex. The optional
   packaged skill teaches the assistant how to use the tools well (see [install](docs/install.md)).
@@ -32,7 +32,7 @@ Music Friend is a power-user tool. Before it is useful you need:
   Setup can be **fully automated** with command-line flags (see [agent-driven setup](docs/operations.md#agent-driven-setup)).
 
 After that, your assistant does the work. Refreshes run when the assistant (or you) asks. For recent
-listening, optionally install a daily per-user job with
+listening, optionally install a per-user job that runs every six hours with
 `music-friend schedule install --kind history`; the [operations guide](docs/operations.md#daily-schedule)
 covers broader refresh schedules.
 
@@ -87,7 +87,7 @@ music-friend refresh history --json
 ```
 
 The [quickstart](docs/quickstart.md) covers installation, the required Spotify callback and
-permission, optional daily sync, and how to check freshness. Catalog, releases, events, archive
+permission, optional six-hour sync, and how to check freshness. Catalog, releases, events, archive
 backfill, and MCP client setup are optional follow-on paths.
 
 ## Follow an artist through the inbox

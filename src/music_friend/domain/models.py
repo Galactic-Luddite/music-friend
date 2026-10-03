@@ -725,6 +725,12 @@ MIN_SOURCE_WINDOW_CALLS = 1
 #: below the schedule interval, even when a scheduled run starts slightly early.
 DAILY_REFRESH_MINUTES = 1440
 
+#: History polling runs four times per day. A terminal check stays fresh for 15
+#: minutes less than that cadence so a run that consumes the ten-minute refresh
+#: deadline is still eligible at the next scheduled launch.
+HISTORY_REFRESH_MINUTES = 360
+HISTORY_FRESHNESS_MINUTES = 345
+
 
 @dataclass(frozen=True, slots=True)
 class SourceLimitObservation:

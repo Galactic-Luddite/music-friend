@@ -25,8 +25,8 @@ Pick the goal that matches what you want to do.
 
 - [CLI and data operations](operations.md#export-backup-restore-and-deletion) — export, back up,
   restore, and delete local data; remove provider credentials
-- [CLI and data operations](operations.md#daily-schedule) — install or remove the optional
-  daily refresh schedule
+- [CLI and data operations](operations.md#daily-schedule) — install or remove an optional refresh
+  schedule; history-only jobs run every six hours and other kinds run daily
 
 ## Understand results
 

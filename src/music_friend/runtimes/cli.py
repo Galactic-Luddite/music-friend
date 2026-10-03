@@ -29,6 +29,7 @@ from music_friend.configuration import (
 )
 from music_friend.domain import (
     DAILY_REFRESH_MINUTES,
+    HISTORY_REFRESH_MINUTES,
     InboxEntry,
     InboxState,
     RefreshKind,
@@ -96,6 +97,7 @@ _USAGE = (
 #: music_friend.domain.DAILY_REFRESH_MINUTES so the freshness TTL always stays well below
 #: this interval.
 _DAILY_REFRESH_MINUTES = DAILY_REFRESH_MINUTES
+_HISTORY_REFRESH_MINUTES = HISTORY_REFRESH_MINUTES
 
 
 class _ConnectionFailed(RuntimeError):
@@ -1304,13 +1306,16 @@ def _schedule_command(
     platform = _schedule_platform()
     root = Path.home()
     command = _scheduled_refresh_command(schedule_kind)
+    interval_minutes = (
+        _HISTORY_REFRESH_MINUTES if schedule_kind is RefreshKind.HISTORY else _DAILY_REFRESH_MINUTES
+    )
     try:
         if action == "install":
             install_schedule(
                 platform,
                 user_root=root,
                 command=command,
-                interval_minutes=_DAILY_REFRESH_MINUTES,
+                interval_minutes=interval_minutes,
             )
             return _emit({"status": "installed"}, structured, stdout, text="Schedule: installed.")
         if action == "remove":

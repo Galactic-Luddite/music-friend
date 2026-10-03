@@ -112,7 +112,7 @@ def test_readme_leads_with_outcomes_flow_first_success_and_privacy() -> None:
         "music-friend refresh history --json",
     ):
         assert command in first_result
-    assert "optional daily sync" in first_result
+    assert "optional six-hour sync" in first_result
     quickstart = (ROOT / "docs" / "quickstart.md").read_text(encoding="utf-8")
     normalized_quickstart = re.sub(r"\s+", " ", quickstart)
     for first_success_fact in (
@@ -123,7 +123,7 @@ def test_readme_leads_with_outcomes_flow_first_success_and_privacy() -> None:
         "starting snapshot rather than a guaranteed complete history",
         "optionally import",
         "music-friend schedule install --kind history",
-        "Daily polling reduces gaps but cannot guarantee none",
+        "Six-hour polling reduces gaps but cannot guarantee none",
     ):
         assert first_success_fact in normalized_quickstart
     assert "never writes to your Spotify or Ticketmaster account" in readme

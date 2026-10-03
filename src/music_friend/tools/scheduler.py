@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import xml.sax.saxutils
@@ -148,7 +149,32 @@ def schedule_status(
     installed = all(path.is_file() for path in paths)
     execute = _default_status_runner if runner is None else runner
     active = installed and execute(_status_command(platform))
-    return ScheduleStatus(installed, active, platform, interval_minutes)
+    installed_interval = (
+        _read_interval_minutes(platform, paths[0], interval_minutes)
+        if installed
+        else interval_minutes
+    )
+    return ScheduleStatus(installed, active, platform, installed_interval)
+
+
+def _read_interval_minutes(platform: SchedulePlatform, definition: Path, fallback: int) -> int:
+    """Read the cadence from a definition rendered by this module."""
+    try:
+        content = definition.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return fallback
+    pattern = {
+        SchedulePlatform.MACOS: r"<key>StartInterval</key><integer>(\d+)</integer>",
+        SchedulePlatform.WINDOWS: r"<Interval>PT(\d+)M</Interval>",
+        SchedulePlatform.LINUX: r"^OnUnitInactiveSec=(\d+)min$",
+    }[platform]
+    match = re.search(pattern, content, flags=re.MULTILINE)
+    if match is None:
+        return fallback
+    minutes = int(match.group(1))
+    if platform is SchedulePlatform.MACOS:
+        minutes //= 60
+    return minutes if 60 <= minutes <= 10_080 else fallback
 
 
 def _validate(platform: SchedulePlatform, command: tuple[str, ...], interval_minutes: int) -> None:
